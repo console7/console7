@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/console7/console7/keybroker/broker"
@@ -174,7 +175,11 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		Subject:   subject,
 		Persona:   req.Persona,
 		Egress:    interfaces.EgressPolicy{Allowlist: profile.EgressAllowlist},
-		MaxTTL:    profile.MaxTTL,
+		// Cap the sandbox to the time REMAINING until the session deadline, not a fresh full
+		// MaxTTL: identity/SCM minting and early evidence already consumed part of the budget,
+		// so the sandbox (and any injected material) must die with the same absolute deadline
+		// the credentials were capped to, even if teardown is missed.
+		MaxTTL: time.Until(deadline),
 	})
 	if err != nil {
 		// No sandbox to tear down; record the failure against the chain and surface it.
@@ -293,9 +298,13 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		_ = emit(cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
 		return Summary{}, fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
 	}
-	if err := stamp("session-end", string(req.SessionID)); err != nil {
+	// The terminal session-end record has the same cancellation-resilience requirement as the
+	// abort record: teardown already succeeded on cleanupCtx, so a cancelled request must not
+	// drop the close-out evidence. Emit it on cleanupCtx (and count it).
+	if err := emit(cleanupCtx, "session-end", string(req.SessionID)); err != nil {
 		return Summary{}, err
 	}
+	records++
 
 	return Summary{
 		Subject:      subject,
@@ -427,5 +436,21 @@ func VerifyRecordPayload(caRoot ed25519.PublicKey, rec interfaces.EvidenceRecord
 	if sp.Sig.Subject != rec.Subject || sp.Sig.SessionID != rec.SessionID {
 		return errors.New("orchestrator: record lineage columns do not match the certified signature")
 	}
+	// Bind the persona column to the persona CERTIFIED into the NHI ("nhi/<session>/<persona>").
+	// SignSession is a generic signing oracle, so without this a caller holding a live author
+	// NHI could sign an evidence TBS that claims PersonaOperate and have it verify; tying
+	// rec.Persona to the cert's NHI rejects such cross-persona forged attribution.
+	if nhiPersona(sp.Sig.NHI) != string(rec.Persona) {
+		return errors.New("orchestrator: record persona does not match the certified NHI")
+	}
 	return nil
+}
+
+// nhiPersona extracts the persona segment a DevCA-issued NHI certifies — the NHI has the
+// form "nhi/<session>/<persona>", so the persona is the final path segment.
+func nhiPersona(nhi string) string {
+	if i := strings.LastIndex(nhi, "/"); i >= 0 {
+		return nhi[i+1:]
+	}
+	return ""
 }

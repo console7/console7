@@ -28,13 +28,15 @@ func ResolveProfile(ctx context.Context, sor interfaces.PolicySoR, repo interfac
 	if err != nil {
 		return interfaces.SessionProfile{}, err
 	}
-	// Fail closed on an unresolved OR out-of-range target. MostRestrictive canonicalises a
-	// single tier — any unknown or out-of-range value (e.g. a bad registry decode yielding
-	// Tier(99)) collapses to TierUnknown — and the stratum must be within the known S1..S5
-	// band. We refuse to synthesise a permissive profile rather than guess a tier.
-	if interfaces.MostRestrictive(target.Tier) == interfaces.TierUnknown ||
-		target.Stratum < interfaces.Stratum1 || target.Stratum > interfaces.Stratum5 {
-		return interfaces.SessionProfile{}, fmt.Errorf("orchestrator: target %s/%s/%s did not resolve to a known tier × stratum (fail closed)", repo.Host, repo.Owner, repo.Name)
+	// Fail closed on anything outside the single Phase-1 lane. Phase 1 supports EXACTLY
+	// author × Tier-3 × Stratum-1; the full tier × stratum → profile matrix (autonomy
+	// ceilings, the human-gate enforcement, composed egress) is Phase 3. So a target that
+	// resolves to any OTHER coordinate — a known-but-unsupported Tier1/Stratum5 as much as an
+	// unknown or out-of-range one — is refused rather than run under a single-lane envelope it
+	// was not sized for (it would otherwise inherit T3's egress/TTL and an unenforced
+	// human-gate flag).
+	if target.Tier != interfaces.Tier3 || target.Stratum != interfaces.Stratum1 {
+		return interfaces.SessionProfile{}, fmt.Errorf("orchestrator: target %s/%s/%s resolved to tier %d × stratum %d, outside the supported Phase-1 author × T3/S1 lane (fail closed)", repo.Host, repo.Owner, repo.Name, target.Tier, target.Stratum)
 	}
 	return interfaces.SessionProfile{
 		Persona:         persona,
@@ -42,10 +44,10 @@ func ResolveProfile(ctx context.Context, sor interfaces.PolicySoR, repo interfac
 		EgressAllowlist: append([]string(nil), egressAllowlist...),
 		// Phase-1 fixed; the real autonomy-ceiling matrix is Phase 3.
 		AutonomyCeiling: "supervised",
-		// A target more restrictive than T3 owes the human gate; the T3 lane does not
-		// (docs/ROADMAP.md Phase 1). Compared via the restrictiveness ordering, never the
-		// raw Tier int (interfaces.Tier doc).
-		HumanGateRequired: target.Tier.MoreRestrictiveThan(interfaces.Tier3),
+		// The single Phase-1 lane is T3, which does not owe the human gate (docs/ROADMAP.md
+		// Phase 1); the guard above already rejected any more-restrictive target. The
+		// tier × stratum → gate matrix is Phase 3.
+		HumanGateRequired: false,
 		MaxTTL:            maxTTL,
 	}, nil
 }

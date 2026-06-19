@@ -540,8 +540,12 @@ func registry() []check {
 // unknown target would claim knowledge it does not have, certifying a partially-permissive
 // profile). kind is "repo" or "resource" for the message.
 func assertFailClosedTarget(kind string, ts interfaces.TierStratum) error {
-	if interfaces.Tier1.MoreRestrictiveThan(ts.Tier) {
-		return fmt.Errorf("unknown %s resolved to a permissive tier (%d) instead of failing closed", kind, ts.Tier)
+	// The tier must be a KNOWN fail-closed coordinate — TierUnknown or Tier1. This rejects
+	// permissive tiers (Tier2..Tier4) AND out-of-range garbage (e.g. Tier(99)), which would
+	// otherwise rank as "most restrictive" via MoreRestrictiveThan and slip through even
+	// though callers like ResolveProfile reject it — the suite must not certify it either.
+	if ts.Tier != interfaces.TierUnknown && ts.Tier != interfaces.Tier1 {
+		return fmt.Errorf("unknown %s resolved to tier %d, not a known fail-closed coordinate (TierUnknown or Tier1)", kind, ts.Tier)
 	}
 	if ts.Stratum != interfaces.StratumUnknown {
 		return fmt.Errorf("unknown %s resolved to a non-fail-closed stratum (%d); expected StratumUnknown", kind, ts.Stratum)

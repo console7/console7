@@ -272,6 +272,24 @@ func TestResolveProfile_RejectsOutOfRangeCoordinates(t *testing.T) {
 	}
 }
 
+// TestResolveProfile_RejectsNonT3S1Lane: Phase 1 supports exactly author × T3/S1; any other
+// KNOWN coordinate (e.g. Tier1 or Stratum5) fails closed until the policy matrix exists.
+func TestResolveProfile_RejectsNonT3S1Lane(t *testing.T) {
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	for _, ts := range []interfaces.TierStratum{
+		{Tier: interfaces.Tier1, Stratum: interfaces.Stratum1},
+		{Tier: interfaces.Tier3, Stratum: interfaces.Stratum5},
+		{Tier: interfaces.Tier4, Stratum: interfaces.Stratum1},
+	} {
+		if _, err := orchestrator.ResolveProfile(context.Background(), stubSoR{ts}, repo, interfaces.PersonaAuthor, []string{"https://x"}, time.Minute); err == nil {
+			t.Errorf("expected fail-closed outside the T3/S1 lane for %+v", ts)
+		}
+	}
+	if _, err := orchestrator.ResolveProfile(context.Background(), stubSoR{interfaces.TierStratum{Tier: interfaces.Tier3, Stratum: interfaces.Stratum1}}, repo, interfaces.PersonaAuthor, []string{"https://x"}, time.Minute); err != nil {
+		t.Errorf("the supported T3/S1 lane should resolve: %v", err)
+	}
+}
+
 // TestRun_InferenceEndpointOffAllowlistFailsClosed: if the resolved inference endpoint is
 // not on the session's egress allowlist, the boundary is authoritative — the session aborts
 // (and the sandbox is torn down) rather than running against an endpoint the perimeter would

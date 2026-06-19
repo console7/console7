@@ -158,6 +158,11 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 		SessionDeadline: req.SessionDeadline,
 	})
 	if err != nil {
+		// NOTE (residual, tracked for providers/secrets-gcp): the cloud credential minted
+		// just above is not revoked here. In the bench it is ephemeral and capped to
+		// SessionDeadline, so it expires on its own; a real SecretsProvider should revoke it
+		// for clean transactional rollback, which needs a per-credential Revoke on the seam
+		// (RevokeSubject is too broad — it would also shred the user's subscription vault).
 		b.ReleaseSession(req.SessionID)
 		return MintedSession{}, err
 	}
@@ -187,9 +192,12 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 // already released) AND if the session has passed its deadline — so signatures cannot
 // outlive the session even when ReleaseSession is delayed or the call overruns the TTL.
 func (b *Broker) SignSession(ctx context.Context, session interfaces.SessionID, payload []byte) (signing.Signature, error) {
+	// Hold the lock through Sign so a concurrent ReleaseSession cannot revoke the session and
+	// return while this call still produces a signature — release is a HARD revocation
+	// barrier. ed25519 signing is fast, so the critical section stays short.
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	entry, ok := b.signers[session]
-	b.mu.Unlock()
 	if !ok || entry.signer == nil {
 		return signing.Signature{}, fmt.Errorf("broker: no live signer for session %q", session)
 	}
