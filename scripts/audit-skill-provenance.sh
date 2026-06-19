@@ -27,19 +27,26 @@ err() { printf '  ✗ %s\n' "$1"; fail=1; }
 remote_re='(^|[[:space:]"'"'"'])(source|marketplace|plugin|repository|url)[[:space:]]*[:=][[:space:]]*["'"'"']?(https?://|git@|git\+|ssh://|github\.com[:/]|gitlab\.com|bitbucket\.org)'
 clone_re='git[[:space:]]+clone[[:space:]]+(https?://|git@)'
 
-# Artifact set: directory-style SKILL.md, flat skill .md, agents, commands, hooks,
-# and plugin/marketplace manifests if ever added. Portable to bash 3.2 (no mapfile):
-# process substitution keeps the loop in the current shell so counters persist.
+# Scan EVERY file and symlink under .claude/ — skills (directory SKILL.md and
+# flat .md), agents, commands, hooks, settings.json, supporting/helper files, and
+# any plugin/marketplace manifests. Broad by design: a remote source in a helper
+# file or settings.json, or a symlink to outside-repo code, is just as much a
+# provenance breach as one in a SKILL.md. Symlinks are enumerated explicitly
+# (-type l) so the target check runs — a plain -type f would never emit them.
+# Portable to bash 3.2 (no mapfile): process substitution keeps the loop in the
+# current shell so counters persist.
 while IFS= read -r f; do
-  [ -e "$f" ] || continue
+  [ -e "$f" ] || [ -L "$f" ] || continue
   checked=$((checked + 1))
 
-  # (a) symlink escaping the repo
+  # (a) symlink — verify its target stays inside the repo, then move on (a
+  #     symlink has no text body of its own to grep).
   if [ -L "$f" ]; then
     target="$(readlink "$f")"
     case "$target" in
       /*|*../*) err "$f is a symlink to '$target' (outside-repo source prohibited)";;
     esac
+    continue
   fi
 
   # (b) remote/marketplace source reference
@@ -50,10 +57,9 @@ while IFS= read -r f; do
     err "$f embeds a 'git clone <url>' (live fetch of agentic code prohibited)"
   fi
 done < <(
-  find .claude -type f \
-    \( -name 'SKILL.md' -o -path '*/agents/*.md' -o -path '*/commands/*.md' \
-       -o -path '*/hooks/*' -o -name 'plugin.json' -o -name 'marketplace.json' \) \
-    2>/dev/null | sort -u
+  # settings.local.json is per-user and gitignored (never committed), so it is
+  # out of scope for a committed-artifact provenance gate.
+  find .claude \( -type f -o -type l \) ! -name 'settings.local.json' 2>/dev/null | sort -u
 )
 
 printf 'CO-12.7 provenance: checked %d agentic artifact(s).\n' "$checked"
