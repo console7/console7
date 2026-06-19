@@ -130,7 +130,8 @@ against their obligations; it does not make that determination for them.
   as a small hardened namespace; sandboxes as gVisor-isolated pods or microVMs,
   short-lived, network-policied to the egress proxy only.
 - **Reference cloud:** GCP (first). The cloud-specific pieces — sandbox isolation,
-  egress perimeter (VPC Service Controls), secrets/KMS, workload identity — sit
+  egress perimeter (VPC firewall / NAT, with VPC Service Controls guarding the Google
+  API surface only — see `providers/cloud-gcp/`), secrets/KMS, workload identity — sit
   behind the provider interfaces (§5) so AWS and Azure are parity targets, not
   rewrites.
 - **Resilience is an adopter choice, exposed as configuration** (not a fixed
@@ -146,7 +147,7 @@ keeps the maintainer out of the adopter's tenancy.
 
 | Interface | Selects / abstracts | Default ref |
 |---|---|---|
-| `CloudProvider` | sandbox isolation, networking, perimeter | GCP (gVisor + VPC-SC) |
+| `CloudProvider` | sandbox isolation, networking, perimeter | GCP (gVisor + VPC firewall/NAT; VPC-SC guards Google APIs) |
 | `SecretsProvider` | secret storage, envelope encryption, KMS | GCP Secret Manager + Cloud KMS |
 | `IdentityProvider` | user SSO/OIDC, group/role mapping | OIDC (Okta / Entra) |
 | `SCMProvider` | clone, branch, PR, short-lived tokens | GitHub App |

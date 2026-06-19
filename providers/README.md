@@ -18,7 +18,7 @@ Reference defaults (`ARCHITECTURE.md` §5):
 
 | Dir | Seam | Default |
 |---|---|---|
-| [`cloud-gcp/`](cloud-gcp/) | `CloudProvider` | gVisor + VPC Service Controls |
+| [`cloud-gcp/`](cloud-gcp/) | `CloudProvider` | gVisor + VPC firewall/NAT (VPC-SC guards Google APIs) |
 | [`secrets-gcp/`](secrets-gcp/) | `SecretsProvider` | Secret Manager + Cloud KMS |
 | [`scm-github/`](scm-github/) | `SCMProvider` | GitHub App |
 | [`inference-vertex/`](inference-vertex/) | `InferenceBackend` | Vertex |
