@@ -344,7 +344,7 @@ func TestRun_MissingBrokerSeamFailsClosedBeforeProvision(t *testing.T) {
 	orch := orchestrator.New(b, cloud, evidence, devkit.NewFixedPolicySoR(repo), []string{orgAPIURL}, 30*time.Minute)
 
 	_, err := orch.Run(context.Background(), orchestrator.LaunchRequest{
-		Authn: devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		Authn:     devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
 		SessionID: "s1", Persona: interfaces.PersonaAuthor, Repo: repo, Branch: "feature/x",
 	})
 	if err == nil {
@@ -372,7 +372,7 @@ func TestRun_AbortSurfacesTeardownFailure(t *testing.T) {
 	orch := orchestrator.New(b, cloud, devkit.NewMemEvidence(), devkit.NewFixedPolicySoR(repo), []string{"https://only.internal"}, 30*time.Minute)
 
 	_, err := orch.Run(context.Background(), orchestrator.LaunchRequest{
-		Authn: devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		Authn:     devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
 		SessionID: "s1", Persona: interfaces.PersonaAuthor, Repo: repo, Branch: "feature/x",
 	})
 	if err == nil {
