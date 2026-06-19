@@ -4,7 +4,7 @@ import "context"
 
 // InferenceMode is the credential class backing a session's model inference. The
 // attended/unattended seam between the two is enforced in policy, not guidance
-// (DESIGN.md §3; GOAL.md tenet 7).
+// (DESIGN.md §3; GOAL.md tenet 2).
 type InferenceMode int
 
 const (
@@ -65,7 +65,7 @@ type InferenceBackend interface {
 	// scheduled, triggered,
 	// headless/unattended, or cross-repo fan-out) — a subscription credential MUST
 	// NEVER back an unattended or multi-beneficiary session (DESIGN.md §3; GOAL.md
-	// tenet 7). The discriminator is human presence and single beneficiary, NOT
+	// tenet 2). The discriminator is human presence and single beneficiary, NOT
 	// invocation mode: a forked/headless `claude -p` INSIDE an attended single-user
 	// session stays on ModeSubscription and MUST NOT be rerouted. The seam trigger
 	// MUST be a configurable enterprise policy (flip policy, not architecture), and
