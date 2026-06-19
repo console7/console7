@@ -64,7 +64,7 @@ the **maximal** OpenSSF posture from commencement:
 
 | Programme | Target (now) | Trajectory |
 |---|---|---|
-| **OpenSSF Scorecard** | Run continuously in CI, **results kept private for now** (workflow artifact; no publish to the public Scorecard API, no README badge). The checks are the live internal evidence of CO-4/5/6/7/8/11. | **Publish the score + badge when there is something meaningful to share** (≈ first release / critical mass); then hold ≥ target and treat regressions as findings (CO-18). |
+| **OpenSSF Scorecard** | Run **locally / on-demand**, kept **private for now** — *not* in public CI. (On a public repo, Actions logs and artifacts are world-readable, so a CI run cannot be private; the score is read locally instead.) The checks are the internal evidence of CO-4/5/6/7/8/11. | **Publish the score + badge, and move it into CI (runtime image digest-pinned), when there is something meaningful to share** (≈ first release / critical mass); then hold ≥ target and treat regressions as findings (CO-18). |
 | **OpenSSF Security Baseline (OSPS)** | **Level 3** (the high-value/critical tier) is the binding bar. Criteria that need build artifacts are carried as dated accepted-gaps (§5). | All L3 criteria demonstrably met by GA. |
 | **OpenSSF Best Practices Badge** | **Silver** is the target; "passing" criteria met as gates land. | Gold at/after GA, when two-person human review and full release provenance exist. |
 
@@ -136,11 +136,12 @@ evidence store**. This document is the *posture*; the **gates are the enforcemen
 The bootstrapping gate set (separate, reviewable PRs that each cite the CO(s) and OSPS
 control they satisfy):
 
-1. **Repo-governance gates** — gitleaks secret-scan CI (+ enable GitHub native
-   secret-scanning & push-protection), SHA-pinned actions, least-privilege
-   `GITHUB_TOKEN`, Dependabot (actions; Go modules when `go.mod` lands), OpenSSF
-   Scorecard workflow (**results private — artifact only, no public publish/badge
-   yet**; §3). *(CO-4, CO-5, CO-6, CO-7.1, CO-8.)*
+1. **Repo-governance gates** — gitleaks secret-scan CI (full history, checksum-
+   verified; + GitHub native secret-scanning & push-protection), SHA-pinned actions,
+   least-privilege `GITHUB_TOKEN`, Dependabot (actions; Go modules when `go.mod`
+   lands), the CO-12.7 governance gate, and CodeQL/`govulncheck` (dormant until Go).
+   OpenSSF Scorecard is run **locally/on-demand** (not in public CI) until we publish
+   (§3). *(CO-4, CO-5, CO-6, CO-7.1, CO-8.)*
 2. **Branch-protection tightening** — required PR review; required status checks
    (once the gates above are green checks); DCO required check. **`enforce_admins`
    stays off** until critical mass / a second maintainer (tracked target §5 #1).
@@ -159,8 +160,8 @@ control they satisfy):
 
 1. **This document** is the canonical posture (CO-1.5), reviewed quarterly / on
    material change.
-2. **OpenSSF Scorecard** runs continuously; the public score is the live evidence,
-   and a regression is a finding (CO-18).
+2. **OpenSSF Scorecard** is run on-demand now; once published it runs continuously
+   and the public score is the live evidence, with a regression a finding (CO-18).
 3. **Every gate PR cites** the CO(s) and OSPS control it satisfies (CO-14.2).
 4. **ADRs** (`docs/adr/`) record hard, durable decisions (the language ADR is the
    template).
