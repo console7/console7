@@ -1,0 +1,6 @@
+# Console7 gitleaks config — secret scanning (CO-8.1). Extends the default
+# ruleset. No allowlist entries yet: this repo holds no real credentials and no
+# known false positives. Add tightly-scoped, dated allowlist entries here only
+# with a written justification if a genuine false positive appears.
+[extend]
+useDefault = true
