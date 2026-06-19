@@ -80,14 +80,20 @@ func TestSpike_SessionLifecycle(t *testing.T) {
 	b := newBench(t)
 	ctx := context.Background()
 
+	// Out-of-band login: the user's subscription token is vaulted under their key BEFORE the
+	// session runs. The orchestrator never sees the plaintext — it only opts the session in.
+	if err := b.orch.Broker.StoreSubscription(ctx, "alice", []byte("alice-subscription-token")); err != nil {
+		t.Fatalf("StoreSubscription: %v", err)
+	}
+
 	sum, err := b.orch.Run(ctx, orchestrator.LaunchRequest{
-		Authn:        b.authn(t, "alice"),
-		SessionID:    "sess-1",
-		Persona:      interfaces.PersonaAuthor,
-		Repo:         b.repo,
-		Branch:       "feature/x",
-		Attended:     true,
-		Subscription: []byte("alice-subscription-token"),
+		Authn:           b.authn(t, "alice"),
+		SessionID:       "sess-1",
+		Persona:         interfaces.PersonaAuthor,
+		Repo:            b.repo,
+		Branch:          "feature/x",
+		Attended:        true,
+		UseSubscription: true,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -218,7 +224,7 @@ func TestVerifyRecordPayload_RejectsTamperedAttribution(t *testing.T) {
 	b := newBench(t)
 	if _, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
 		Authn: b.authn(t, "alice"), SessionID: "sess-5", Persona: interfaces.PersonaAuthor,
-		Repo: b.repo, Branch: "feature/x", Attended: true, Subscription: []byte("tok"),
+		Repo: b.repo, Branch: "feature/x", Attended: false,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -235,6 +241,32 @@ func TestVerifyRecordPayload_RejectsTamperedAttribution(t *testing.T) {
 	rec.Subject = "mallory"
 	if err := orchestrator.VerifyRecordPayload(b.caRoot, rec); err == nil {
 		t.Error("expected verification to reject a record whose Subject column was altered")
+	}
+}
+
+// stubSoR returns a fixed TierStratum for any target — used to feed ResolveProfile
+// out-of-range coordinates a real adapter might decode from bad registry data.
+type stubSoR struct{ ts interfaces.TierStratum }
+
+func (s stubSoR) ResolveRepo(context.Context, interfaces.RepoRef) (interfaces.TierStratum, error) {
+	return s.ts, nil
+}
+func (s stubSoR) ResolveResource(context.Context, interfaces.ResourceRef) (interfaces.TierStratum, error) {
+	return s.ts, nil
+}
+
+// TestResolveProfile_RejectsOutOfRangeCoordinates: a tier/stratum outside the known enum
+// (e.g. a bad registry decode yielding Tier(99)) must fail closed, not yield a runnable
+// profile.
+func TestResolveProfile_RejectsOutOfRangeCoordinates(t *testing.T) {
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	for _, ts := range []interfaces.TierStratum{
+		{Tier: interfaces.Tier(99), Stratum: interfaces.Stratum1},
+		{Tier: interfaces.Tier3, Stratum: interfaces.Stratum(99)},
+	} {
+		if _, err := orchestrator.ResolveProfile(context.Background(), stubSoR{ts}, repo, interfaces.PersonaAuthor, []string{"https://x"}, time.Minute); err == nil {
+			t.Errorf("expected fail-closed on out-of-range coordinate %+v", ts)
+		}
 	}
 }
 

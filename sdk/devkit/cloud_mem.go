@@ -26,7 +26,11 @@ import (
 // does NOT provide the authoritative guarantees a real provider must — gVisor/microVM
 // syscall isolation and an out-of-band VPC egress perimeter. Those land with
 // providers/cloud-gcp + sandbox/ in a later, boundary-first Phase-1 PR (docs/ROADMAP.md).
-// Do not mistake a green run here for a real perimeter.
+// Do not mistake a green run here for a real perimeter. MaxTTL expiry is enforced on
+// MemCloud's own surface (Live/ApplyEgressPolicy/EgressOf/DestroySandbox fail closed once a
+// sandbox is past its TTL); the shared SandboxRegistry ownership oracle does not itself
+// expire — a real provider reaps the sandbox and its attestation, and the broker already
+// caps every minted credential to the session deadline.
 type MemCloud struct {
 	mu        sync.Mutex
 	reg       *SandboxRegistry
@@ -39,8 +43,15 @@ type memSandbox struct {
 	session interfaces.SessionID
 	persona interfaces.Persona
 	egress  []string // the default-deny allowlist currently in force.
-	maxTTL  time.Duration
+	expiry  time.Time
 	live    bool
+}
+
+// operable reports whether the sandbox may still be used: it must be live AND within its
+// MaxTTL. Past its expiry it is treated as gone (destroyed no later than MaxTTL), so every
+// operation on it fails closed even if explicit teardown never ran.
+func (s *memSandbox) operable(now time.Time) bool {
+	return s.live && now.Before(s.expiry)
 }
 
 // NewMemCloud returns a MemCloud backed by reg. The registry is shared with the
@@ -67,7 +78,7 @@ func (c *MemCloud) ProvisionSandbox(ctx context.Context, spec interfaces.Sandbox
 		session: spec.SessionID,
 		persona: spec.Persona,
 		egress:  append([]string(nil), spec.Egress.Allowlist...),
-		maxTTL:  spec.MaxTTL,
+		expiry:  time.Now().Add(spec.MaxTTL),
 		live:    true,
 	}
 	return h, nil
@@ -78,20 +89,23 @@ func (c *MemCloud) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHa
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sb, ok := c.sandboxes[h.ID]
-	if !ok || !sb.live {
-		// Fail closed: an unknown or destroyed sandbox has no perimeter to narrow.
-		return errors.New("devkit: MemCloud cannot apply egress to an unknown or destroyed sandbox")
+	if !ok || !sb.operable(time.Now()) {
+		// Fail closed: an unknown, destroyed, or expired sandbox has no perimeter to narrow.
+		return errors.New("devkit: MemCloud cannot apply egress to an unknown, destroyed, or expired sandbox")
 	}
 	// Narrow-only: a permissive origin MUST NOT confer a stricter target's reach, so an
 	// update may only remove destinations, never add one beyond those already permitted
-	// (take-the-max narrows; it never widens). Adding an unlisted destination fails closed.
+	// (take-the-max narrows; it never widens). A widening policy cannot be applied, so the
+	// sandbox fails CLOSED — its egress drops to deny-all rather than retaining its prior
+	// (now suspect) reach — and the call errors.
 	allowed := make(map[string]bool, len(sb.egress))
 	for _, d := range sb.egress {
 		allowed[d] = true
 	}
 	for _, d := range policy.Allowlist {
 		if !allowed[d] {
-			return errors.New("devkit: MemCloud refuses to widen egress beyond the provisioned allowlist")
+			sb.egress = nil
+			return errors.New("devkit: MemCloud refuses to widen egress beyond the provisioned allowlist; egress denied")
 		}
 	}
 	sb.egress = append([]string(nil), policy.Allowlist...)
@@ -103,10 +117,10 @@ func (c *MemCloud) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sb, ok := c.sandboxes[h.ID]
-	if !ok || !sb.live {
-		// Destroying an unknown or already-destroyed sandbox fails closed — the caller's
-		// view of what exists is wrong, and silently succeeding would mask it.
-		return errors.New("devkit: MemCloud cannot destroy an unknown or already-destroyed sandbox")
+	if !ok || !sb.operable(time.Now()) {
+		// Destroying an unknown, already-destroyed, or expired sandbox fails closed — the
+		// caller's view of what exists is wrong, and silently succeeding would mask it.
+		return errors.New("devkit: MemCloud cannot destroy an unknown, already-destroyed, or expired sandbox")
 	}
 	// Irreversible: drop the egress, mark dead, and wipe the registry's ownership binding
 	// and injected credential material. There is no snapshot/archive path, and a later
@@ -117,20 +131,21 @@ func (c *MemCloud) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 	return nil
 }
 
-// Live reports whether h is a known, not-yet-destroyed sandbox. Test-only inspection hook.
+// Live reports whether h is a known, not-yet-destroyed, not-yet-expired sandbox. Test-only
+// inspection hook.
 func (c *MemCloud) Live(h interfaces.SandboxHandle) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sb, ok := c.sandboxes[h.ID]
-	return ok && sb.live
+	return ok && sb.operable(time.Now())
 }
 
-// EgressOf returns the egress allowlist currently in force for a live sandbox. Test-only.
+// EgressOf returns the egress allowlist currently in force for an operable sandbox. Test-only.
 func (c *MemCloud) EgressOf(h interfaces.SandboxHandle) ([]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sb, ok := c.sandboxes[h.ID]
-	if !ok || !sb.live {
+	if !ok || !sb.operable(time.Now()) {
 		return nil, false
 	}
 	return append([]string(nil), sb.egress...), true

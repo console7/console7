@@ -3,6 +3,8 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/console7/console7/keybroker/signing"
@@ -12,12 +14,22 @@ import (
 // Broker mints per-session identities and credentials by driving the provider seams. The
 // seam fields are interface-typed so the same broker runs against the in-memory devkit
 // seams (Phase 0) or real cloud providers (later phases) unchanged.
+//
+// The broker also CUSTODIES each session's NHI signing key: the ephemeral
+// *signing.SessionSigner stays inside the broker (the dedicated, separately-hardened
+// signing artifact) and callers sign via SignSession, so the control plane never holds the
+// key and a compromised orchestrator cannot mint signatures past a session's life
+// (ARCHITECTURE.md §2; GOAL.md tenet 6 — distinct signing identity, control-plane holds no
+// keys).
 type Broker struct {
 	Identity  interfaces.IdentityProvider
 	Secrets   interfaces.SecretsProvider
 	SCM       interfaces.SCMProvider
 	Inference interfaces.InferenceBackend
 	Binder    *signing.NHIBinder
+
+	mu      sync.Mutex
+	signers map[interfaces.SessionID]*signing.SessionSigner
 }
 
 // New returns a Broker wired to the given seams and NHI binder. Each is required by the
@@ -25,7 +37,26 @@ type Broker struct {
 // the vault helpers need Secrets and Inference. A nil dependency is a programming error
 // surfaced when its method is first called, not silently tolerated.
 func New(id interfaces.IdentityProvider, secrets interfaces.SecretsProvider, scm interfaces.SCMProvider, inference interfaces.InferenceBackend, binder *signing.NHIBinder) *Broker {
-	return &Broker{Identity: id, Secrets: secrets, SCM: scm, Inference: inference, Binder: binder}
+	return &Broker{
+		Identity:  id,
+		Secrets:   secrets,
+		SCM:       scm,
+		Inference: inference,
+		Binder:    binder,
+		signers:   make(map[interfaces.SessionID]*signing.SessionSigner),
+	}
+}
+
+// Authenticate verifies an inbound SSO assertion and returns the human Subject, without
+// minting any credential. It lets a caller establish identity BEFORE taking any
+// identity-dependent action (e.g. resolving a policy target), so an unauthenticated caller
+// cannot probe downstream systems. The Subject is verified by the IdentityProvider; a
+// caller-asserted subject is never trusted.
+func (b *Broker) Authenticate(ctx context.Context, authn interfaces.AuthnToken) (interfaces.Subject, error) {
+	if b.Identity == nil {
+		return "", errors.New("broker: missing identity seam")
+	}
+	return b.Identity.Authenticate(ctx, authn)
 }
 
 // SessionRequest describes a session asking to be credentialed: the inbound (untrusted)
@@ -44,11 +75,13 @@ type SessionRequest struct {
 
 // MintedSession is the result of MintSessionIdentity: the per-session identity (carrying
 // its ephemeral cloud credential reference), the short-lived SCM working-credential
-// reference, and the signer that stamps the lineage onto commits/artefacts.
+// reference, and the NHI the session signs as. The signing KEY is deliberately NOT here —
+// it stays inside the broker; the caller stamps lineage by calling SignSession, so no
+// key-bearing object crosses into the control plane.
 type MintedSession struct {
 	Identity interfaces.SessionIdentity
 	SCM      interfaces.CredentialRef
-	Signer   *signing.SessionSigner
+	NHI      string
 }
 
 // MintSessionIdentity runs the core credential flow:
@@ -72,11 +105,16 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 		return MintedSession{}, err
 	}
 
-	// 2. Bind a per-session NHI to the verified subject. This is the root of lineage.
+	// 2. Bind a per-session NHI to the verified subject. This is the root of lineage. The
+	// signer (which owns the ephemeral private key) is retained inside the broker, never
+	// returned, so the control plane signs through SignSession and holds no key.
 	signer, err := b.Binder.Bind(subject, req.SessionID, req.Persona)
 	if err != nil {
 		return MintedSession{}, err
 	}
+	b.mu.Lock()
+	b.signers[req.SessionID] = signer
+	b.mu.Unlock()
 
 	// 3. Mint the ephemeral cloud credential, capped to the session deadline by the seam.
 	cloudRef, err := b.Secrets.MintEphemeral(ctx, interfaces.EphemeralRequest{
@@ -109,7 +147,30 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 			Persona:    req.Persona,
 			Credential: cloudRef,
 		},
-		SCM:    scmRef,
-		Signer: signer,
+		SCM: scmRef,
+		NHI: signer.NHI,
 	}, nil
+}
+
+// SignSession signs payload with the session's NHI key and returns the lineage-stamped
+// signature. The key stays inside the broker; the caller only ever sees the Signature. It
+// fails if the session has no live signer (never minted, or already released) — a released
+// key cannot sign, so signatures cannot outlive the session.
+func (b *Broker) SignSession(ctx context.Context, session interfaces.SessionID, payload []byte) (signing.Signature, error) {
+	b.mu.Lock()
+	signer, ok := b.signers[session]
+	b.mu.Unlock()
+	if !ok {
+		return signing.Signature{}, fmt.Errorf("broker: no live signer for session %q", session)
+	}
+	return signer.Sign(payload), nil
+}
+
+// ReleaseSession discards the session's NHI signer, ending its ability to sign. The
+// orchestrator calls this at teardown so the ephemeral key does not outlive the session
+// (GOAL.md tenet 4). Releasing an unknown session is a no-op.
+func (b *Broker) ReleaseSession(session interfaces.SessionID) {
+	b.mu.Lock()
+	delete(b.signers, session)
+	b.mu.Unlock()
 }

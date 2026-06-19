@@ -57,10 +57,28 @@ func (e *MemEvidence) Append(ctx context.Context, rec interfaces.EvidenceRecord)
 	// untrusted, so it is hashed as content (a back-dated value is therefore covered by
 	// the chain) but is NEVER used as the timeline — AppendedAt is.
 	appendedAt := time.Now().UTC()
-	h := chainHash(prior, seq, appendedAt, rec)
-	ref := interfaces.RecordRef{Sequence: seq, Hash: h, AppendedAt: appendedAt}
-	e.records = append(e.records, chainEntry{rec: rec, ref: ref})
-	return ref, nil
+	// Defensively copy the caller's payload before committing it: a WORM record the caller
+	// can still mutate by retaining the slice is not append-only. The hash is freshly
+	// allocated per call, so the stored copy and the returned copy never alias.
+	stored := rec
+	stored.Payload = cloneBytes(rec.Payload)
+	h := chainHash(prior, seq, appendedAt, stored)
+	e.records = append(e.records, chainEntry{
+		rec: stored,
+		ref: interfaces.RecordRef{Sequence: seq, Hash: h, AppendedAt: appendedAt},
+	})
+	return interfaces.RecordRef{Sequence: seq, Hash: cloneBytes(h), AppendedAt: appendedAt}, nil
+}
+
+// cloneBytes returns an independent copy of b (nil for nil), so committed records never
+// share a backing array with a caller's slice.
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
 }
 
 // Stream mirrors a committed record to the adopter's SIEM.
@@ -87,14 +105,19 @@ func (e *MemEvidence) Len() int {
 	return len(e.records)
 }
 
-// At returns the committed record and its ref at sequence i. Test-only inspection hook.
+// At returns the committed record and its ref at sequence i. Test-only inspection hook. It
+// returns copies so an inspector cannot reach into the committed chain and mutate it.
 func (e *MemEvidence) At(i int) (interfaces.EvidenceRecord, interfaces.RecordRef, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if i < 0 || i >= len(e.records) {
 		return interfaces.EvidenceRecord{}, interfaces.RecordRef{}, false
 	}
-	return e.records[i].rec, e.records[i].ref, true
+	rec := e.records[i].rec
+	rec.Payload = cloneBytes(rec.Payload)
+	ref := e.records[i].ref
+	ref.Hash = cloneBytes(ref.Hash)
+	return rec, ref, true
 }
 
 // VerifyChain recomputes the hash chain and reports the first break. It is how a bench

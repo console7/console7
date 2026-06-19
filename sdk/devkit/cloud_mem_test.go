@@ -71,9 +71,34 @@ func TestMemCloud_ApplyEgressPolicy_NarrowOnly(t *testing.T) {
 	if got, _ := cloud.EgressOf(h); len(got) != 1 || got[0] != "https://a" {
 		t.Fatalf("egress not narrowed, got %v", got)
 	}
-	// Widening — re-adding a now-removed destination — must be refused (fail closed).
+	// Widening — re-adding a now-removed destination — must be refused AND fail closed to
+	// deny-all (the sandbox must not retain its prior reach after a rejected update).
 	if err := cloud.ApplyEgressPolicy(ctx, h, interfaces.EgressPolicy{Allowlist: []string{"https://a", "https://b"}}); err == nil {
 		t.Error("expected widening egress beyond the current allowlist to be refused")
+	}
+	if got, ok := cloud.EgressOf(h); !ok || len(got) != 0 {
+		t.Errorf("expected egress to fail closed to deny-all after a refused widen, got %v (ok=%v)", got, ok)
+	}
+}
+
+func TestMemCloud_MaxTTL_ExpiresSandbox(t *testing.T) {
+	cloud, _ := newMemCloud()
+	ctx := context.Background()
+	spec := provisionSpec("s1", "https://a")
+	spec.MaxTTL = time.Nanosecond // expires effectively immediately.
+	h, err := cloud.ProvisionSandbox(ctx, spec)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond) // well past a 1ns TTL.
+	if cloud.Live(h) {
+		t.Error("sandbox still live past its MaxTTL")
+	}
+	if err := cloud.ApplyEgressPolicy(ctx, h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Error("expected egress changes on an expired sandbox to fail closed")
+	}
+	if err := cloud.DestroySandbox(ctx, h); err == nil {
+		t.Error("expected destroy of an expired sandbox to fail closed")
 	}
 }
 

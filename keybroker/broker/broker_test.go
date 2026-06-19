@@ -84,8 +84,8 @@ func TestSpike_LoginToSignedAction(t *testing.T) {
 	if minted.SCM.Ref == "" {
 		t.Error("SCM credential ref is empty")
 	}
-	if minted.Signer.NHI != "nhi/s1/author" {
-		t.Errorf("NHI = %q, want nhi/s1/author", minted.Signer.NHI)
+	if minted.NHI != "nhi/s1/author" {
+		t.Errorf("NHI = %q, want nhi/s1/author", minted.NHI)
 	}
 
 	// 2. Subscription vault: store the user's token, provision their sandbox, inject.
@@ -129,15 +129,25 @@ func TestSpike_LoginToSignedAction(t *testing.T) {
 		t.Errorf("unattended session routed to %v, want org-API", orgAPI.Mode)
 	}
 
-	// 4. Signed action: the NHI signs a commit; the lineage Subject->NHI->signature
-	// verifies against the CA root.
+	// 4. Signed action: the NHI signs a commit via the broker (the key never leaves it);
+	// the lineage Subject->NHI->signature verifies against the CA root.
 	commitDigest := []byte("sha256:deadbeef-commit")
-	sig := minted.Signer.Sign(commitDigest)
+	sig, err := b.broker.SignSession(ctx, "s1", commitDigest)
+	if err != nil {
+		t.Fatalf("SignSession: %v", err)
+	}
 	if err := signing.Verify(b.caRoot, commitDigest, sig); err != nil {
 		t.Errorf("commit lineage failed to verify: %v", err)
 	}
 	if sig.Subject != "alice" {
 		t.Errorf("signed commit lineage subject = %q, want alice", sig.Subject)
+	}
+
+	// 5. After release, the session's key can no longer sign — signatures cannot outlive
+	// the session.
+	b.broker.ReleaseSession("s1")
+	if _, err := b.broker.SignSession(ctx, "s1", commitDigest); err == nil {
+		t.Error("signed with a released session key")
 	}
 }
 

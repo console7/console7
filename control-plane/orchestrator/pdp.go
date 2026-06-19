@@ -28,10 +28,12 @@ func ResolveProfile(ctx context.Context, sor interfaces.PolicySoR, repo interfac
 	if err != nil {
 		return interfaces.SessionProfile{}, err
 	}
-	// Fail closed on an unresolved target: TierUnknown/StratumUnknown is the most-
-	// restrictive coordinate the SoR returns for something it does not recognise, and we
-	// refuse to synthesise a permissive profile for it rather than guess a tier.
-	if target.Tier == interfaces.TierUnknown || target.Stratum == interfaces.StratumUnknown {
+	// Fail closed on an unresolved OR out-of-range target. MostRestrictive canonicalises a
+	// single tier — any unknown or out-of-range value (e.g. a bad registry decode yielding
+	// Tier(99)) collapses to TierUnknown — and the stratum must be within the known S1..S5
+	// band. We refuse to synthesise a permissive profile rather than guess a tier.
+	if interfaces.MostRestrictive(target.Tier) == interfaces.TierUnknown ||
+		target.Stratum < interfaces.Stratum1 || target.Stratum > interfaces.Stratum5 {
 		return interfaces.SessionProfile{}, fmt.Errorf("orchestrator: target %s/%s/%s did not resolve to a known tier × stratum (fail closed)", repo.Host, repo.Owner, repo.Name)
 	}
 	return interfaces.SessionProfile{

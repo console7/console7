@@ -71,10 +71,12 @@ type LaunchRequest struct {
 	// subscription-backed inference (tenet 7). Headless/orchestrated launches set it false
 	// and route to the org API.
 	Attended bool
-	// Subscription, when non-empty for an attended single-user session, is the user's
-	// captured subscription token to seal and inject into their OWN sandbox. Empty skips
-	// the subscription path (org-API inference only).
-	Subscription []byte
+	// UseSubscription requests that this attended session run on the user's vaulted
+	// subscription token (captured out of band at `claude /login` and sealed under the
+	// user's key — DESIGN.md §2.2). The token NEVER passes through the control plane: the
+	// orchestrator only asks the broker to inject the already-vaulted token into the
+	// owner's sandbox by reference. Ignored when the session is unattended.
+	UseSubscription bool
 }
 
 // Summary is the result of a completed session: the verified subject and NHI, the (now
@@ -99,15 +101,25 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return Summary{}, errors.New("orchestrator: missing a required seam (broker/cloud/evidence/sor)")
 	}
 
-	// 1. Resolve the target's profile through the PolicySoR seam (fail closed on unknown).
+	// 1. Authenticate the human BEFORE touching the policy system-of-record, so an
+	// unauthenticated caller cannot probe which targets exist or spend SoR capacity. The
+	// broker verifies the SSO assertion; a caller-asserted subject is never trusted.
+	subject, err := o.Broker.Authenticate(ctx, req.Authn)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	// 2. Resolve the target's profile through the PolicySoR seam (fail closed on unknown),
+	// now that the caller is authenticated.
 	profile, err := ResolveProfile(ctx, o.SoR, req.Repo, req.Persona, o.EgressAllowlist, o.MaxTTL)
 	if err != nil {
 		return Summary{}, err
 	}
 
-	// 2. Mint the per-session identity: authenticate the human, bind the NHI, mint the
-	// ephemeral cloud + SCM credentials, and get the session signer. The deadline is the
-	// hard session lifetime — every credential is capped to it by its seam.
+	// 3. Mint the per-session identity: bind the NHI (its signing key stays in the broker)
+	// and mint the ephemeral cloud + SCM credentials. The deadline is the hard session
+	// lifetime — every credential is capped to it by its seam. The broker re-verifies the
+	// assertion (defence in depth; MintSessionIdentity never trusts a caller subject).
 	deadline := time.Now().Add(profile.MaxTTL)
 	minted, err := o.Broker.MintSessionIdentity(ctx, broker.SessionRequest{
 		Authn:           req.Authn,
@@ -122,25 +134,31 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	if err != nil {
 		return Summary{}, err
 	}
-	subject := minted.Identity.Subject
-	signer := minted.Signer
+	// The minted identity's verified subject is authoritative.
+	subject = minted.Identity.Subject
+	nhi := minted.NHI
+	// The session's signing key lives in the broker; release it at teardown so it cannot
+	// outlive the session. cleanupCtx is detached from the request context so teardown still
+	// runs even if the caller cancels or times out mid-session.
+	cleanupCtx := context.WithoutCancel(ctx)
+	defer o.Broker.ReleaseSession(req.SessionID)
 
 	// stamp emits a signed evidence record (Subject → NHI → this event) and counts it. A
 	// failure to record evidence is itself fatal — an unattested action must not proceed
 	// silently. session-aborted stamps on the failure paths are best-effort and uncounted.
 	records := 0
 	stamp := func(event, detail string) error {
-		if err := o.appendSigned(ctx, signer, subject, req.Persona, req.SessionID, event, detail); err != nil {
+		if err := o.appendSigned(ctx, req.SessionID, subject, req.Persona, nhi, event, detail); err != nil {
 			return err
 		}
 		records++
 		return nil
 	}
-	if err := stamp("session-start", string(subject)+" -> "+signer.NHI); err != nil {
+	if err := stamp("session-start", string(subject)+" -> "+nhi); err != nil {
 		return Summary{}, err
 	}
 
-	// 3. Provision the sandbox with the profile's default-deny egress.
+	// 4. Provision the sandbox with the profile's default-deny egress.
 	sandbox, err := o.Cloud.ProvisionSandbox(ctx, interfaces.SandboxSpec{
 		SessionID: req.SessionID,
 		Subject:   subject,
@@ -154,9 +172,10 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return Summary{}, fmt.Errorf("orchestrator: provision-sandbox: %w", err)
 	}
 
-	// From here on, any failure must tear the sandbox down — never leave it live.
+	// From here on, any failure must tear the sandbox down — never leave it live. Teardown
+	// uses cleanupCtx (not the request ctx), so a cancelled/expired request cannot skip it.
 	abort := func(cause error, stage string) (Summary, error) {
-		_ = o.Cloud.DestroySandbox(ctx, sandbox)
+		_ = o.Cloud.DestroySandbox(cleanupCtx, sandbox)
 		_ = stamp("session-aborted", stage+": "+cause.Error())
 		return Summary{}, fmt.Errorf("orchestrator: %s: %w", stage, cause)
 	}
@@ -164,13 +183,13 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return abort(err, "sandbox-provisioned-evidence")
 	}
 
-	// 4. Resolve inference. Subscription backs a session ONLY when it is attended AND the
-	// user actually supplied a token to inject; an attended session without one routes the
+	// 5. Resolve inference. Subscription backs a session ONLY when it is attended AND the
+	// user opted into their vaulted subscription; an attended session without it routes the
 	// org API like any unattended session (tenet 7 — subscription is permitted, never
 	// mandatory). The resolved endpoint MUST already be on the egress allowlist — the
 	// boundary is authoritative, so an endpoint the perimeter would deny aborts the session
 	// rather than running against an unreachable model.
-	useSubscription := req.Attended && len(req.Subscription) > 0
+	useSubscription := req.Attended && req.UseSubscription
 	mode := interfaces.ModeOrgAPI
 	if useSubscription {
 		mode = interfaces.ModeSubscription
@@ -204,12 +223,11 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return abort(err, "egress-evidence")
 	}
 
-	// 5. (subscription) Seal the user's subscription token under their key and inject it into
-	// their OWN sandbox. The seam enforces attended && single-beneficiary && owning-sandbox.
+	// 6. (subscription) Inject the user's ALREADY-VAULTED subscription token into their OWN
+	// sandbox by reference — the plaintext was sealed under their key at login and never
+	// passes through the control plane. The seam enforces attended && single-beneficiary &&
+	// owning-sandbox.
 	if useSubscription {
-		if err := o.Broker.StoreSubscription(ctx, subject, req.Subscription); err != nil {
-			return abort(err, "store-subscription")
-		}
 		if err := o.Broker.InjectSubscription(ctx, interfaces.SubscriptionInjection{
 			Subject:       subject,
 			SessionID:     req.SessionID,
@@ -224,22 +242,26 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		}
 	}
 
-	// 6. "Do the work" → a commit digest → sign it with the session NHI. The signature is
-	// the crypto-attested output, recorded in the chain (tenet 6; ROADMAP Phase 1).
+	// 7. "Do the work" → a commit digest → sign it with the session NHI (via the broker, so
+	// the key never enters the control plane). The signature is the crypto-attested output,
+	// recorded in the chain (tenet 6; ROADMAP Phase 1).
 	digest := commitDigest(req)
-	commitSig := signer.Sign(digest)
+	commitSig, err := o.Broker.SignSession(ctx, req.SessionID, digest)
+	if err != nil {
+		return abort(err, "sign-commit")
+	}
 	if err := stamp("commit-signed", hex.EncodeToString(digest)); err != nil {
 		return abort(err, "commit-evidence")
 	}
 
-	// 7. PR-only exit: propose the change as a PR. The session never merges or actuates —
+	// 8. PR-only exit: propose the change as a PR. The session never merges or actuates —
 	// author, approve, and actuate are separated (tenet 5/6).
 	prRef, err := o.Broker.SCM.OpenPullRequest(ctx, interfaces.PullRequest{
 		Repo:  req.Repo,
 		Head:  req.Branch,
 		Base:  "main",
 		Title: "Console7 session " + string(req.SessionID),
-		Body:  "Proposed by attended author session; lineage " + string(subject) + " -> " + signer.NHI + ".",
+		Body:  "Proposed by attended author session; lineage " + string(subject) + " -> " + nhi + ".",
 	})
 	if err != nil {
 		return abort(err, "open-pr")
@@ -248,8 +270,9 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return abort(err, "pr-evidence")
 	}
 
-	// 8. Teardown. Destruction is irreversible and wipes the injected token; record the end.
-	if err := o.Cloud.DestroySandbox(ctx, sandbox); err != nil {
+	// 9. Teardown. Destruction is irreversible and wipes the injected token; it uses
+	// cleanupCtx so a cancelled request cannot skip it. Record the end.
+	if err := o.Cloud.DestroySandbox(cleanupCtx, sandbox); err != nil {
 		_ = stamp("session-aborted", "destroy-sandbox: "+err.Error())
 		return Summary{}, fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
 	}
@@ -259,7 +282,7 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 
 	return Summary{
 		Subject:      subject,
-		NHI:          signer.NHI,
+		NHI:          nhi,
 		Sandbox:      sandbox,
 		Inference:    endpoint,
 		PR:           prRef,
@@ -314,11 +337,15 @@ type stampedPayload struct {
 }
 
 // appendSigned signs the record's full lineage tuple (Subject, SessionID, Persona, NHI,
-// event, detail) with the session signer, wraps the signature in the record payload, and
-// appends the record. The Subject/SessionID/Persona stamped as record fields are the SAME
-// values bound into the signature, so a tampered attribution column breaks verification.
-func (o *Orchestrator) appendSigned(ctx context.Context, signer *signing.SessionSigner, subject interfaces.Subject, persona interfaces.Persona, session interfaces.SessionID, event, detail string) error {
-	sig := signer.Sign(payloadTBS(subject, session, persona, signer.NHI, event, detail))
+// event, detail) via the broker (the key never enters the control plane), wraps the
+// signature in the record payload, and appends the record. The Subject/SessionID/Persona
+// stamped as record fields are the SAME values bound into the signature, so a tampered
+// attribution column breaks verification.
+func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.SessionID, subject interfaces.Subject, persona interfaces.Persona, nhi, event, detail string) error {
+	sig, err := o.Broker.SignSession(ctx, session, payloadTBS(subject, session, persona, nhi, event, detail))
+	if err != nil {
+		return err
+	}
 	payload, err := json.Marshal(stampedPayload{Event: event, Detail: detail, Sig: sig})
 	if err != nil {
 		return err
