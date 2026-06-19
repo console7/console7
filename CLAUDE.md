@@ -19,17 +19,19 @@ These are the specification. Implement to them; do not redesign them.
 
 ## Current state (read this first)
 
-The repository is a **docs-only skeleton**. There is **no source code yet** — only
-the normative docs, `LICENSE`, `SECURITY.md`, and `docs/adr/0001-language.md`. The
-directory tree in `ARCHITECTURE.md` §6.3 (`sdk/`, `control-plane/`, `keybroker/`,
-`sandbox/`, `providers/`, `deploy/`, `conformance/`) **does not exist on disk** —
-it is the target layout to be created.
+**P0 scaffolding is landed.** The `ARCHITECTURE.md` §6.3 tree now exists on disk
+(`sdk/`, `control-plane/`, `keybroker/`, `sandbox/`, `providers/`, `deploy/`,
+`conformance/`), each directory carrying a README stating its responsibility and trust
+tier. The `sdk/interfaces` provider contracts are defined as typed Go interfaces with
+SECURITY docstrings (the nine `ARCHITECTURE.md` §5 seams), the conformance harness is scaffolded
+(`sdk/testkit` + `conformance/`, stub cases keyed to each interface method), and
+`docs/THREAT-MODEL.md` exists. **Nothing is implemented behind the interfaces yet.**
 
-The next unit of work is **P0 scaffolding** — the kickoff prompt in
-`docs/BOOTSTRAP.md` ("scaffolding only; implement NOTHING behind the interfaces"):
-create the §6.3 tree, define the `sdk/interfaces` provider contracts as typed Go
-interfaces with SECURITY docstrings, scaffold the conformance harness, add
-`docs/THREAT-MODEL.md`. Drive subsequent work down the prompt ladder, one roadmap
+The next unit of work is **Phase 0 — the credential & identity spike** (`docs/ROADMAP.md`;
+`docs/BOOTSTRAP.md` P1): a dev/in-memory `SecretsProvider`, the key-broker minting
+flow, the per-user subscription-token vault model, SSO→NHI binding + commit signing,
+and attended-only subscription routing — all against the interfaces, bench-tested, no
+orchestration or UI. Drive subsequent work down the prompt ladder, one roadmap
 phase-gate per PR.
 
 ## Architecture in one screen
@@ -73,9 +75,9 @@ providers. It does **not** cover the wrapped Claude Code engine (Node/Python, ru
 as-is in the sandbox and reached over its CLI / Agent SDK) or the `control-plane/ui`
 front end (may use web tooling in its own build).
 
-There is **no `go.mod` or build tooling yet** — it gets created during P0
-scaffolding. Once a Go module exists, the canonical commands are the standard
-toolchain (use these; no custom wrappers exist):
+The Go module exists (`go.mod`, dependency-free as of P0 scaffolding); CI gates
+`build`/`vet`/`test`/`gofmt` + `govulncheck` + CodeQL on every PR. The canonical
+commands are the standard toolchain (use these; no custom wrappers exist):
 
 ```bash
 go build ./...                       # build everything

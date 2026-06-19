@@ -88,7 +88,7 @@ type SecretsProvider interface {
 	// under that per-user key, and MUST NOT make it readable by platform operators
 	// (no standing operator read path). It MUST NEVER persist or log the token
 	// unsealed, and MUST NEVER pool it or store it under a shared/multi-user key
-	// (DESIGN.md §2.2, §8; GOAL.md tenet 7 — one human, one credential, one beneficiary).
+	// (DESIGN.md §2.2, §8; GOAL.md tenet 2 — one human, one credential, one beneficiary).
 	StoreSubscriptionToken(ctx context.Context, tok SubscriptionToken) error
 
 	// InjectSubscriptionToken decrypts a user's subscription token and injects it

@@ -31,6 +31,55 @@ Evidence / conformance**.
 
 ---
 
+## Cross-cutting: in-sandbox readable material
+
+Independent analysis of an adjacent platform (Anthropic Managed Agents — self-hosted
+sandboxes; see *Prior art* below) is a useful red-team mirror. It confirms that, in a
+gVisor-style sandbox, **environment variables, mounted files, and the agent's own
+system prompt are readable by the agent process** — and therefore by a prompt-injected
+agent. Console7 keeps cloud/SCM credentials *structurally* out of the sandbox
+(ephemeral, broker-minted, injected via the credential path — never the agent's
+address space; `DESIGN.md` §2.1, §8). But two things unavoidably live where the agent
+can read them, and the threat model must treat them as **exposed, not secret**:
+
+- **The subscription OAuth token (abuse class #4).** It MUST be injected into the
+  user's own sandbox to back their interactive CLI (`DESIGN.md` §2.2), so a
+  prompt-injected agent in that session can read it. The mitigations are therefore
+  *blast-radius* mitigations, not concealment: it is the user's **own** token,
+  per-user isolated, **never pooled** (`GOAL.md` tenet 2); the **default-deny egress
+  wall** (class #2, `DESIGN.md` §5.2) denies the exfiltration path; **pre-egress DLP**
+  (`DESIGN.md` §6) scans for it leaving. Removing a leg of the trifecta is the control,
+  because the token cannot be hidden from its own session.
+- **Session metadata (tier, egress allowlist, NHI / session IDs, org identifiers).**
+  The adjacent platform leaked these via an in-sandbox-readable JWT. Console7 enforces
+  egress **out-of-band at the perimeter** (`DESIGN.md` §5.2), so the allowlist is not a
+  secret the sandbox needs — but the design SHOULD **minimise what identifying
+  metadata is readable in-sandbox**: do not mount the policy profile, target tier, or
+  org-scoped tokens where the agent can read and act on them. Tracked as a Phase-1
+  sandbox-hardening requirement; see `sandbox/egress-proxy/` and `sandbox/base-image/`.
+
+## Prior art & build-vs-adopt (Anthropic Managed Agents)
+
+`ARCHITECTURE.md` §9 names Anthropic's **Managed Agents — self-hosted sandboxes** as
+adjacent prior art. Independent analysis of that platform both **validates** Console7's
+core choices and sharpens where Console7 **differs**:
+
+- *Validates* — decoupled session-log / orchestration / sandbox with the sandbox
+  treated as untrusted; **credentials injected outside the sandbox**, never in the
+  agent's address space; **append-only** session audit; **multi-layer, unbypassable
+  egress** (no in-sandbox DNS, network-gateway filtering, cloud-metadata/IMDS blocked).
+  These are Console7 requirements too (classes #2/#6 below; `DESIGN.md` §5–6, §8).
+- *Differs* — the adjacent platform **silently added maintainer-controlled hosts to
+  the egress allowlist** and runs **TLS inspection on its own (maintainer-side) control
+  plane**, and ships **maximally permissive defaults**. Console7's tenets forbid exactly
+  these: **no maintainer-injected egress / no phone-home** (`GOAL.md` tenet 1); the
+  egress allowlist is **wholly adopter-composed and auditable**; inference-path
+  visibility and DLP run in the **adopter's** tenancy, not the maintainer's; defaults
+  are **conservative and policy-derived** (default-deny, autonomy ceiling, human-gate
+  by tier). This is the in-tenant-orchestration case `ARCHITECTURE.md` §9 makes.
+
+---
+
 ## 1. Control-plane-as-target
 
 *(`DESIGN.md` §10.1)* — Console7 holds the keys to many sandboxes and mints
@@ -48,8 +97,11 @@ exfiltrate over an *allowed* egress path (private-data access + egress capabilit
 exposure to untrusted content).
 
 > Mitigation spine to expand: §5.2–5.3 (default-deny egress removes a leg; no
-> production data by default), §6 (pre-egress DLP), §4.3 (MCP allowlist). **To be
-> filled in.**
+> production data by default), §6 (pre-egress DLP), §4.3 (MCP allowlist). The egress
+> leg must be **unbypassable** (no in-sandbox DNS, network-gateway filtering of
+> non-allowlisted destinations, IMDS/metadata blocked) — see the *In-sandbox readable
+> material* note above and the `sandbox/egress-proxy/` + `providers/cloud-gcp/`
+> requirements. **To be filled in.**
 
 ## 3. Cross-tier escalation
 
@@ -65,7 +117,10 @@ permissive origin conferring a stricter target's access.
 
 > Mitigation spine to expand: §3 (policy-enforced attended/unattended seam), §2.2
 > (per-user isolation, no pooling); one human, one credential, one beneficiary
-> (`GOAL.md` tenet 7). **To be filled in (Phase 0 surface).**
+> (`GOAL.md` tenet 2). Note the token is **agent-readable in its own sandbox** (see
+> the *In-sandbox readable material* note above): the controls are blast-radius
+> (own-token, no-pooling) + egress-denial + DLP, not concealment. **To be filled in
+> (Phase 0 surface).**
 
 ## 5. Sub-agent lineage break
 
