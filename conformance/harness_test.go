@@ -2,37 +2,84 @@
 // implementation upholds the SECURITY contracts declared in sdk/interfaces. It
 // drives the harness in sdk/testkit.
 //
-// SKELETON (P0): the test cases below are keyed one-to-one to the provider-interface
-// methods and their must-never guarantees, but each is skipped — there is no
-// assertion logic yet. They exist so the contract surface is enumerated and wired
-// now; the assertions are filled in as the providers land (the full suite is a
-// Phase-5 deliverable, docs/ROADMAP.md). See conformance/README.md.
+// Phase 0: the four seams with an implementation (SecretsProvider, IdentityProvider,
+// SCMProvider, InferenceBackend) are asserted for real against the in-memory devkit
+// providers. The remaining seams (Cloud, Policy, PolicySoR, Evidence, Observe) have no
+// implementation yet, so their cases skip until their providers land (docs/ROADMAP.md;
+// the full nine-seam suite is the Phase-5 deliverable). See conformance/README.md.
+//
+// SCOPE: the devkit providers are in-memory, so a green run asserts the BEHAVIOURAL
+// contract invariants (expiry caps, attended-only refusals, fail-closed routing,
+// protected-branch refusals, unverifiable-token rejection) — not the cryptographic-
+// boundary guarantees a real KMS/OIDC/GitHub-App provides. That distinction is recorded
+// in sdk/testkit (check doc) and docs/THREAT-MODEL.md §1/§4.
 package conformance
 
 import (
+	"context"
+	"crypto/ed25519"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/console7/console7/sdk/devkit"
 	"github.com/console7/console7/sdk/testkit"
 )
 
-// providersUnderTest returns the providers a real conformance run would exercise.
-// At P0 it returns the zero value (no providers wired); the per-method stubs skip,
-// so the suite is green and the wiring compiles.
+// providersUnderTest wires the Phase-0 dev/in-memory providers the suite exercises. The
+// seams without an implementation are left nil, so their contract cases skip.
 func providersUnderTest() testkit.ProviderUnderTest {
-	return testkit.ProviderUnderTest{}
-}
-
-// TestHarnessWiring confirms the testkit harness is reachable from the suite. It is
-// not a contract check — it asserts the scaffolding composes, nothing more.
-func TestHarnessWiring(t *testing.T) {
-	if res := testkit.Run(providersUnderTest()); len(res.Failed) != 0 {
-		t.Fatalf("P0 skeleton harness must report no failures, got %d", len(res.Failed))
+	reg := devkit.NewSandboxRegistry()
+	// A throwaway IdP key: the Authenticate contract check presents an unverifiable
+	// token and asserts it is rejected, so no matching private key is needed.
+	idpPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		panic("conformance: idp keygen failed: " + err.Error())
+	}
+	return testkit.ProviderUnderTest{
+		Secrets:  devkit.NewMemSecrets(reg),
+		Identity: devkit.NewDevIdentity(idpPub, nil),
+		SCM:      devkit.NewMemSCM(15 * time.Minute),
+		Inference: devkit.NewPolicyInference(devkit.SeamPolicy{
+			SubscriptionEndpoint: "https://subscription.internal/inference",
+			OrgAPIEndpoint:       "https://vertex.internal/inference",
+			SubscriptionEnabled:  true,
+		}),
+		// The registry MemSecrets checks ownership against is also the rig the injection
+		// contract uses to provision a real owned sandbox.
+		SecretsRig: reg,
 	}
 }
 
-// skipUnimplemented is the single place the P0 skip reason is stated, so every stub
-// reads identically and the reason is changed once when the harness gains logic.
+// TestHarnessWiring runs every contract whose provider is supplied and requires that none
+// fail. It is the aggregate gate over the per-method cases below.
+func TestHarnessWiring(t *testing.T) {
+	res := testkit.Run(providersUnderTest())
+	if len(res.Checked) == 0 {
+		t.Fatal("expected at least the four Phase-0 seams to be checked, got none")
+	}
+	if len(res.Failed) != 0 {
+		t.Fatalf("conformance run reported %d contract failure(s): %v", len(res.Failed), res.Failed)
+	}
+}
+
+// runContract asserts the single contract for iface.method against the providers under
+// test. A missing provider skips (a later-phase seam); a violation fails.
+func runContract(t *testing.T, iface, method string) {
+	t.Helper()
+	err := testkit.RunContract(context.Background(), providersUnderTest(), iface, method)
+	if errors.Is(err, testkit.ErrProviderAbsent) {
+		t.Skipf("%s.%s — no provider supplied yet (lands in a later phase, docs/ROADMAP.md)", iface, method)
+	}
+	if err != nil {
+		t.Fatalf("%s.%s contract violated: %v", iface, method, err)
+	}
+}
+
+// skipUnimplemented marks a contract case whose provider does not exist yet. Its seam
+// lands in a later phase (docs/ROADMAP.md); until then the case is a placeholder that
+// records the must-never clause it will assert.
 func skipUnimplemented(t *testing.T, iface, method, mustNever string) {
 	t.Helper()
-	t.Skipf("conformance not implemented at P0 — %s.%s MUST NEVER %s (see sdk/testkit; Phase 5)", iface, method, mustNever)
+	t.Skipf("conformance deferred — no %s implementation yet; %s.%s MUST NEVER %s (lands with its provider, docs/ROADMAP.md)", iface, iface, method, mustNever)
 }
