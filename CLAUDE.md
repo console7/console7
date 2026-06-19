@@ -136,7 +136,34 @@ This repo is a Tier-1 system **and** public open source. Act accordingly.
   component is a separate, hardened artifact (`keybroker/`).
 - The **sandbox base image** (runs untrusted agent code) and the **control-plane
   image** are distinct artifacts with distinct signing identities. Don't fuse them.
-- Commits are **signed**; `main` is protected; changes land via reviewed PR.
+- Commits are **signed and DCO-signed-off** (`git commit -S -s`); `main` is protected;
+  changes land via reviewed PR.
+
+## SDLC standard — this repo governs itself
+
+This repository is governed by **[`docs/standards/console7-sdlc-standard.md`](docs/standards/console7-sdlc-standard.md)**
+— a **Tier-1 × (S1 Engineered + S5 Agentic)** tailoring of a 19-control-objective
+secure-SDLC standard, bound to the **OpenSSF** posture (Scorecard, OSPS Baseline L3,
+Best Practices Badge silver). It governs **the engineering of this repo**, distinct
+from the *product's* control objectives (those are in `ROADMAP.md`). Read it before
+substantive work; cite the CO(s) a change satisfies in the PR body (CO-14.2).
+
+The standard is **self-enforcing for agent sessions** — you'll observe it by default:
+
+- **`.claude/settings.json` hooks.** A `SessionStart` hook prints the posture; a
+  `PreToolUse(Bash)` guard (`.claude/hooks/guard-bash.sh`) **blocks** direct/force
+  push to `main`, un-signed-off commits, `curl|sh`, and un-vetted dependency installs.
+  These are *in-band* convenience (tenet 2); the CI gates + branch protection are the
+  controls of record.
+- **Skills.** `.claude/skills/sdlc-compliance` and `.claude/skills/supply-chain-policy`
+  are the self-authored how-to references; they auto-load when relevant.
+- **Supply chain (CO-5/CO-12.7).** Route installs through **Socket Firewall**
+  (`sfw …`) or a lockfile-faithful install; **pin** everything (Go releases; actions
+  to full SHA); never `curl … | sh`. `.claude/` skills/agents/hooks are **code** —
+  first-party/self-authored only, enforced by `scripts/audit-skill-provenance.sh`.
+- **Gates.** secret-scan, OpenSSF Scorecard (private for now), SAST (semgrep now,
+  CodeQL when Go lands), the governance gate, and — once Go code exists — lint +
+  `govulncheck`. Fix a failing gate's cause; never seek to bypass it.
 
 ## What NOT to do
 
