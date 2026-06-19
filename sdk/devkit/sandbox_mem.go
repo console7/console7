@@ -116,9 +116,19 @@ func (r *SandboxRegistry) DeliverIfOwned(h interfaces.SandboxHandle, subject int
 // inspection hook — it lets a bench assert a token landed in the OWNER's sandbox (and,
 // by checking every other handle, nowhere else). It is deliberately the ONLY read path
 // for injected material; there is no read path on the SecretsProvider itself.
+//
+// It enforces expiry on this READ path: an expired sandbox's material is unreachable
+// (and lazily wiped) here regardless of whether any CloudProvider method has run, so a
+// token cannot be read past the sandbox's MaxTTL even without an explicit teardown — the
+// registry's Owns / DeliverIfOwned / Injected paths are all fail-closed past expiry.
 func (r *SandboxRegistry) Injected(h interfaces.SandboxHandle) ([]byte, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if b, bound := r.bound[h.ID]; !bound || !b.live() {
+		// Unknown or expired binding: wipe any lingering material and report nothing.
+		delete(r.injected, h.ID)
+		return nil, false
+	}
 	m, ok := r.injected[h.ID]
 	if !ok {
 		return nil, false

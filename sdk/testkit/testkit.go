@@ -431,16 +431,13 @@ func registry() []check {
 			run: func(ctx context.Context, p ProviderUnderTest) error {
 				ts, err := p.PolicySoR.ResolveRepo(ctx, confUnknownRepo)
 				if err != nil {
-					return fmt.Errorf("resolve of an unknown repo errored: %w", err)
+					// Denying an unknown target by RETURNING AN ERROR is itself a valid
+					// fail-closed response (the orchestrator treats it as deny). Either an
+					// error or a most-restrictive coordinate conforms; only a permissive
+					// resolution violates the contract.
+					return nil
 				}
-				// Fail closed: an unknown target must resolve to the MOST restrictive tier,
-				// never a permissive one. "At least as restrictive as Tier1" admits both
-				// TierUnknown and a provider whose most-restrictive real tier is Tier1, while
-				// rejecting any permissive (Tier2..Tier4) answer.
-				if interfaces.Tier1.MoreRestrictiveThan(ts.Tier) {
-					return fmt.Errorf("unknown repo resolved to a permissive tier (%d) instead of failing closed", ts.Tier)
-				}
-				return nil
+				return assertFailClosedTarget("repo", ts)
 			},
 		},
 		{
@@ -449,12 +446,9 @@ func registry() []check {
 			run: func(ctx context.Context, p ProviderUnderTest) error {
 				ts, err := p.PolicySoR.ResolveResource(ctx, interfaces.ResourceRef{Kind: "service", ID: "unregistered"})
 				if err != nil {
-					return fmt.Errorf("resolve of an unknown resource errored: %w", err)
+					return nil // fail-closed by error is acceptable (see ResolveRepo).
 				}
-				if interfaces.Tier1.MoreRestrictiveThan(ts.Tier) {
-					return fmt.Errorf("unknown resource resolved to a permissive tier (%d) instead of failing closed", ts.Tier)
-				}
-				return nil
+				return assertFailClosedTarget("resource", ts)
 			},
 		},
 		{
@@ -489,7 +483,12 @@ func registry() []check {
 				if second.AppendedAt.Before(first.AppendedAt) {
 					return errors.New("chain ordered by the caller's ObservedAt, not the sink's AppendedAt")
 				}
-				if len(second.Hash) == 0 || bytes.Equal(first.Hash, second.Hash) {
+				// Every appended record must carry its chain hash — the first as much as the
+				// second, or the chain's anchor has no tamper-evidence link.
+				if len(first.Hash) == 0 || len(second.Hash) == 0 {
+					return errors.New("an appended record carries no chain hash")
+				}
+				if bytes.Equal(first.Hash, second.Hash) {
 					return errors.New("records are not distinctly hash-chained")
 				}
 				return nil
@@ -516,10 +515,38 @@ func registry() []check {
 				if err := p.Evidence.Stream(ctx, interfaces.RecordRef{Sequence: 1 << 40}); err == nil {
 					return errors.New("streamed an uncommitted record reference instead of failing closed")
 				}
+				// A ref naming an existing sequence but with a TAMPERED hash must also be
+				// rejected — a RecordRef identifies the committed record by sequence AND hash,
+				// so validating only the sequence would accept a forged reference.
+				forged := interfaces.RecordRef{Sequence: ref.Sequence, AppendedAt: ref.AppendedAt, Hash: append([]byte(nil), ref.Hash...)}
+				if len(forged.Hash) == 0 {
+					forged.Hash = []byte{0x00}
+				} else {
+					forged.Hash[0] ^= 0xff
+				}
+				if err := p.Evidence.Stream(ctx, forged); err == nil {
+					return errors.New("streamed a ref with a forged hash instead of failing closed")
+				}
 				return nil
 			},
 		},
 	}
+}
+
+// assertFailClosedTarget verifies a coordinate resolved for an UNKNOWN target is fail-closed
+// on BOTH axes: the tier is at least as restrictive as Tier1 (admitting TierUnknown or a
+// provider whose most-restrictive real tier is Tier1, rejecting any permissive Tier2..Tier4),
+// and the stratum is the fail-closed default StratumUnknown (returning a known stratum for an
+// unknown target would claim knowledge it does not have, certifying a partially-permissive
+// profile). kind is "repo" or "resource" for the message.
+func assertFailClosedTarget(kind string, ts interfaces.TierStratum) error {
+	if interfaces.Tier1.MoreRestrictiveThan(ts.Tier) {
+		return fmt.Errorf("unknown %s resolved to a permissive tier (%d) instead of failing closed", kind, ts.Tier)
+	}
+	if ts.Stratum != interfaces.StratumUnknown {
+		return fmt.Errorf("unknown %s resolved to a non-fail-closed stratum (%d); expected StratumUnknown", kind, ts.Stratum)
+	}
+	return nil
 }
 
 // Contracts returns the set of SECURITY contracts the conformance suite asserts, keyed to

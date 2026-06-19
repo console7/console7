@@ -198,6 +198,74 @@ func TestMintSessionIdentity_RejectsDuplicateSession(t *testing.T) {
 	}
 }
 
+// countingSecrets counts MintEphemeral calls, to prove a rejected duplicate session never
+// reaches credential issuance.
+type countingSecrets struct {
+	interfaces.SecretsProvider
+	mints int
+}
+
+func (c *countingSecrets) MintEphemeral(ctx context.Context, req interfaces.EphemeralRequest) (interfaces.CredentialRef, error) {
+	c.mints++
+	return c.SecretsProvider.MintEphemeral(ctx, req)
+}
+
+// TestMintSessionIdentity_DuplicateMintsNoCredentials: a duplicate session ID is rejected at
+// the reservation BEFORE any credential is minted, so the loser leaves no orphaned creds.
+func TestMintSessionIdentity_DuplicateMintsNoCredentials(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	cs := &countingSecrets{SecretsProvider: devkit.NewMemSecrets(reg)}
+	ca := signing.NewDevCA()
+	idpPub, idpPriv, _ := ed25519.GenerateKey(nil)
+	b := broker.New(devkit.NewDevIdentity(idpPub, nil), cs, devkit.NewMemSCM(15*time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	req := broker.SessionRequest{
+		Authn:           devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID:       "s1",
+		Persona:         interfaces.PersonaAuthor,
+		Repo:            interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:          "feature/x",
+		TTL:             time.Hour,
+		SessionDeadline: time.Now().Add(30 * time.Minute),
+	}
+	if _, err := b.MintSessionIdentity(context.Background(), req); err != nil {
+		t.Fatalf("first mint: %v", err)
+	}
+	req.Authn = devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour))
+	if _, err := b.MintSessionIdentity(context.Background(), req); err == nil {
+		t.Fatal("expected duplicate session to be rejected")
+	}
+	if cs.mints != 1 {
+		t.Errorf("duplicate minted %d ephemeral creds; want 1 (the loser must not reach minting)", cs.mints)
+	}
+}
+
+// TestSignSession_RefusesAfterDeadline: the NHI signer is refused once the session's hard
+// deadline passes, even if ReleaseSession has not run — signatures cannot outlive the session.
+func TestSignSession_RefusesAfterDeadline(t *testing.T) {
+	b := newBench(t)
+	ctx := context.Background()
+	if _, err := b.broker.MintSessionIdentity(ctx, broker.SessionRequest{
+		Authn:           devkit.IssueDevAssertion(b.idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID:       "s1",
+		Persona:         interfaces.PersonaAuthor,
+		Repo:            interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:          "feature/x",
+		TTL:             time.Hour,
+		SessionDeadline: time.Now().Add(150 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	// Within the deadline, signing works.
+	if _, err := b.broker.SignSession(ctx, "s1", []byte("x")); err != nil {
+		t.Fatalf("expected signing within the deadline: %v", err)
+	}
+	time.Sleep(250 * time.Millisecond) // past the 150ms deadline
+	if _, err := b.broker.SignSession(ctx, "s1", []byte("x")); err == nil {
+		t.Error("signed past the session deadline (signer outlived the session)")
+	}
+}
+
 // TestSpike_RejectsForgedLogin confirms an unverifiable SSO assertion never yields a
 // credentialed session — the broker mints nothing on a failed authenticate.
 func TestSpike_RejectsForgedLogin(t *testing.T) {

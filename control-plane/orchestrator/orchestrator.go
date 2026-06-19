@@ -288,7 +288,9 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	// 9. Teardown. Destruction is irreversible and wipes the injected token; it uses
 	// cleanupCtx so a cancelled request cannot skip it. Record the end.
 	if err := o.Cloud.DestroySandbox(cleanupCtx, sandbox); err != nil {
-		_ = stamp("session-aborted", "destroy-sandbox: "+err.Error())
+		// Use the cleanup context (not the possibly-cancelled request ctx) so a sink that
+		// honours cancellation still records this teardown failure — the sandbox may be live.
+		_ = emit(cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
 		return Summary{}, fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
 	}
 	if err := stamp("session-end", string(req.SessionID)); err != nil {

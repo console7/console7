@@ -29,7 +29,16 @@ type Broker struct {
 	Binder    *signing.NHIBinder
 
 	mu      sync.Mutex
-	signers map[interfaces.SessionID]*signing.SessionSigner
+	signers map[interfaces.SessionID]sessionSigner
+}
+
+// sessionSigner is a session's retained NHI signer plus the hard deadline past which it
+// must not sign. A nil signer marks a RESERVED slot (minting in progress): the session ID is
+// claimed so a concurrent duplicate fails BEFORE issuing any credential, but signing is
+// refused until the real signer is registered.
+type sessionSigner struct {
+	signer   *signing.SessionSigner
+	deadline time.Time
 }
 
 // New returns a Broker wired to the given seams and NHI binder. Each is required by the
@@ -43,7 +52,7 @@ func New(id interfaces.IdentityProvider, secrets interfaces.SecretsProvider, scm
 		SCM:       scm,
 		Inference: inference,
 		Binder:    binder,
-		signers:   make(map[interfaces.SessionID]*signing.SessionSigner),
+		signers:   make(map[interfaces.SessionID]sessionSigner),
 	}
 }
 
@@ -105,23 +114,25 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 		return MintedSession{}, err
 	}
 
-	// Reject a duplicate live session up front: replacing an in-flight session's signer
-	// would let its next SignSession use the wrong subject's key and let either session's
-	// ReleaseSession drop the other's. (Re-checked atomically at registration below.)
+	// RESERVE the session ID atomically BEFORE issuing any credential, so a concurrent
+	// duplicate loses here — before MintEphemeral / MintWorkingCredential — and never leaves
+	// orphaned short-lived cloud/SCM creds alive for a session that was rejected (there is no
+	// revoke path for them). The reservation is a nil-signer placeholder; it is replaced with
+	// the real signer only after all minting succeeds, and released on any failure.
 	b.mu.Lock()
-	_, dup := b.signers[req.SessionID]
-	b.mu.Unlock()
-	if dup {
+	if _, exists := b.signers[req.SessionID]; exists {
+		b.mu.Unlock()
 		return MintedSession{}, fmt.Errorf("broker: session %q already has a live signer", req.SessionID)
 	}
+	b.signers[req.SessionID] = sessionSigner{} // reserved (nil signer)
+	b.mu.Unlock()
 
 	// 2. Bind a per-session NHI to the verified subject. This is the root of lineage. The
 	// signer (which owns the ephemeral private key) is retained inside the broker, never
-	// returned, so the control plane signs through SignSession and holds no key. It is
-	// registered only AFTER all minting succeeds (below), so a failed mint never leaves a
-	// usable signer for a session that did not launch.
+	// returned, so the control plane signs through SignSession and holds no key.
 	signer, err := b.Binder.Bind(subject, req.SessionID, req.Persona)
 	if err != nil {
+		b.ReleaseSession(req.SessionID) // drop the reservation
 		return MintedSession{}, err
 	}
 
@@ -134,6 +145,7 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 		SessionDeadline: req.SessionDeadline,
 	})
 	if err != nil {
+		b.ReleaseSession(req.SessionID)
 		return MintedSession{}, err
 	}
 
@@ -146,18 +158,15 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 		SessionDeadline: req.SessionDeadline,
 	})
 	if err != nil {
+		b.ReleaseSession(req.SessionID)
 		return MintedSession{}, err
 	}
 
-	// Register the signer only now that authentication, binding, and BOTH credential mints
-	// have succeeded — atomically re-checking for a duplicate so a racing mint cannot clobber
-	// an active session's key.
+	// Replace the reservation with the real signer, stamped with the hard session deadline so
+	// SignSession refuses to sign past it (the NHI key dies with the session like every other
+	// minted credential). We hold the reservation, so no concurrent mint can have claimed it.
 	b.mu.Lock()
-	if _, dup := b.signers[req.SessionID]; dup {
-		b.mu.Unlock()
-		return MintedSession{}, fmt.Errorf("broker: session %q already has a live signer", req.SessionID)
-	}
-	b.signers[req.SessionID] = signer
+	b.signers[req.SessionID] = sessionSigner{signer: signer, deadline: req.SessionDeadline}
 	b.mu.Unlock()
 
 	return MintedSession{
@@ -174,16 +183,20 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 
 // SignSession signs payload with the session's NHI key and returns the lineage-stamped
 // signature. The key stays inside the broker; the caller only ever sees the Signature. It
-// fails if the session has no live signer (never minted, or already released) — a released
-// key cannot sign, so signatures cannot outlive the session.
+// fails if the session has no live signer (never minted, reserved-but-not-yet-registered, or
+// already released) AND if the session has passed its deadline — so signatures cannot
+// outlive the session even when ReleaseSession is delayed or the call overruns the TTL.
 func (b *Broker) SignSession(ctx context.Context, session interfaces.SessionID, payload []byte) (signing.Signature, error) {
 	b.mu.Lock()
-	signer, ok := b.signers[session]
+	entry, ok := b.signers[session]
 	b.mu.Unlock()
-	if !ok {
+	if !ok || entry.signer == nil {
 		return signing.Signature{}, fmt.Errorf("broker: no live signer for session %q", session)
 	}
-	return signer.Sign(payload), nil
+	if !time.Now().Before(entry.deadline) {
+		return signing.Signature{}, fmt.Errorf("broker: signer for session %q has passed its session deadline", session)
+	}
+	return entry.signer.Sign(payload), nil
 }
 
 // ReleaseSession discards the session's NHI signer, ending its ability to sign. The
