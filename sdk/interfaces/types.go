@@ -56,6 +56,17 @@ const (
 	Tier4 // lowest consequence — highest volume.
 )
 
+// canonical maps any unrecognised/out-of-range value to TierUnknown, so a reduction
+// never carries a bogus tier through to a caller that switches on the known tiers.
+func (t Tier) canonical() Tier {
+	switch t {
+	case Tier1, Tier2, Tier3, Tier4:
+		return t
+	default:
+		return TierUnknown
+	}
+}
+
 // restrictiveness ranks a Tier so that a larger rank is MORE restrictive. Any
 // unknown/unrecognised value ranks highest, so cross-tier resolution fails closed.
 func (t Tier) restrictiveness() int {
@@ -87,10 +98,10 @@ func MostRestrictive(tiers ...Tier) Tier {
 	if len(tiers) == 0 {
 		return TierUnknown
 	}
-	winner := tiers[0]
+	winner := tiers[0].canonical()
 	for _, t := range tiers[1:] {
-		if t.MoreRestrictiveThan(winner) {
-			winner = t
+		if c := t.canonical(); c.MoreRestrictiveThan(winner) {
+			winner = c
 		}
 	}
 	return winner

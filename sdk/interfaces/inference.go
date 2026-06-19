@@ -8,9 +8,14 @@ import "context"
 type InferenceMode int
 
 const (
+	// ModeUnspecified is the zero value and is INVALID. It exists so that a selection
+	// constructed or decoded without an explicit Mode does NOT silently default to a
+	// credential class — least of all the user's subscription. Resolve MUST reject it
+	// (fail closed).
+	ModeUnspecified InferenceMode = iota
 	// ModeSubscription backs ONLY attended, single-user, first-party interactive
 	// sessions (one human, one credential, one beneficiary).
-	ModeSubscription InferenceMode = iota
+	ModeSubscription
 	// ModeOrgAPI backs any session without a present human or with more than one
 	// beneficiary — orchestrated, scheduled, webhook-triggered, headless/unattended,
 	// or cross-repo fan-out — via an org API key (Vertex / Bedrock / direct
@@ -52,8 +57,10 @@ type InferenceBackend interface {
 	// Resolve selects the backend endpoint for a session, enforcing the
 	// attended/unattended seam in policy.
 	//
-	// SECURITY: the implementation MUST refuse a ModeSubscription selection unless it
-	// is both Attended and sel.Beneficiaries == 1, and MUST route to ModeOrgAPI any
+	// SECURITY: the implementation MUST reject ModeUnspecified (and any unrecognised
+	// mode) rather than defaulting — fail closed. It MUST refuse a ModeSubscription
+	// selection unless it is both Attended and sel.Beneficiaries == 1, and MUST route
+	// to ModeOrgAPI any
 	// session without a present human or with more than one beneficiary (orchestrated,
 	// scheduled, triggered,
 	// headless/unattended, or cross-repo fan-out) — a subscription credential MUST

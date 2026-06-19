@@ -15,12 +15,13 @@ type EphemeralRequest struct {
 	Scopes []string
 	// TTL is the requested lifetime.
 	TTL time.Duration
-	// SessionMaxTTL is the authoritative session-lifetime ceiling, supplied so the
-	// provider has a deadline to cap against (it does not otherwise know the session
-	// profile). The provider MUST cap the credential's expiry to no later than
-	// min(now+TTL, now+SessionMaxTTL) and MUST NOT issue material that outlives the
-	// session.
-	SessionMaxTTL time.Duration
+	// SessionDeadline is the authoritative ABSOLUTE time the session ends, supplied so
+	// the provider has a hard deadline to cap against (it does not otherwise know the
+	// session profile). The provider MUST cap the credential's expiry to no later than
+	// min(now+TTL, SessionDeadline) and MUST NOT issue material that outlives the
+	// session. A duration ceiling alone is insufficient — a credential minted
+	// mid-session with a fresh TTL would otherwise outlive the session end.
+	SessionDeadline time.Time
 }
 
 // SubscriptionToken is a user's freshly-captured subscription OAuth token, handed to
@@ -51,9 +52,14 @@ type SubscriptionInjection struct {
 	SessionID SessionID
 	// Sandbox is the owning subject's sandbox to inject into.
 	Sandbox SandboxHandle
-	// Attended MUST be true: a subscription token backs only attended, single-user
-	// sessions. The provider MUST refuse injection when it is false (DESIGN.md §3).
+	// Attended MUST be true: a subscription token backs only attended sessions. The
+	// provider MUST refuse injection when it is false (DESIGN.md §3).
 	Attended bool
+	// Beneficiaries is the number of distinct beneficiaries the session serves. A
+	// subscription token backs a single beneficiary only, so the provider MUST refuse
+	// injection unless this is exactly 1 — carried here (not folded into Attended) so
+	// an attended fan-out (Attended && Beneficiaries > 1) is refused at this seam too.
+	Beneficiaries int
 }
 
 // SecretsProvider abstracts secret storage, envelope encryption, and KMS
@@ -67,7 +73,7 @@ type SecretsProvider interface {
 	// SECURITY: the implementation MUST NEVER return long-lived material, and MUST
 	// NEVER return plaintext credential material to the control plane at all — only
 	// a CredentialRef (DESIGN.md §2.1, §8). The minted credential MUST carry an
-	// expiry no later than min(req.TTL, req.SessionMaxTTL), MUST be scoped to
+	// expiry no later than min(now+req.TTL, req.SessionDeadline), MUST be scoped to
 	// req.Scopes and no wider, and MUST become unusable when the session ends.
 	// Workload-identity federation / OIDC SHOULD be preferred over any stored secret.
 	MintEphemeral(ctx context.Context, req EphemeralRequest) (CredentialRef, error)
@@ -89,11 +95,11 @@ type SecretsProvider interface {
 	// directly into THAT user's sandbox at session start.
 	//
 	// SECURITY: the implementation MUST verify in.Sandbox belongs to in.Subject's
-	// session and MUST refuse injection when in.Attended is false; it MUST inject the
-	// token only into that owning sandbox, MUST NOT return the plaintext token to the
-	// caller (the control plane never sees it), and MUST NEVER use it for any
-	// beneficiary but its owner or for any unattended/orchestrated session (DESIGN.md
-	// §2.2, §3).
+	// session and MUST refuse injection unless in.Attended is true AND
+	// in.Beneficiaries == 1; it MUST inject the token only into that owning sandbox,
+	// MUST NOT return the plaintext token to the caller (the control plane never sees
+	// it), and MUST NEVER use it for any beneficiary but its owner or for any
+	// unattended/orchestrated/multi-beneficiary session (DESIGN.md §2.2, §3).
 	InjectSubscriptionToken(ctx context.Context, in SubscriptionInjection) error
 
 	// RevokeSubject deletes a user's stored material on revocation/offboarding
