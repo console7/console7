@@ -18,12 +18,19 @@ The GCP egress realisation MUST make the wall **unbypassable** (see
   routing, never reliant on a proxy env var. VPC Service Controls constrains supported
   **Google Cloud APIs** only and does **not** block raw TCP/HTTPS to third-party
   internet hosts; treating VPC-SC as the arbitrary-egress control leaves a bypass.
+- **Scope egress enforcement per sandbox, not per node.** VPC firewall rules target by
+  service account / network tag at the **node** level, so two sandbox pods with
+  different allowlists sharing a GKE node would share egress — one sandbox inheriting
+  another's allowlist violates the per-session `EgressPolicy`. The default MUST require
+  **isolated node placement or pod-level egress enforcement** (e.g. per-pod
+  NetworkPolicy / egress sidecar) in addition to the VPC firewall.
 - **Block every GCE metadata endpoint** from the sandbox — IPv4 `169.254.169.254`,
   IPv6 `fd20:ce::254`, and the DNS names `metadata.google.internal` **and the
   `metadata.goog` alias** — and, on GKE, the **node-local GKE metadata server at
-  `169.254.169.252` (port 988)** used by Workload Identity. Enforce at the **node / pod
-  network boundary**, not only a gateway hop: on GKE the metadata request is intercepted
-  on-node and never leaves the VM, so a gateway-only block misses it.
+  `169.254.169.252` (ports 988 and 987; older clusters use `127.0.0.1` on those
+  ports)** used by Workload Identity. Enforce at the **node / pod network boundary**,
+  not only a gateway hop: on GKE the metadata request is intercepted on-node and never
+  leaves the VM, so a gateway-only block misses it.
 - **Add no maintainer-controlled hosts to the allowlist** (`GOAL.md` tenet 1).
 
 > P0: placeholder — no implementation.

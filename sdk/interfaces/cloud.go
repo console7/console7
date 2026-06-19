@@ -34,8 +34,10 @@ type SandboxHandle struct {
 }
 
 // CloudProvider abstracts sandbox isolation, networking, and the egress perimeter
-// (ARCHITECTURE.md §5; default ref: GCP — gVisor + VPC Service Controls). It is the
-// seam behind which the authoritative, out-of-band boundary controls live.
+// (ARCHITECTURE.md §5; default ref: GCP — gVisor + VPC firewall/NAT for the egress
+// perimeter, with VPC Service Controls guarding the Google API surface only, not
+// arbitrary egress). It is the seam behind which the authoritative, out-of-band
+// boundary controls live.
 type CloudProvider interface {
 	// ProvisionSandbox creates a per-session, isolated, ephemeral sandbox enforcing
 	// the spec's egress policy from the moment it exists.

@@ -24,8 +24,9 @@ sandbox. Independent analysis of an adjacent platform (see `docs/THREAT-MODEL.md
   routing MUST NOT depend on the workload honouring `HTTP(S)_PROXY` (a hostile or
   buggy client ignores it).
 - **Block cloud metadata / IMDS at the node/pod boundary, not just a gateway.** Every
-  metadata endpoint MUST be unreachable — IPv4 `169.254.169.254`, IPv6 (e.g. GCP
-  `fd20:ce::254`), and metadata DNS names — regardless of `no_proxy`. Enforce at the
+  metadata endpoint MUST be unreachable — **including** IPv4 `169.254.169.254`, IPv6
+  (GCP uses `fd20:ce::254`), and every metadata DNS name / alias the platform exposes
+  — regardless of `no_proxy`. Enforce at the
   sandbox / pod / node network boundary: on managed-Kubernetes paths the node-local
   metadata server is intercepted on the VM and the request never reaches a gateway, so
   a gateway-only block misses it. It is a credential-theft and SSRF vector.

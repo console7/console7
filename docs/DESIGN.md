@@ -190,8 +190,10 @@ to a stricter target — that is the privilege-escalation path.
 ### 5.2 Egress is the authoritative network control
 
 - Egress **MUST** be **default-deny at the sandbox boundary**, via an **out-of-band
-  proxy / network perimeter** (e.g. VPC Service Controls) — **not** the engine's own
-  in-process proxy, which only constrains well-behaved clients (*D6*).
+  proxy / network perimeter** (e.g. cloud firewall rules + NAT/forward-proxy routing;
+  note VPC Service Controls guards a cloud's **API surface only**, not arbitrary TCP
+  egress) — **not** the engine's own in-process proxy, which only constrains
+  well-behaved clients (*D6*).
 - The allowlist is composed from: the chosen inference endpoint, approved package
   registries / artefact chokepoint, approved internal services, and approved MCP
   domains. Anything else is denied and the attempt is visible.
@@ -329,7 +331,8 @@ provide them, and the docs **MUST** state them:
   make Console7 the mandatory path, Console7 cannot enforce that — it is an endpoint
   control the value proposition depends on.
 - **Network perimeter.** The default-deny egress wall is realised with the adopter's
-  cloud networking (e.g. VPC Service Controls); Console7 configures, the cloud
+  cloud networking (e.g. VPC firewall rules + NAT; VPC Service Controls guards the
+  cloud's API surface only, not arbitrary egress); Console7 configures, the cloud
   enforces.
 - **Policy system-of-record.** The authoritative tier × stratum data lives in the
   adopter's GRC; Console7 reads it.

@@ -144,6 +144,7 @@ permissive origin conferring a stricter target's access.
 
 Console7's posture relies on controls it does not itself own (`DESIGN.md` §11);
 adopters MUST provide them and the threat model MUST state them: endpoint control
-(MDM/EDR/egress), the network perimeter (e.g. VPC Service Controls), the policy
+(MDM/EDR/egress), the network perimeter (e.g. cloud firewall / NAT; VPC Service
+Controls guards the cloud's API surface only), the policy
 system-of-record (adopter GRC), and SCM branch protection. **To be expanded with the
 trust assumptions each abuse class above leans on.**
