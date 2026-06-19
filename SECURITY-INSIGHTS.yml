@@ -1,0 +1,91 @@
+# OpenSSF Security Insights (https://github.com/ossf/security-insights-spec)
+# Machine-readable security metadata for the Console7 repository. Targets schema
+# v1.0.0. Validate with the official tooling (ossf/si-tooling) before relying on it.
+header:
+  schema-version: 1.0.0
+  expiration-date: '2027-06-19T00:00:00.000Z'
+  last-updated: '2026-06-19'
+  last-reviewed: '2026-06-19'
+  project-url: https://github.com/console7/console7
+  license: https://github.com/console7/console7/blob/main/LICENSE
+  comment: |
+    Console7 is a Tier-1, public, self-hosted control plane. It governs itself per
+    docs/standards/console7-sdlc-standard.md (a 19-control-objective tailoring bound
+    to the OpenSSF baseline).
+
+project-lifecycle:
+  status: active
+  roadmap: https://github.com/console7/console7/blob/main/docs/ROADMAP.md
+  bug-fixes-only: false
+  core-maintainers:
+    - https://github.com/NaanyaBiz
+  release-process: |
+    Pre-alpha: no supported release yet. The first tagged release ships signed, with
+    an SBOM and provenance (ROADMAP Phase 1).
+
+contribution-policy:
+  accepts-pull-requests: true
+  accepts-automated-pull-requests: true
+  automated-tools-list:
+    - automated-tool: dependabot[bot]
+      action: allowed
+      path:
+        - /
+  contributing-policy: https://github.com/console7/console7/blob/main/CONTRIBUTING.md
+  code-of-conduct: https://github.com/console7/console7/blob/main/CODE_OF_CONDUCT.md
+
+documentation:
+  - https://github.com/console7/console7/tree/main/docs
+
+distribution-points:
+  - https://github.com/console7/console7
+
+security-artifacts:
+  threat-model:
+    threat-model-created: false
+    comment: |
+      Threat model is in docs/DESIGN.md §10; docs/THREAT-MODEL.md is a placeholder to
+      be completed in Phase 0.
+  self-assessment:
+    self-assessment-created: true
+    comment: |
+      docs/standards/console7-sdlc-standard.md is the controlled self-assessment of
+      the control posture, bound to the OpenSSF baseline (Scorecard / OSPS L3 /
+      Best Practices Badge silver target).
+
+security-testing:
+  - tool-type: sca
+    tool-name: Socket
+    integration:
+      ad-hoc: false
+      ci: true
+      before-release: true
+    comment: |
+      Socket GitHub App scans dependency-changing PRs; Socket Firewall routes
+      installs locally. Plus Dependabot, gitleaks (full-history secret scan), and the
+      CO-12.7 agentic-artifact provenance gate. CodeQL (SAST) and govulncheck activate
+      when Go code lands.
+
+security-contacts:
+  - type: email
+    value: security@naanya.biz
+    primary: true
+
+vulnerability-reporting:
+  accepts-vulnerability-reports: true
+  email-contact: security@naanya.biz
+  security-policy: https://github.com/console7/console7/blob/main/SECURITY.md
+  bug-bounty-available: false
+  comment: |
+    Report privately via GitHub Security Advisories or security@naanya.biz. Do not
+    open public issues for vulnerabilities.
+
+dependencies:
+  third-party-packages: false
+  dependencies-lifecycle:
+    policy-url: https://github.com/console7/console7/blob/main/docs/standards/console7-sdlc-standard.md
+    comment: |
+      No third-party runtime packages yet (no go.mod). Supply-chain policy: Socket
+      Firewall + lockfile-faithful installs, SHA-pinned GitHub Actions, and Dependabot.
+  env-dependencies-policy:
+    policy-url: https://github.com/console7/console7/blob/main/docs/standards/console7-sdlc-standard.md

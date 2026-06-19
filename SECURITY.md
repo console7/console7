@@ -10,14 +10,12 @@ We treat vulnerabilities accordingly.
 GitHub Security Advisories (Security → Report a vulnerability) or to the security
 contact below.
 
-<!-- PLACEHOLDER: set a monitored address (e.g. a dedicated alias or a
-     security.txt / RFC 9116 contact) before public launch. -->
-- **SECURITY_CONTACT:** `<SECURITY_CONTACT — TBD>` (e.g. `security@console7.example`)
+- **SECURITY_CONTACT:** `security@naanya.biz`
 
 Please include: affected component (e.g. `keybroker`, `control-plane`, `sandbox`,
 a provider, the SDK), version/commit, a description, and reproduction steps. We aim
-to acknowledge within `<ACK_SLA — TBD>` business days and to coordinate a fix and
-disclosure timeline with you.
+to acknowledge within **3 business days** and to coordinate a fix and disclosure
+timeline with you.
 
 ## Scope (high-priority areas)
 
