@@ -96,6 +96,12 @@ surface — this is a Tier-1, public, security-sensitive codebase.
   forward from later phases without being asked.
 - **Small, reviewable PRs.** Never commit to `main` directly. Open a feature branch
   and a PR whose description **maps each change to the doc section it implements**.
+- **Review before you push.** For substantive changes (interfaces, logic,
+  security-relevant contracts, `.claude/`/CI code), run the **`pre-pr-review`** skill
+  — a local adversarial fan-out (correctness + security + spec-alignment over the
+  diff) — and reconcile findings **before** `git push`. It is defence-in-depth that
+  front-runs the authoritative Codex/CI/human gates (tenet 2), never a replacement;
+  skip it for pure docs (proportionality, tenet 8).
 - Everything composes against `sdk/interfaces`. An interface change, its reference
   implementation, and its conformance test land in **one atomic PR**.
 - If you believe a requirement or tenet is **wrong**, say so in the PR description

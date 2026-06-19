@@ -22,6 +22,11 @@ this skill is the quick "how do I stay compliant" reference.
   this is the project's standing rule, and what the PR template asks for.
 - **Small, reviewable PRs.** An interface change, its reference implementation, and
   its conformance test land in one atomic PR.
+- **Review before you push.** For a substantive change, run the **`pre-pr-review`**
+  skill (local adversarial correctness + security + spec-alignment fan-out) and
+  reconcile findings before `git push` — defence-in-depth that front-runs the
+  authoritative Codex/CI/human review (tenet 2), not a replacement. The Bash guard
+  prints a non-blocking reminder on feature-branch pushes that touch non-doc files.
 
 ## Adding or changing a dependency (CO-5 / CO-12.7)
 
