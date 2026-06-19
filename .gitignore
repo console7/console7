@@ -1,0 +1,46 @@
+# --- Secrets & credentials (NEVER commit these) ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.crt
+credentials.json
+service-account*.json
+gcloud-key*.json
+.aws/
+.azure/
+.kube/config
+secrets/
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+
+# --- Dependencies / build output ---
+node_modules/
+dist/
+build/
+out/
+target/
+bin/
+*.log
+coverage/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+vendor/
+
+# --- Tooling / OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.claude/settings.local.json
