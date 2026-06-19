@@ -13,21 +13,30 @@ type EphemeralRequest struct {
 	// Scopes are the least-privilege permissions the credential should carry. The
 	// provider MUST NOT grant more than these.
 	Scopes []string
-	// TTL is the requested lifetime. The provider MUST cap it to the session's
-	// MaxTTL and MUST NOT issue non-expiring material.
+	// TTL is the requested lifetime.
 	TTL time.Duration
+	// SessionMaxTTL is the authoritative session-lifetime ceiling, supplied so the
+	// provider has a deadline to cap against (it does not otherwise know the session
+	// profile). The provider MUST cap the credential's expiry to no later than
+	// min(now+TTL, now+SessionMaxTTL) and MUST NOT issue material that outlives the
+	// session.
+	SessionMaxTTL time.Duration
 }
 
-// SealedToken is per-user, envelope-encrypted credential material at rest — the one
-// unavoidable stored credential, the user's subscription OAuth token (DESIGN.md
-// §2.2). It carries only ciphertext and the KMS key reference, never plaintext.
-type SealedToken struct {
+// SubscriptionToken is a user's freshly-captured subscription OAuth token, handed to
+// the KMS-owning provider (the key broker) to be sealed and stored — the one
+// unavoidable stored credential (DESIGN.md §2.2). Sealing happens INSIDE the
+// provider so the per-user envelope-encryption invariant is enforced at the KMS
+// seam, not trusted from a caller-supplied blob; the plaintext exists only
+// transiently inside the broker and MUST NEVER reach the control plane (DESIGN.md
+// §8; GOAL.md tenet 4).
+type SubscriptionToken struct {
+	// Subject is the token's owner; storage is keyed per-user (no pooling).
 	Subject Subject
-	// Ciphertext is envelope-encrypted under the adopter's customer-managed KMS key.
-	Ciphertext []byte
-	// KMSKeyRef identifies the per-user customer-managed key; it is a reference, not
-	// key material.
-	KMSKeyRef string
+	// Token is the OAuth token material to seal. The provider MUST envelope-encrypt it
+	// under the owner's per-user customer-managed KMS key before persisting, and MUST
+	// NEVER persist, log, or return it unsealed.
+	Token []byte
 }
 
 // SubscriptionInjection identifies a per-user subscription-token injection into one
@@ -58,20 +67,23 @@ type SecretsProvider interface {
 	// SECURITY: the implementation MUST NEVER return long-lived material, and MUST
 	// NEVER return plaintext credential material to the control plane at all — only
 	// a CredentialRef (DESIGN.md §2.1, §8). The minted credential MUST carry an
-	// expiry no later than req.TTL (and the session MaxTTL), MUST be scoped to
+	// expiry no later than min(req.TTL, req.SessionMaxTTL), MUST be scoped to
 	// req.Scopes and no wider, and MUST become unusable when the session ends.
 	// Workload-identity federation / OIDC SHOULD be preferred over any stored secret.
 	MintEphemeral(ctx context.Context, req EphemeralRequest) (CredentialRef, error)
 
-	// StoreSubscriptionToken persists a user's subscription OAuth token, envelope-
-	// encrypted under that user's KMS key.
+	// StoreSubscriptionToken seals a user's subscription OAuth token and persists it.
+	// The provider performs the envelope encryption itself (it owns the KMS); it does
+	// NOT accept caller-sealed ciphertext, so the per-user-key invariant is enforced
+	// at the seam rather than trusted.
 	//
-	// SECURITY: the implementation MUST store the token ONLY under a per-user key,
-	// MUST envelope-encrypt it under the adopter's customer-managed KMS, and MUST
-	// NOT make it readable by platform operators (no standing operator read path).
-	// It MUST NEVER pool the token or store it under a shared/multi-user key
-	// (DESIGN.md §2.2; GOAL.md tenet 7 — one human, one credential, one beneficiary).
-	StoreSubscriptionToken(ctx context.Context, tok SealedToken) error
+	// SECURITY: the implementation MUST envelope-encrypt tok.Token under tok.Subject's
+	// own per-user customer-managed KMS key before persisting, MUST store it ONLY
+	// under that per-user key, and MUST NOT make it readable by platform operators
+	// (no standing operator read path). It MUST NEVER persist or log the token
+	// unsealed, and MUST NEVER pool it or store it under a shared/multi-user key
+	// (DESIGN.md §2.2, §8; GOAL.md tenet 7 — one human, one credential, one beneficiary).
+	StoreSubscriptionToken(ctx context.Context, tok SubscriptionToken) error
 
 	// InjectSubscriptionToken decrypts a user's subscription token and injects it
 	// directly into THAT user's sandbox at session start.

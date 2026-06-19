@@ -6,10 +6,11 @@ import "context"
 // operate-lane session to diagnose.
 type TelemetryQuery struct {
 	SessionID SessionID
-	// Target is the resource whose telemetry is being read; its tier sets redaction
-	// depth and the right to attach.
+	// Target is the resource whose telemetry is being read. Its tier — which sets
+	// redaction depth and the right to attach — is NOT a field here: the gateway MUST
+	// resolve it authoritatively (see the SECURITY contract on Query), never trust a
+	// caller-supplied value.
 	Target ResourceRef
-	Tier   Tier
 	// Query is the read expression (e.g. a log/metrics query). It is read-only by
 	// construction; see the SECURITY contract on Query.
 	Query string
@@ -35,9 +36,10 @@ type ObserveGateway interface {
 	// — it MUST reject any query that is not a pure read, and the operate session's
 	// underlying cloud identity MUST itself be read-only (IAM is the authoritative
 	// block; this is defence-in-depth, DESIGN.md §5.4). The implementation MUST
-	// redact before returning (depth scaling with q.Tier), MUST audit every query,
-	// MUST rate-limit, and MUST NEVER hand back raw log-store credentials or
-	// un-redacted high-tier data. A detected mutating attempt MUST be denied and
-	// emitted as an incident to the EvidenceSink.
+	// resolve q.Target's tier from the authoritative policy system-of-record (NEVER a
+	// caller-supplied value) and redact before returning with depth scaling to that
+	// resolved tier, MUST audit every query, MUST rate-limit, and MUST NEVER hand back
+	// raw log-store credentials or un-redacted high-tier data. A detected mutating
+	// attempt MUST be denied and emitted as an incident to the EvidenceSink.
 	Query(ctx context.Context, q TelemetryQuery) (TelemetryResult, error)
 }

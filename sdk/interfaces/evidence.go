@@ -10,10 +10,17 @@ import (
 // lineage stamp so attribution survives sub-agent spawning (DESIGN.md §2.3, §10.5).
 type EvidenceRecord struct {
 	SessionID SessionID
-	Subject   Subject // the human at the root of the lineage chain.
-	Persona   Persona
-	Type      string    // e.g. "tool-call", "egress-denied", "commit", "session-end".
-	Time      time.Time // event time, recorded by the caller; the sink does not reorder.
+	// Subject is the human at the root of the lineage chain.
+	Subject Subject
+	Persona Persona
+	// Type is the event kind, e.g. "tool-call", "egress-denied", "commit",
+	// "session-end".
+	Type string
+	// ObservedAt is the event time as recorded by the (untrusted) caller. It is
+	// retained for context but MUST NOT be relied on for chronology — a buggy or
+	// compromised session could back/post-date it. The authoritative time is
+	// RecordRef.AppendedAt, stamped by the sink.
+	ObservedAt time.Time
 	// Payload is the opaque, already-DLP-scanned event body. The caller is
 	// responsible for not placing secrets or production data here.
 	Payload []byte
@@ -26,6 +33,9 @@ type RecordRef struct {
 	// Hash is this record's chained hash (over its content and the prior hash),
 	// the tamper-evidence link.
 	Hash []byte
+	// AppendedAt is the authoritative time the sink committed the record, stamped by
+	// the sink itself — the trustworthy timeline for assurance.
+	AppendedAt time.Time
 }
 
 // EvidenceSink abstracts the WORM evidence store plus SIEM stream (ARCHITECTURE.md
@@ -37,10 +47,12 @@ type EvidenceSink interface {
 	//
 	// SECURITY: the store MUST be append-only/WORM — the implementation MUST NEVER
 	// expose a path to update or delete a previously written record, and MUST chain
-	// and sign each record for tamper-evidence (DESIGN.md §6). It MUST fail closed:
-	// if the record cannot be durably and immutably committed, Append MUST error
-	// rather than drop it silently. It MUST NOT route evidence through, or share a
-	// mutable backing store with, the operational database.
+	// and sign each record for tamper-evidence (DESIGN.md §6). It MUST stamp its own
+	// authoritative AppendedAt and chain on that, NEVER trusting rec.ObservedAt for
+	// ordering. It MUST fail closed: if the record cannot be durably and immutably
+	// committed, Append MUST error rather than drop it silently. It MUST NOT route
+	// evidence through, or share a mutable backing store with, the operational
+	// database.
 	Append(ctx context.Context, rec EvidenceRecord) (RecordRef, error)
 
 	// Stream forwards a record to the adopter's SIEM.

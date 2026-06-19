@@ -24,11 +24,16 @@ type InferenceSelection struct {
 	SessionID SessionID
 	Subject   Subject
 	Mode      InferenceMode
-	// Attended is true only when a human is present for, and the sole beneficiary
-	// of, this session. It is the discriminator for the seam, not the invocation
-	// mode: a forked/headless `claude -p` inside an attended single-user session is
-	// still attended (DESIGN.md §3).
+	// Attended is true only when a human is present for this session. It is half the
+	// discriminator for the seam, not the invocation mode: a forked/headless
+	// `claude -p` inside an attended single-user session is still attended (DESIGN.md
+	// §3).
 	Attended bool
+	// Beneficiaries is the number of distinct beneficiaries the session serves — the
+	// other half of the discriminator, supplied as an explicit fact rather than
+	// folded into Attended so the backend can detect a human-present fan-out
+	// (Attended && Beneficiaries > 1). ModeSubscription requires exactly 1.
+	Beneficiaries int
 }
 
 // BackendEndpoint is the resolved destination for model inference — the one and
@@ -47,9 +52,10 @@ type InferenceBackend interface {
 	// Resolve selects the backend endpoint for a session, enforcing the
 	// attended/unattended seam in policy.
 	//
-	// SECURITY: the implementation MUST refuse a ModeSubscription selection that is
-	// not Attended, and MUST route to ModeOrgAPI any session without a present human
-	// or with more than one beneficiary (orchestrated, scheduled, triggered,
+	// SECURITY: the implementation MUST refuse a ModeSubscription selection unless it
+	// is both Attended and sel.Beneficiaries == 1, and MUST route to ModeOrgAPI any
+	// session without a present human or with more than one beneficiary (orchestrated,
+	// scheduled, triggered,
 	// headless/unattended, or cross-repo fan-out) — a subscription credential MUST
 	// NEVER back an unattended or multi-beneficiary session (DESIGN.md §3; GOAL.md
 	// tenet 7). The discriminator is human presence and single beneficiary, NOT
