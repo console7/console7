@@ -2,10 +2,13 @@ package conformance
 
 import "testing"
 
-// Stub conformance cases, one per provider-interface method, keyed to the must-never
-// SECURITY clause each will assert. No logic yet — every case skips (P0 scaffolding).
-// The clauses are quoted from sdk/interfaces so a reviewer can read the contract
-// surface here without cross-referencing.
+// Conformance cases, one per provider-interface method, keyed to the must-never SECURITY
+// clause each asserts. The four Phase-0 seams (Secrets, Identity, SCM, Inference) call
+// runContract, which drives the real assertion in sdk/testkit against the dev/in-memory
+// providers; the remaining seams have no implementation yet and skip via
+// skipUnimplemented until their providers land (docs/ROADMAP.md). The clauses are quoted
+// from sdk/interfaces so a reviewer can read the contract surface here without
+// cross-referencing.
 
 // --- CloudProvider (sandbox isolation, networking, perimeter) ---
 
@@ -24,45 +27,45 @@ func TestCloudProvider_DestroySandbox(t *testing.T) {
 // --- SecretsProvider (secret storage, envelope encryption, KMS) ---
 
 func TestSecretsProvider_MintEphemeral(t *testing.T) {
-	skipUnimplemented(t, "SecretsProvider", "MintEphemeral", "return long-lived or plaintext credential material to the control plane, or grant wider scope/TTL than requested")
+	runContract(t, "SecretsProvider", "MintEphemeral")
 }
 
 func TestSecretsProvider_StoreSubscriptionToken(t *testing.T) {
-	skipUnimplemented(t, "SecretsProvider", "StoreSubscriptionToken", "store under a shared key, leave a standing operator read path, or pool the token")
+	runContract(t, "SecretsProvider", "StoreSubscriptionToken")
 }
 
 func TestSecretsProvider_InjectSubscriptionToken(t *testing.T) {
-	skipUnimplemented(t, "SecretsProvider", "InjectSubscriptionToken", "return plaintext to the caller, inject into a non-owner sandbox, or back an unattended session")
+	runContract(t, "SecretsProvider", "InjectSubscriptionToken")
 }
 
 func TestSecretsProvider_RevokeSubject(t *testing.T) {
-	skipUnimplemented(t, "SecretsProvider", "RevokeSubject", "retain a recoverable copy of revoked material")
+	runContract(t, "SecretsProvider", "RevokeSubject")
 }
 
 // --- IdentityProvider (SSO/OIDC, group/role mapping) ---
 
 func TestIdentityProvider_Authenticate(t *testing.T) {
-	skipUnimplemented(t, "IdentityProvider", "Authenticate", "trust client-asserted claims without cryptographic verification, or mint/persist a long-lived session secret")
+	runContract(t, "IdentityProvider", "Authenticate")
 }
 
 func TestIdentityProvider_ResolveGroups(t *testing.T) {
-	skipUnimplemented(t, "IdentityProvider", "ResolveGroups", "let a subject self-assert or widen its own group membership")
+	runContract(t, "IdentityProvider", "ResolveGroups")
 }
 
 // --- SCMProvider (clone, branch, PR, short-lived tokens) ---
 
 func TestSCMProvider_MintWorkingCredential(t *testing.T) {
-	skipUnimplemented(t, "SCMProvider", "MintWorkingCredential", "issue a durable token, allow push beyond the working branch, or let the sandbox git client see long-lived material")
+	runContract(t, "SCMProvider", "MintWorkingCredential")
 }
 
 func TestSCMProvider_OpenPullRequest(t *testing.T) {
-	skipUnimplemented(t, "SCMProvider", "OpenPullRequest", "push to/merge a protected branch, or self-approve or actuate the change")
+	runContract(t, "SCMProvider", "OpenPullRequest")
 }
 
 // --- InferenceBackend (subscription / Vertex / Bedrock / direct) ---
 
 func TestInferenceBackend_Resolve(t *testing.T) {
-	skipUnimplemented(t, "InferenceBackend", "Resolve", "back an unattended or multi-beneficiary session with a subscription credential, or pool a subscription across beneficiaries")
+	runContract(t, "InferenceBackend", "Resolve")
 }
 
 // --- PolicyEngine (rule evaluation) ---

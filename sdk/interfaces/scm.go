@@ -1,6 +1,9 @@
 package interfaces
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // PullRequest is a proposed change emitted by a session. Agents propose; the
 // pipeline actuates under a human (GOAL.md tenet 6).
@@ -29,6 +32,12 @@ type WorkingCredentialRequest struct {
 	Repo      RepoRef
 	// Branch is the working branch; push MUST be restricted to it.
 	Branch string
+	// SessionDeadline is the authoritative ABSOLUTE time the session ends. As with
+	// EphemeralRequest, the provider MUST cap the credential's expiry to no later than
+	// this so an SCM token, like every other minted credential, dies with the session
+	// and cannot outlive it (DESIGN.md §2.1; GOAL.md tenet 4). A duration-only TTL is
+	// insufficient — a token minted late in a short session would otherwise outlive it.
+	SessionDeadline time.Time
 }
 
 // SCMProvider abstracts repository clone, branch, pull-request, and short-lived
