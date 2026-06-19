@@ -5,6 +5,13 @@ name: dast (zap baseline)
 # on PRs and stays dormant until a deployed endpoint exists. When a service
 # lands, supply its URL via the `target` input (or wire a schedule). Report-only
 # baseline first; authenticated/active scans follow per the standard trajectory.
+#
+# Public-repo caveat (raised in review): the ZAP action uploads its scan report as
+# a workflow artifact, which is world-readable on a public repo. Before running
+# this against a real (esp. pre-release/staging) target, treat the findings + URL
+# as published — run only against targets whose results are safe to disclose, or
+# relocate the report to a private store. allow_issue_writing is disabled so the
+# scan does not fail under the read-only token.
 
 on:
   workflow_dispatch:
@@ -31,3 +38,5 @@ jobs:
         with:
           target: ${{ github.event.inputs.target }}
           cmd_options: "-I" # report-only: do not fail the job on warnings (baseline)
+          allow_issue_writing: false # token is contents:read only; do not attempt issue writes
+          fail_action: false # report-only scaffold
