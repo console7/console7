@@ -100,6 +100,12 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	if o.Broker == nil || o.Cloud == nil || o.Evidence == nil || o.SoR == nil {
 		return Summary{}, errors.New("orchestrator: missing a required seam (broker/cloud/evidence/sor)")
 	}
+	// Validate the broker's own seams up front, BEFORE provisioning anything, so a
+	// misconfigured broker fails closed without leaking a sandbox (a later nil-seam call
+	// would otherwise abort mid-session — or, without the broker's own guards, panic).
+	if o.Broker.Inference == nil || o.Broker.SCM == nil || o.Broker.Secrets == nil {
+		return Summary{}, errors.New("orchestrator: broker is missing a required seam (inference/scm/secrets)")
+	}
 
 	// 1. Authenticate the human BEFORE touching the policy system-of-record, so an
 	// unauthenticated caller cannot probe which targets exist or spend SoR capacity. The
@@ -143,12 +149,16 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	cleanupCtx := context.WithoutCancel(ctx)
 	defer o.Broker.ReleaseSession(req.SessionID)
 
-	// stamp emits a signed evidence record (Subject → NHI → this event) and counts it. A
-	// failure to record evidence is itself fatal — an unattested action must not proceed
-	// silently. session-aborted stamps on the failure paths are best-effort and uncounted.
+	// emit writes a signed evidence record under the given context; stamp wraps it for the
+	// happy path (request context, counted). A failure to record evidence is itself fatal —
+	// an unattested action must not proceed silently. session-aborted records are emitted on
+	// the cleanup context (so a cancelled request cannot erase them) and are uncounted.
 	records := 0
+	emit := func(c context.Context, event, detail string) error {
+		return o.appendSigned(c, req.SessionID, subject, req.Persona, nhi, event, detail)
+	}
 	stamp := func(event, detail string) error {
-		if err := o.appendSigned(ctx, req.SessionID, subject, req.Persona, nhi, event, detail); err != nil {
+		if err := emit(ctx, event, detail); err != nil {
 			return err
 		}
 		records++
@@ -168,16 +178,21 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	})
 	if err != nil {
 		// No sandbox to tear down; record the failure against the chain and surface it.
-		_ = stamp("session-aborted", "provision-sandbox: "+err.Error())
+		_ = emit(cleanupCtx, "session-aborted", "provision-sandbox: "+err.Error())
 		return Summary{}, fmt.Errorf("orchestrator: provision-sandbox: %w", err)
 	}
 
 	// From here on, any failure must tear the sandbox down — never leave it live. Teardown
-	// uses cleanupCtx (not the request ctx), so a cancelled/expired request cannot skip it.
+	// uses cleanupCtx (not the request ctx), so a cancelled/expired request cannot skip it,
+	// and a teardown failure is surfaced (joined with the cause), never swallowed: a failed
+	// destroy can mean the sandbox and injected credentials are still live.
 	abort := func(cause error, stage string) (Summary, error) {
-		_ = o.Cloud.DestroySandbox(cleanupCtx, sandbox)
-		_ = stamp("session-aborted", stage+": "+cause.Error())
-		return Summary{}, fmt.Errorf("orchestrator: %s: %w", stage, cause)
+		outErr := fmt.Errorf("orchestrator: %s: %w", stage, cause)
+		if derr := o.Cloud.DestroySandbox(cleanupCtx, sandbox); derr != nil {
+			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: destroy-sandbox after %s failed (sandbox may be live): %w", stage, derr))
+		}
+		_ = emit(cleanupCtx, "session-aborted", stage+": "+cause.Error())
+		return Summary{}, outErr
 	}
 	if err := stamp("sandbox-provisioned", sandbox.ID); err != nil {
 		return abort(err, "sandbox-provisioned-evidence")
@@ -256,7 +271,7 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 
 	// 8. PR-only exit: propose the change as a PR. The session never merges or actuates —
 	// author, approve, and actuate are separated (tenet 5/6).
-	prRef, err := o.Broker.SCM.OpenPullRequest(ctx, interfaces.PullRequest{
+	prRef, err := o.Broker.OpenPullRequest(ctx, interfaces.PullRequest{
 		Repo:  req.Repo,
 		Head:  req.Branch,
 		Base:  "main",
@@ -350,7 +365,7 @@ func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.Sess
 	if err != nil {
 		return err
 	}
-	_, err = o.Evidence.Append(ctx, interfaces.EvidenceRecord{
+	ref, err := o.Evidence.Append(ctx, interfaces.EvidenceRecord{
 		SessionID:  session,
 		Subject:    subject,
 		Persona:    persona,
@@ -358,7 +373,13 @@ func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.Sess
 		ObservedAt: time.Now().UTC(),
 		Payload:    payload,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Mirror the committed record to the adopter's SIEM via the Stream hook. It supplements
+	// (never replaces) the durable WORM append, but a session's evidence is load-bearing, so
+	// a failed mirror fails the stamp closed rather than silently dropping the forward.
+	return o.Evidence.Stream(ctx, ref)
 }
 
 // payloadTBS is the canonical, domain-tagged, length-prefixed bytes the per-record lineage

@@ -105,16 +105,25 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 		return MintedSession{}, err
 	}
 
+	// Reject a duplicate live session up front: replacing an in-flight session's signer
+	// would let its next SignSession use the wrong subject's key and let either session's
+	// ReleaseSession drop the other's. (Re-checked atomically at registration below.)
+	b.mu.Lock()
+	_, dup := b.signers[req.SessionID]
+	b.mu.Unlock()
+	if dup {
+		return MintedSession{}, fmt.Errorf("broker: session %q already has a live signer", req.SessionID)
+	}
+
 	// 2. Bind a per-session NHI to the verified subject. This is the root of lineage. The
 	// signer (which owns the ephemeral private key) is retained inside the broker, never
-	// returned, so the control plane signs through SignSession and holds no key.
+	// returned, so the control plane signs through SignSession and holds no key. It is
+	// registered only AFTER all minting succeeds (below), so a failed mint never leaves a
+	// usable signer for a session that did not launch.
 	signer, err := b.Binder.Bind(subject, req.SessionID, req.Persona)
 	if err != nil {
 		return MintedSession{}, err
 	}
-	b.mu.Lock()
-	b.signers[req.SessionID] = signer
-	b.mu.Unlock()
 
 	// 3. Mint the ephemeral cloud credential, capped to the session deadline by the seam.
 	cloudRef, err := b.Secrets.MintEphemeral(ctx, interfaces.EphemeralRequest{
@@ -139,6 +148,17 @@ func (b *Broker) MintSessionIdentity(ctx context.Context, req SessionRequest) (M
 	if err != nil {
 		return MintedSession{}, err
 	}
+
+	// Register the signer only now that authentication, binding, and BOTH credential mints
+	// have succeeded — atomically re-checking for a duplicate so a racing mint cannot clobber
+	// an active session's key.
+	b.mu.Lock()
+	if _, dup := b.signers[req.SessionID]; dup {
+		b.mu.Unlock()
+		return MintedSession{}, fmt.Errorf("broker: session %q already has a live signer", req.SessionID)
+	}
+	b.signers[req.SessionID] = signer
+	b.mu.Unlock()
 
 	return MintedSession{
 		Identity: interfaces.SessionIdentity{

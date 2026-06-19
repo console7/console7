@@ -47,11 +47,27 @@ type memSandbox struct {
 	live    bool
 }
 
-// operable reports whether the sandbox may still be used: it must be live AND within its
-// MaxTTL. Past its expiry it is treated as gone (destroyed no later than MaxTTL), so every
-// operation on it fails closed even if explicit teardown never ran.
-func (s *memSandbox) operable(now time.Time) bool {
-	return s.live && now.Before(s.expiry)
+// reapIfExpired tears down a sandbox that has aged past its MaxTTL: it marks it dead, drops
+// its egress, and clears the shared registry's ownership binding + injected material — the
+// lazy equivalent of a background reaper, so an expired sandbox can be neither operated on
+// nor injected into, and its material does not linger. The caller must hold c.mu.
+func (c *MemCloud) reapIfExpired(h interfaces.SandboxHandle, sb *memSandbox) {
+	if sb.live && !time.Now().Before(sb.expiry) {
+		sb.live = false
+		sb.egress = nil
+		c.reg.Destroy(h)
+	}
+}
+
+// lookup returns the sandbox for h, reaping it first if it has expired, so callers see an
+// expired sandbox as not live. The caller must hold c.mu.
+func (c *MemCloud) lookup(h interfaces.SandboxHandle) (*memSandbox, bool) {
+	sb, ok := c.sandboxes[h.ID]
+	if !ok {
+		return nil, false
+	}
+	c.reapIfExpired(h, sb)
+	return sb, true
 }
 
 // NewMemCloud returns a MemCloud backed by reg. The registry is shared with the
@@ -73,12 +89,15 @@ func (c *MemCloud) ProvisionSandbox(ctx context.Context, spec interfaces.Sandbox
 	// the SecretsProvider later checks — modelling the production attestation that the
 	// CloudProvider vouches for a sandbox's owner. A fresh handle per call means a sandbox
 	// is NEVER reused across sessions, users, or personas.
-	h := c.reg.Provision(spec.Subject, spec.SessionID)
+	expiry := time.Now().Add(spec.MaxTTL)
+	// Record the same expiry in the registry binding so ownership (and thus injection) also
+	// fails closed past the TTL, not just MemCloud's own surface.
+	h := c.reg.ProvisionWithExpiry(spec.Subject, spec.SessionID, expiry)
 	c.sandboxes[h.ID] = &memSandbox{
 		session: spec.SessionID,
 		persona: spec.Persona,
 		egress:  append([]string(nil), spec.Egress.Allowlist...),
-		expiry:  time.Now().Add(spec.MaxTTL),
+		expiry:  expiry,
 		live:    true,
 	}
 	return h, nil
@@ -88,8 +107,8 @@ func (c *MemCloud) ProvisionSandbox(ctx context.Context, spec interfaces.Sandbox
 func (c *MemCloud) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHandle, policy interfaces.EgressPolicy) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	sb, ok := c.sandboxes[h.ID]
-	if !ok || !sb.operable(time.Now()) {
+	sb, ok := c.lookup(h)
+	if !ok || !sb.live {
 		// Fail closed: an unknown, destroyed, or expired sandbox has no perimeter to narrow.
 		return errors.New("devkit: MemCloud cannot apply egress to an unknown, destroyed, or expired sandbox")
 	}
@@ -116,10 +135,11 @@ func (c *MemCloud) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHa
 func (c *MemCloud) DestroySandbox(ctx context.Context, h interfaces.SandboxHandle) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	sb, ok := c.sandboxes[h.ID]
-	if !ok || !sb.operable(time.Now()) {
+	sb, ok := c.lookup(h)
+	if !ok || !sb.live {
 		// Destroying an unknown, already-destroyed, or expired sandbox fails closed — the
 		// caller's view of what exists is wrong, and silently succeeding would mask it.
+		// (An expired sandbox was already reaped — its material wiped — by lookup.)
 		return errors.New("devkit: MemCloud cannot destroy an unknown, already-destroyed, or expired sandbox")
 	}
 	// Irreversible: drop the egress, mark dead, and wipe the registry's ownership binding
@@ -136,16 +156,16 @@ func (c *MemCloud) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 func (c *MemCloud) Live(h interfaces.SandboxHandle) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	sb, ok := c.sandboxes[h.ID]
-	return ok && sb.operable(time.Now())
+	sb, ok := c.lookup(h)
+	return ok && sb.live
 }
 
 // EgressOf returns the egress allowlist currently in force for an operable sandbox. Test-only.
 func (c *MemCloud) EgressOf(h interfaces.SandboxHandle) ([]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	sb, ok := c.sandboxes[h.ID]
-	if !ok || !sb.operable(time.Now()) {
+	sb, ok := c.lookup(h)
+	if !ok || !sb.live {
 		return nil, false
 	}
 	return append([]string(nil), sb.egress...), true

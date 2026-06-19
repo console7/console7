@@ -3,6 +3,8 @@ package orchestrator_test
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -304,5 +306,97 @@ func TestRun_InferenceEndpointOffAllowlistFailsClosed(t *testing.T) {
 	}
 	if !aborted {
 		t.Error("expected a session-aborted evidence record on the fail-closed path")
+	}
+}
+
+// failingDestroyCloud wraps a CloudProvider but always fails teardown, to prove the abort
+// path surfaces (never swallows) a destroy failure.
+type failingDestroyCloud struct{ interfaces.CloudProvider }
+
+func (failingDestroyCloud) DestroySandbox(context.Context, interfaces.SandboxHandle) error {
+	return errors.New("simulated destroy failure")
+}
+
+// countingSink wraps MemEvidence and counts Stream calls, to prove every appended record is
+// also forwarded to the SIEM hook.
+type countingSink struct {
+	*devkit.MemEvidence
+	streams int
+}
+
+func (s *countingSink) Stream(ctx context.Context, ref interfaces.RecordRef) error {
+	s.streams++
+	return s.MemEvidence.Stream(ctx, ref)
+}
+
+// TestRun_MissingBrokerSeamFailsClosedBeforeProvision: a broker missing a required sub-seam
+// (here, Inference) is rejected up front — before any sandbox is provisioned — rather than
+// panicking mid-session and leaking a sandbox.
+func TestRun_MissingBrokerSeamFailsClosedBeforeProvision(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	ca := signing.NewDevCA()
+	idpPub, idpPriv, _ := ed25519.GenerateKey(nil)
+	// Inference seam is nil.
+	b := broker.New(devkit.NewDevIdentity(idpPub, nil), devkit.NewMemSecrets(reg), devkit.NewMemSCM(15*time.Minute), nil, signing.NewNHIBinder(ca))
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	cloud := devkit.NewMemCloud(reg)
+	evidence := devkit.NewMemEvidence()
+	orch := orchestrator.New(b, cloud, evidence, devkit.NewFixedPolicySoR(repo), []string{orgAPIURL}, 30*time.Minute)
+
+	_, err := orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID: "s1", Persona: interfaces.PersonaAuthor, Repo: repo, Branch: "feature/x",
+	})
+	if err == nil {
+		t.Fatal("expected Run to fail closed on a broker missing a seam")
+	}
+	if evidence.Len() != 0 {
+		t.Errorf("expected nothing provisioned/recorded before the seam check, got %d records", evidence.Len())
+	}
+}
+
+// TestRun_AbortSurfacesTeardownFailure: when a post-provision stage fails AND teardown also
+// fails, the returned error carries both — a possibly-still-live sandbox is never hidden.
+func TestRun_AbortSurfacesTeardownFailure(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	ca := signing.NewDevCA()
+	idpPub, idpPriv, _ := ed25519.GenerateKey(nil)
+	b := broker.New(
+		devkit.NewDevIdentity(idpPub, nil), devkit.NewMemSecrets(reg), devkit.NewMemSCM(15*time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{SubscriptionEndpoint: subscriptionURL, OrgAPIEndpoint: orgAPIURL, SubscriptionEnabled: true}),
+		signing.NewNHIBinder(ca),
+	)
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	cloud := failingDestroyCloud{devkit.NewMemCloud(reg)}
+	// Allowlist excludes orgAPIURL, so an unattended run aborts at egress-check after provision.
+	orch := orchestrator.New(b, cloud, devkit.NewMemEvidence(), devkit.NewFixedPolicySoR(repo), []string{"https://only.internal"}, 30*time.Minute)
+
+	_, err := orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID: "s1", Persona: interfaces.PersonaAuthor, Repo: repo, Branch: "feature/x",
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "egress-check") || !strings.Contains(err.Error(), "destroy-sandbox after") {
+		t.Errorf("abort must surface both the cause and the teardown failure, got: %v", err)
+	}
+}
+
+// TestRun_StreamsEachEvidenceRecord: every WORM record is also forwarded to the SIEM hook.
+func TestRun_StreamsEachEvidenceRecord(t *testing.T) {
+	b := newBench(t)
+	sink := &countingSink{MemEvidence: devkit.NewMemEvidence()}
+	// Rewire the orchestrator's evidence to the counting sink (same seams otherwise).
+	b.orch.Evidence = sink
+
+	if _, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: b.authn(t, "alice"), SessionID: "sess-stream", Persona: interfaces.PersonaAuthor,
+		Repo: b.repo, Branch: "feature/x", Attended: false,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sink.streams == 0 || sink.streams != sink.Len() {
+		t.Errorf("expected every appended record (%d) to be streamed, got %d streams", sink.Len(), sink.streams)
 	}
 }

@@ -81,6 +81,37 @@ func TestMemCloud_ApplyEgressPolicy_NarrowOnly(t *testing.T) {
 	}
 }
 
+func TestSandboxRegistry_DeliverIfOwned_FailsClosed(t *testing.T) {
+	reg := NewSandboxRegistry()
+	h := reg.Provision("alice", "s1")
+	// Wrong owner / unknown handle / destroyed handle all fail closed.
+	if reg.DeliverIfOwned(h, "mallory", "s1", []byte("x")) {
+		t.Error("delivered to a sandbox owned by a different subject")
+	}
+	if reg.DeliverIfOwned(interfaces.SandboxHandle{ID: "nope"}, "alice", "s1", []byte("x")) {
+		t.Error("delivered to an unknown sandbox")
+	}
+	if !reg.DeliverIfOwned(h, "alice", "s1", []byte("x")) {
+		t.Error("refused delivery to the legitimate owner")
+	}
+	reg.Destroy(h)
+	if reg.DeliverIfOwned(h, "alice", "s1", []byte("x")) {
+		t.Error("delivered into a destroyed sandbox")
+	}
+}
+
+func TestSandboxRegistry_ExpiredOwnershipFailsClosed(t *testing.T) {
+	reg := NewSandboxRegistry()
+	h := reg.ProvisionWithExpiry("alice", "s1", time.Now().Add(time.Nanosecond))
+	time.Sleep(2 * time.Millisecond)
+	if reg.Owns(h, "alice", "s1") {
+		t.Error("expired ownership binding still reports as owned")
+	}
+	if reg.DeliverIfOwned(h, "alice", "s1", []byte("x")) {
+		t.Error("delivered into an expired sandbox (injection must fail closed past MaxTTL)")
+	}
+}
+
 func TestMemCloud_MaxTTL_ExpiresSandbox(t *testing.T) {
 	cloud, _ := newMemCloud()
 	ctx := context.Background()

@@ -168,8 +168,9 @@ func (m *MemSecrets) InjectSubscriptionToken(ctx context.Context, in interfaces.
 	if in.Beneficiaries != 1 {
 		return errors.New("devkit: refusing subscription injection for a multi-beneficiary session")
 	}
-	// Ownership gate: the sandbox must belong to this subject's session. An unknown or
-	// mismatched handle fails closed.
+	// Ownership gate (cheap fail-fast before the decrypt): the sandbox must belong to this
+	// subject's session. An unknown, mismatched, or expired handle fails closed. The
+	// authoritative check is re-done atomically with delivery below.
 	if !m.sandboxes.Owns(in.Sandbox, in.Subject, in.SessionID) {
 		return errors.New("devkit: sandbox does not belong to the subject's session")
 	}
@@ -193,9 +194,12 @@ func (m *MemSecrets) InjectSubscriptionToken(ctx context.Context, in interfaces.
 	}
 	defer zero(token)
 
-	// Deliver only into the verified owning sandbox; the plaintext never leaves this call
-	// by any other path.
-	m.sandboxes.deliver(in.Sandbox, token)
+	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with
+	// the delivery so a concurrent Destroy cannot let the token land in a sandbox that was
+	// torn down after the gate above. The plaintext never leaves this call by any other path.
+	if !m.sandboxes.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
+		return errors.New("devkit: sandbox no longer belongs to the subject's session")
+	}
 	return nil
 }
 
