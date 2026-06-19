@@ -1,0 +1,53 @@
+name: dco
+
+# CO-4 — Developer Certificate of Origin: every human-authored commit in a PR must
+# carry a `Signed-off-by` trailer (git commit -s). Self-authored gate — no third-
+# party DCO app dependency, consistent with our supply-chain stance. Bot authors
+# (e.g. dependabot[bot], GitHub web-flow) are exempt: they cannot add a sign-off and
+# are governed as supply-chain inputs (Socket / Dependabot / review), not as
+# contributors asserting the DCO.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (PR history)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Signed-off-by on every human commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            name="$(git show -s --format='%an' "$sha")"
+            email="$(git show -s --format='%ae' "$sha")"
+            # Exempt bot / web-flow authors — they cannot DCO sign-off.
+            if printf '%s' "$name $email" | grep -Eq '\[bot\]|dependabot|web-flow|noreply@github\.com'; then
+              echo "- $sha exempt (automated author: $name)"
+              continue
+            fi
+            if git show -s --format='%(trailers:key=Signed-off-by)' "$sha" | grep -q 'Signed-off-by:'; then
+              echo "ok $sha — signed off"
+            else
+              echo "::error::commit $sha is missing a Signed-off-by (DCO). Author: $name <$email>"
+              missing=1
+            fi
+          done < <(git rev-list "$BASE".."$HEAD")
+          if [ "$missing" -ne 0 ]; then
+            echo "DCO failed — add a sign-off with 'git commit -s' (fix existing commits with: git rebase --signoff $BASE). See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "DCO OK — all human commits signed off."

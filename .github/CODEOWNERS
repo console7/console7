@@ -1,0 +1,16 @@
+# Code owners — GitHub auto-requests these reviewers for matching paths, and (when
+# "require review from Code Owners" is enabled in branch protection) makes their
+# review mandatory. Until a second maintainer joins, the maintainer owns everything
+# (the single-maintainer independent-review gap is tracked in the SDLC standard §5 #1).
+
+* @NaanyaBiz
+
+# Security-critical surfaces — keep explicit ownership even as the team grows.
+/.github/                          @NaanyaBiz
+/.claude/                          @NaanyaBiz
+/scripts/                          @NaanyaBiz
+/docs/standards/                   @NaanyaBiz
+/SECURITY.md                       @NaanyaBiz
+/SECURITY-INSIGHTS.yml             @NaanyaBiz
+/CODEOWNERS                        @NaanyaBiz
+/.github/CODEOWNERS                @NaanyaBiz
