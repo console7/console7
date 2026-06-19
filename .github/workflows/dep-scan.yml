@@ -1,0 +1,50 @@
+name: dependency scan (go)
+
+# CO-5.5 / CO-11 — known-vulnerability scanning of Go dependencies with
+# govulncheck. Guarded on the presence of go.mod, so it skips cleanly until the
+# Go module exists, then activates automatically. SHA-pinned, least-privilege.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: detect go.mod
+    runs-on: ubuntu-latest
+    outputs:
+      has_gomod: ${{ steps.detect.outputs.has_gomod }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - id: detect
+        run: |
+          if [ -f go.mod ]; then
+            echo "has_gomod=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_gomod=false" >> "$GITHUB_OUTPUT"
+            echo "No go.mod yet — govulncheck dormant (auto-activates when the module lands)."
+          fi
+
+  govulncheck:
+    name: govulncheck
+    needs: detect
+    if: needs.detect.outputs.has_gomod == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...

@@ -1,0 +1,16 @@
+version: 2
+
+# Socket (https://socket.dev) software-supply-chain analysis — CO-5.1.
+#
+# Socket flags malicious or risky dependency behaviour (install scripts, network
+# / shell / filesystem access, obfuscation, typo-squats, protestware) on every
+# dependency-changing PR — catching day-zero malicious packages that a CVE feed
+# does not yet know about. This complements install-time Socket Firewall (`sfw`,
+# enforced by the .claude Bash guard) and the `npm`/`go.sum` pinning policy.
+#
+# MAINTAINER ACTION: this config is inert until the **Socket GitHub App** is
+# installed on the repository (https://github.com/apps/socket-security).
+
+projectIgnorePaths:
+  - "docs/**"
+  - "**/*.md"
