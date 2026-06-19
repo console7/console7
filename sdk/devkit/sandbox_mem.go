@@ -63,6 +63,18 @@ func (r *SandboxRegistry) Owns(h interfaces.SandboxHandle, subject interfaces.Su
 	return ok && b.subject == subject && b.session == session
 }
 
+// Destroy removes a sandbox's ownership binding and wipes any material injected into it.
+// It models the CloudProvider tearing the sandbox down: afterwards the handle is unknown,
+// so Owns fails closed and Injected reports nothing — there is no path back. Destroying an
+// unknown handle is a no-op (idempotent at the registry; MemCloud is the one that fails
+// closed on a double destroy).
+func (r *SandboxRegistry) Destroy(h interfaces.SandboxHandle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.bound, h.ID)
+	delete(r.injected, h.ID)
+}
+
 // deliver places material into the sandbox's injected slot. Unexported: only a
 // SecretsProvider in this package may deliver, and only after its own ownership +
 // attended checks pass. A copy is stored so the caller's transient plaintext can be

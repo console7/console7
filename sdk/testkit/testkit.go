@@ -1,6 +1,7 @@
 package testkit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -75,20 +76,116 @@ type check struct {
 	run      func(ctx context.Context, put ProviderUnderTest) error
 }
 
-// registry is the set of contracts the suite can assert. Phase 0 covers the four seams
-// that have an implementation (Secrets, Identity, SCM, Inference); the remaining seams'
-// contracts are asserted as their providers land (docs/ROADMAP.md), and until then their
-// conformance cases skip.
+// registry is the set of contracts the suite can assert. Seven seams have an
+// implementation (Cloud, Secrets, Identity, SCM, Inference, PolicySoR, Evidence — the
+// last three added with the Phase-1 orchestration spine); the remaining two
+// (PolicyEngine, ObserveGateway) are asserted as their providers land in Phases 2–3
+// (docs/ROADMAP.md), and until then their conformance cases skip.
 func registry() []check {
 	const confSubject = interfaces.Subject("conf-subject")
 	confRepo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
 
+	confUnknownRepo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "unregistered"}
+
+	hasCloud := func(p ProviderUnderTest) bool { return p.Cloud != nil }
 	hasSecrets := func(p ProviderUnderTest) bool { return p.Secrets != nil }
 	hasIdentity := func(p ProviderUnderTest) bool { return p.Identity != nil }
 	hasSCM := func(p ProviderUnderTest) bool { return p.SCM != nil }
 	hasInference := func(p ProviderUnderTest) bool { return p.Inference != nil }
+	hasPolicySoR := func(p ProviderUnderTest) bool { return p.PolicySoR != nil }
+	hasEvidence := func(p ProviderUnderTest) bool { return p.Evidence != nil }
 
 	return []check{
+		{
+			contract: Contract{"CloudProvider", "ProvisionSandbox", "reuse a sandbox across sessions, users, or personas"},
+			present:  hasCloud,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				spec := interfaces.SandboxSpec{
+					SessionID: interfaces.SessionID("conf-session-a"),
+					Subject:   confSubject,
+					Persona:   interfaces.PersonaAuthor,
+					Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://approved.internal"}},
+					MaxTTL:    time.Minute,
+				}
+				h1, err := p.Cloud.ProvisionSandbox(ctx, spec)
+				if err != nil {
+					return fmt.Errorf("provision failed: %w", err)
+				}
+				spec.SessionID = interfaces.SessionID("conf-session-b")
+				h2, err := p.Cloud.ProvisionSandbox(ctx, spec)
+				if err != nil {
+					return fmt.Errorf("second provision failed: %w", err)
+				}
+				// A sandbox is never reused: two provisions yield two distinct, non-empty
+				// handles (a shared/empty handle would mean one environment serving two
+				// sessions).
+				if h1.ID == "" || h2.ID == "" {
+					return errors.New("provisioned an empty sandbox handle")
+				}
+				if h1.ID == h2.ID {
+					return errors.New("reused one sandbox handle across two sessions")
+				}
+				_ = p.Cloud.DestroySandbox(ctx, h1)
+				_ = p.Cloud.DestroySandbox(ctx, h2)
+				return nil
+			},
+		},
+		{
+			contract: Contract{"CloudProvider", "ApplyEgressPolicy", "widen egress beyond the provisioned allowlist, or fail open when a policy cannot be applied"},
+			present:  hasCloud,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				// Fail closed: applying a policy to an unknown handle must error, not
+				// silently succeed against nothing.
+				if err := p.Cloud.ApplyEgressPolicy(ctx, interfaces.SandboxHandle{ID: "no-such-sandbox"}, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}}); err == nil {
+					return errors.New("applied egress to an unknown sandbox instead of failing closed")
+				}
+				h, err := p.Cloud.ProvisionSandbox(ctx, interfaces.SandboxSpec{
+					SessionID: interfaces.SessionID("conf-egress"),
+					Subject:   confSubject,
+					Persona:   interfaces.PersonaAuthor,
+					Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}},
+					MaxTTL:    time.Minute,
+				})
+				if err != nil {
+					return fmt.Errorf("provision failed: %w", err)
+				}
+				defer func() { _ = p.Cloud.DestroySandbox(ctx, h) }()
+				// Never widen: adding a destination beyond the provisioned (profile)
+				// allowlist must be refused.
+				if err := p.Cloud.ApplyEgressPolicy(ctx, h, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal", "https://b.internal"}}); err == nil {
+					return errors.New("widened egress beyond the provisioned allowlist")
+				}
+				return nil
+			},
+		},
+		{
+			contract: Contract{"CloudProvider", "DestroySandbox", "leave a destroyed sandbox operable, or otherwise make destruction reversible"},
+			present:  hasCloud,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				h, err := p.Cloud.ProvisionSandbox(ctx, interfaces.SandboxSpec{
+					SessionID: interfaces.SessionID("conf-destroy"),
+					Subject:   confSubject,
+					Persona:   interfaces.PersonaAuthor,
+					Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}},
+					MaxTTL:    time.Minute,
+				})
+				if err != nil {
+					return fmt.Errorf("provision failed: %w", err)
+				}
+				if err := p.Cloud.DestroySandbox(ctx, h); err != nil {
+					return fmt.Errorf("destroy failed: %w", err)
+				}
+				// Irreversible: a destroyed sandbox cannot be destroyed again or operated on
+				// — a second destroy or an egress change must fail closed, never resurrect it.
+				if err := p.Cloud.DestroySandbox(ctx, h); err == nil {
+					return errors.New("destroyed an already-destroyed sandbox (destruction is reversible)")
+				}
+				if err := p.Cloud.ApplyEgressPolicy(ctx, h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+					return errors.New("operated on a destroyed sandbox")
+				}
+				return nil
+			},
+		},
 		{
 			contract: Contract{"SecretsProvider", "MintEphemeral", "return long-lived or plaintext credential material to the control plane, or grant wider scope/TTL than requested"},
 			present:  hasSecrets,
@@ -328,12 +425,106 @@ func registry() []check {
 				return nil
 			},
 		},
+		{
+			contract: Contract{"PolicySoR", "ResolveRepo", "fail open to a permissive default on an unknown target, or derive tier/stratum from an in-repo file"},
+			present:  hasPolicySoR,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				ts, err := p.PolicySoR.ResolveRepo(ctx, confUnknownRepo)
+				if err != nil {
+					return fmt.Errorf("resolve of an unknown repo errored: %w", err)
+				}
+				// Fail closed: an unknown target must resolve to the MOST restrictive tier,
+				// never a permissive one. "At least as restrictive as Tier1" admits both
+				// TierUnknown and a provider whose most-restrictive real tier is Tier1, while
+				// rejecting any permissive (Tier2..Tier4) answer.
+				if interfaces.Tier1.MoreRestrictiveThan(ts.Tier) {
+					return fmt.Errorf("unknown repo resolved to a permissive tier (%d) instead of failing closed", ts.Tier)
+				}
+				return nil
+			},
+		},
+		{
+			contract: Contract{"PolicySoR", "ResolveResource", "let a permissive origin confer a stricter target's reach, or fail open on an unknown resource"},
+			present:  hasPolicySoR,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				ts, err := p.PolicySoR.ResolveResource(ctx, interfaces.ResourceRef{Kind: "service", ID: "unregistered"})
+				if err != nil {
+					return fmt.Errorf("resolve of an unknown resource errored: %w", err)
+				}
+				if interfaces.Tier1.MoreRestrictiveThan(ts.Tier) {
+					return fmt.Errorf("unknown resource resolved to a permissive tier (%d) instead of failing closed", ts.Tier)
+				}
+				return nil
+			},
+		},
+		{
+			contract: Contract{"EvidenceSink", "Append", "order the chain by the caller's ObservedAt, or expose a non-monotonic / mutable record position"},
+			present:  hasEvidence,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				// Two records appended in order, the SECOND carrying an EARLIER ObservedAt,
+				// prove the sink orders by its own append (monotonic Sequence + stamped
+				// AppendedAt), never by the untrusted ObservedAt.
+				early := time.Unix(0, 0).UTC()
+				late := time.Unix(1<<31, 0).UTC()
+				first, err := p.Evidence.Append(ctx, interfaces.EvidenceRecord{
+					SessionID: "conf-session", Subject: confSubject, Persona: interfaces.PersonaAuthor,
+					Type: "conf-1", ObservedAt: late, Payload: []byte("a"),
+				})
+				if err != nil {
+					return fmt.Errorf("first append failed: %w", err)
+				}
+				second, err := p.Evidence.Append(ctx, interfaces.EvidenceRecord{
+					SessionID: "conf-session", Subject: confSubject, Persona: interfaces.PersonaAuthor,
+					Type: "conf-2", ObservedAt: early, Payload: []byte("b"),
+				})
+				if err != nil {
+					return fmt.Errorf("second append failed: %w", err)
+				}
+				if second.Sequence <= first.Sequence {
+					return fmt.Errorf("sequence not monotonic: first=%d second=%d", first.Sequence, second.Sequence)
+				}
+				if first.AppendedAt.IsZero() || second.AppendedAt.IsZero() {
+					return errors.New("sink did not stamp its own AppendedAt")
+				}
+				if second.AppendedAt.Before(first.AppendedAt) {
+					return errors.New("chain ordered by the caller's ObservedAt, not the sink's AppendedAt")
+				}
+				if len(second.Hash) == 0 || bytes.Equal(first.Hash, second.Hash) {
+					return errors.New("records are not distinctly hash-chained")
+				}
+				return nil
+			},
+		},
+		{
+			contract: Contract{"EvidenceSink", "Stream", "stream a record it never durably committed (streaming supplements, never replaces, the WORM append)"},
+			present:  hasEvidence,
+			run: func(ctx context.Context, p ProviderUnderTest) error {
+				ref, err := p.Evidence.Append(ctx, interfaces.EvidenceRecord{
+					SessionID: "conf-session", Subject: confSubject, Persona: interfaces.PersonaAuthor,
+					Type: "conf-stream", ObservedAt: time.Unix(0, 0).UTC(), Payload: []byte("c"),
+				})
+				if err != nil {
+					return fmt.Errorf("append failed: %w", err)
+				}
+				// A committed record streams without error; Stream supplements the WORM
+				// append, so the happy path must succeed.
+				if err := p.Evidence.Stream(ctx, ref); err != nil {
+					return fmt.Errorf("streaming a committed record failed: %w", err)
+				}
+				// Fail closed: a RecordRef the sink never committed (a forged/out-of-range
+				// reference) must be rejected — you can only stream what was durably appended.
+				if err := p.Evidence.Stream(ctx, interfaces.RecordRef{Sequence: 1 << 40}); err == nil {
+					return errors.New("streamed an uncommitted record reference instead of failing closed")
+				}
+				return nil
+			},
+		},
 	}
 }
 
 // Contracts returns the set of SECURITY contracts the conformance suite asserts, keyed to
-// interface method. Phase 0 enumerates the four implemented seams; the remaining seams'
-// contracts are added as their providers land (docs/ROADMAP.md).
+// interface method. Seven seams are enumerated today; the remaining two (PolicyEngine,
+// ObserveGateway) are added as their providers land in Phases 2–3 (docs/ROADMAP.md).
 func Contracts() []Contract {
 	r := registry()
 	cs := make([]Contract, len(r))

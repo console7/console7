@@ -2,17 +2,20 @@
 // implementation upholds the SECURITY contracts declared in sdk/interfaces. It
 // drives the harness in sdk/testkit.
 //
-// Phase 0: the four seams with an implementation (SecretsProvider, IdentityProvider,
-// SCMProvider, InferenceBackend) are asserted for real against the in-memory devkit
-// providers. The remaining seams (Cloud, Policy, PolicySoR, Evidence, Observe) have no
-// implementation yet, so their cases skip until their providers land (docs/ROADMAP.md;
-// the full nine-seam suite is the Phase-5 deliverable). See conformance/README.md.
+// Seven of the nine seams have a dev/in-memory implementation and are asserted for real
+// against the devkit providers: CloudProvider, SecretsProvider, IdentityProvider,
+// SCMProvider, InferenceBackend, PolicySoR, and EvidenceSink (the last three's Cloud/SoR/
+// Evidence cases added with the Phase-1 orchestration spine). The remaining two seams
+// (PolicyEngine, ObserveGateway) have no implementation yet, so their cases skip until
+// their providers land in Phases 2–3 (docs/ROADMAP.md; the full nine-seam suite is the
+// Phase-5 deliverable). See conformance/README.md.
 //
 // SCOPE: the devkit providers are in-memory, so a green run asserts the BEHAVIOURAL
 // contract invariants (expiry caps, attended-only refusals, fail-closed routing,
-// protected-branch refusals, unverifiable-token rejection) — not the cryptographic-
-// boundary guarantees a real KMS/OIDC/GitHub-App provides. That distinction is recorded
-// in sdk/testkit (check doc) and docs/THREAT-MODEL.md §1/§4.
+// protected-branch refusals, unverifiable-token rejection, default-deny/narrow-only
+// egress, hash-chained WORM ordering) — not the cryptographic-boundary or syscall-
+// isolation guarantees a real KMS/OIDC/GitHub-App/gVisor provider gives. That distinction
+// is recorded in sdk/testkit (check doc) and docs/THREAT-MODEL.md §1/§4.
 package conformance
 
 import (
@@ -23,6 +26,7 @@ import (
 	"time"
 
 	"github.com/console7/console7/sdk/devkit"
+	"github.com/console7/console7/sdk/interfaces"
 	"github.com/console7/console7/sdk/testkit"
 )
 
@@ -37,6 +41,7 @@ func providersUnderTest() testkit.ProviderUnderTest {
 		panic("conformance: idp keygen failed: " + err.Error())
 	}
 	return testkit.ProviderUnderTest{
+		Cloud:    devkit.NewMemCloud(reg),
 		Secrets:  devkit.NewMemSecrets(reg),
 		Identity: devkit.NewDevIdentity(idpPub, nil),
 		SCM:      devkit.NewMemSCM(15 * time.Minute),
@@ -45,8 +50,11 @@ func providersUnderTest() testkit.ProviderUnderTest {
 			OrgAPIEndpoint:       "https://vertex.internal/inference",
 			SubscriptionEnabled:  true,
 		}),
+		PolicySoR: devkit.NewFixedPolicySoR(interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}),
+		Evidence:  devkit.NewMemEvidence(),
 		// The registry MemSecrets checks ownership against is also the rig the injection
-		// contract uses to provision a real owned sandbox.
+		// contract uses to provision a real owned sandbox, and the store the MemCloud above
+		// provisions into and wipes on destroy.
 		SecretsRig: reg,
 	}
 }

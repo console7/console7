@@ -1,0 +1,137 @@
+package devkit
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/console7/console7/sdk/interfaces"
+)
+
+// MemCloud is an in-memory stand-in for a CloudProvider (interfaces.CloudProvider). It
+// models the control-plane-observable lifecycle of a sandbox — provisioned with a
+// default-deny egress allowlist, that allowlist narrowable (never wideable) while live,
+// then irreversibly destroyed — so the orchestration spine and the conformance suite can
+// exercise the CloudProvider contract on a bench.
+//
+// It is backed by a SandboxRegistry: ProvisionSandbox mints the handle and records the
+// (subject, session) ownership binding there, so the SAME registry a MemSecrets checks
+// before injecting a subscription token already knows the sandbox MemCloud provisioned.
+// DestroySandbox wipes that binding and any injected material through the registry.
+//
+// SCOPE: MemCloud asserts the BEHAVIOURAL invariants the interface promises (a fresh
+// handle per session, egress recorded as default-deny, narrow-only updates, irreversible
+// destroy that wipes injected material, no operation on an unknown/destroyed handle). It
+// does NOT provide the authoritative guarantees a real provider must — gVisor/microVM
+// syscall isolation and an out-of-band VPC egress perimeter. Those land with
+// providers/cloud-gcp + sandbox/ in a later, boundary-first Phase-1 PR (docs/ROADMAP.md).
+// Do not mistake a green run here for a real perimeter.
+type MemCloud struct {
+	mu        sync.Mutex
+	reg       *SandboxRegistry
+	sandboxes map[string]*memSandbox
+}
+
+// memSandbox is the lifecycle state MemCloud tracks for one provisioned sandbox; the
+// ownership binding and any injected material live in the shared SandboxRegistry.
+type memSandbox struct {
+	session interfaces.SessionID
+	persona interfaces.Persona
+	egress  []string // the default-deny allowlist currently in force.
+	maxTTL  time.Duration
+	live    bool
+}
+
+// NewMemCloud returns a MemCloud backed by reg. The registry is shared with the
+// SecretsProvider so a provisioned sandbox is a known, owned injection target.
+func NewMemCloud(reg *SandboxRegistry) *MemCloud {
+	return &MemCloud{reg: reg, sandboxes: make(map[string]*memSandbox)}
+}
+
+// ProvisionSandbox mints a fresh, owned sandbox enforcing spec's default-deny egress.
+func (c *MemCloud) ProvisionSandbox(ctx context.Context, spec interfaces.SandboxSpec) (interfaces.SandboxHandle, error) {
+	// Ephemeral by default: a sandbox with no positive lifetime is a misconfiguration,
+	// not one that lives forever. Refuse it rather than provision an unbounded sandbox.
+	if spec.MaxTTL <= 0 {
+		return interfaces.SandboxHandle{}, errors.New("devkit: MemCloud requires a positive SandboxSpec.MaxTTL (ephemeral by default)")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// The registry mints the handle and records the (subject, session) ownership binding
+	// the SecretsProvider later checks — modelling the production attestation that the
+	// CloudProvider vouches for a sandbox's owner. A fresh handle per call means a sandbox
+	// is NEVER reused across sessions, users, or personas.
+	h := c.reg.Provision(spec.Subject, spec.SessionID)
+	c.sandboxes[h.ID] = &memSandbox{
+		session: spec.SessionID,
+		persona: spec.Persona,
+		egress:  append([]string(nil), spec.Egress.Allowlist...),
+		maxTTL:  spec.MaxTTL,
+		live:    true,
+	}
+	return h, nil
+}
+
+// ApplyEgressPolicy narrows the egress allowlist for a live sandbox.
+func (c *MemCloud) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHandle, policy interfaces.EgressPolicy) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sb, ok := c.sandboxes[h.ID]
+	if !ok || !sb.live {
+		// Fail closed: an unknown or destroyed sandbox has no perimeter to narrow.
+		return errors.New("devkit: MemCloud cannot apply egress to an unknown or destroyed sandbox")
+	}
+	// Narrow-only: a permissive origin MUST NOT confer a stricter target's reach, so an
+	// update may only remove destinations, never add one beyond those already permitted
+	// (take-the-max narrows; it never widens). Adding an unlisted destination fails closed.
+	allowed := make(map[string]bool, len(sb.egress))
+	for _, d := range sb.egress {
+		allowed[d] = true
+	}
+	for _, d := range policy.Allowlist {
+		if !allowed[d] {
+			return errors.New("devkit: MemCloud refuses to widen egress beyond the provisioned allowlist")
+		}
+	}
+	sb.egress = append([]string(nil), policy.Allowlist...)
+	return nil
+}
+
+// DestroySandbox irreversibly tears the sandbox down and wipes any injected material.
+func (c *MemCloud) DestroySandbox(ctx context.Context, h interfaces.SandboxHandle) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sb, ok := c.sandboxes[h.ID]
+	if !ok || !sb.live {
+		// Destroying an unknown or already-destroyed sandbox fails closed — the caller's
+		// view of what exists is wrong, and silently succeeding would mask it.
+		return errors.New("devkit: MemCloud cannot destroy an unknown or already-destroyed sandbox")
+	}
+	// Irreversible: drop the egress, mark dead, and wipe the registry's ownership binding
+	// and injected credential material. There is no snapshot/archive path, and a later
+	// operation on the handle fails closed above.
+	sb.live = false
+	sb.egress = nil
+	c.reg.Destroy(h)
+	return nil
+}
+
+// Live reports whether h is a known, not-yet-destroyed sandbox. Test-only inspection hook.
+func (c *MemCloud) Live(h interfaces.SandboxHandle) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sb, ok := c.sandboxes[h.ID]
+	return ok && sb.live
+}
+
+// EgressOf returns the egress allowlist currently in force for a live sandbox. Test-only.
+func (c *MemCloud) EgressOf(h interfaces.SandboxHandle) ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sb, ok := c.sandboxes[h.ID]
+	if !ok || !sb.live {
+		return nil, false
+	}
+	return append([]string(nil), sb.egress...), true
+}

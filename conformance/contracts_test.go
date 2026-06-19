@@ -3,25 +3,26 @@ package conformance
 import "testing"
 
 // Conformance cases, one per provider-interface method, keyed to the must-never SECURITY
-// clause each asserts. The four Phase-0 seams (Secrets, Identity, SCM, Inference) call
-// runContract, which drives the real assertion in sdk/testkit against the dev/in-memory
-// providers; the remaining seams have no implementation yet and skip via
-// skipUnimplemented until their providers land (docs/ROADMAP.md). The clauses are quoted
-// from sdk/interfaces so a reviewer can read the contract surface here without
-// cross-referencing.
+// clause each asserts. The seven seams with a dev/in-memory implementation — Cloud,
+// Secrets, Identity, SCM, Inference, PolicySoR, Evidence (Cloud/PolicySoR/Evidence added in
+// the Phase-1 orchestration spine) — call runContract, which drives the real assertion in
+// sdk/testkit against those providers; the remaining seams (PolicyEngine, ObserveGateway)
+// have no implementation yet and skip via skipUnimplemented until their providers land in
+// Phases 2–3 (docs/ROADMAP.md). The clauses are quoted from sdk/interfaces so a reviewer
+// can read the contract surface here without cross-referencing.
 
 // --- CloudProvider (sandbox isolation, networking, perimeter) ---
 
 func TestCloudProvider_ProvisionSandbox(t *testing.T) {
-	skipUnimplemented(t, "CloudProvider", "ProvisionSandbox", "provision egress broader than the spec allowlist, reuse a sandbox across sessions/users, or isolate by request rather than at the syscall boundary")
+	runContract(t, "CloudProvider", "ProvisionSandbox")
 }
 
 func TestCloudProvider_ApplyEgressPolicy(t *testing.T) {
-	skipUnimplemented(t, "CloudProvider", "ApplyEgressPolicy", "widen egress beyond the session profile, or fail open when a policy cannot be applied")
+	runContract(t, "CloudProvider", "ApplyEgressPolicy")
 }
 
 func TestCloudProvider_DestroySandbox(t *testing.T) {
-	skipUnimplemented(t, "CloudProvider", "DestroySandbox", "snapshot, archive, or otherwise persist sandbox contents or injected credentials")
+	runContract(t, "CloudProvider", "DestroySandbox")
 }
 
 // --- SecretsProvider (secret storage, envelope encryption, KMS) ---
@@ -77,21 +78,21 @@ func TestPolicyEngine_Evaluate(t *testing.T) {
 // --- PolicySoR (authoritative tier × stratum lookup) ---
 
 func TestPolicySoR_ResolveRepo(t *testing.T) {
-	skipUnimplemented(t, "PolicySoR", "ResolveRepo", "derive tier/stratum from an in-repo file, or fail open to a permissive default on an unknown target")
+	runContract(t, "PolicySoR", "ResolveRepo")
 }
 
 func TestPolicySoR_ResolveResource(t *testing.T) {
-	skipUnimplemented(t, "PolicySoR", "ResolveResource", "let a permissive origin confer a stricter target's reach, or fail open on an unknown resource")
+	runContract(t, "PolicySoR", "ResolveResource")
 }
 
 // --- EvidenceSink (WORM store + SIEM stream) ---
 
 func TestEvidenceSink_Append(t *testing.T) {
-	skipUnimplemented(t, "EvidenceSink", "Append", "expose an update/delete path for a written record, drop a record silently, or share a mutable store with the operational DB")
+	runContract(t, "EvidenceSink", "Append")
 }
 
 func TestEvidenceSink_Stream(t *testing.T) {
-	skipUnimplemented(t, "EvidenceSink", "Stream", "egress evidence to the maintainer or any non-adopter service, or replace the durable WORM append")
+	runContract(t, "EvidenceSink", "Stream")
 }
 
 // --- ObserveGateway (redacting, audited telemetry reads) ---
