@@ -19,10 +19,11 @@ The GCP egress realisation MUST make the wall **unbypassable** (see
   **Google Cloud APIs** only and does **not** block raw TCP/HTTPS to third-party
   internet hosts; treating VPC-SC as the arbitrary-egress control leaves a bypass.
 - **Block every GCE metadata endpoint** from the sandbox — IPv4 `169.254.169.254`,
-  IPv6 `fd20:ce::254`, and the DNS name `metadata.google.internal` — enforced at the
-  **node / pod network boundary**, not only a gateway hop (on GKE the metadata server
-  is intercepted on-node and the request never leaves the VM, so a gateway-only block
-  misses it).
+  IPv6 `fd20:ce::254`, and the DNS names `metadata.google.internal` **and the
+  `metadata.goog` alias** — and, on GKE, the **node-local GKE metadata server at
+  `169.254.169.252` (port 988)** used by Workload Identity. Enforce at the **node / pod
+  network boundary**, not only a gateway hop: on GKE the metadata request is intercepted
+  on-node and never leaves the VM, so a gateway-only block misses it.
 - **Add no maintainer-controlled hosts to the allowlist** (`GOAL.md` tenet 1).
 
 > P0: placeholder — no implementation.
