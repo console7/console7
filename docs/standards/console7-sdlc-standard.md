@@ -64,7 +64,7 @@ the **maximal** OpenSSF posture from commencement:
 
 | Programme | Target (now) | Trajectory |
 |---|---|---|
-| **OpenSSF Scorecard** | Run continuously in CI; publish the score/badge. The automated checks are the live evidence of CO-4/5/6/7/8/11. | Hold ≥ target score; treat regressions as findings (CO-18). |
+| **OpenSSF Scorecard** | Run continuously in CI, **results kept private for now** (workflow artifact; no publish to the public Scorecard API, no README badge). The checks are the live internal evidence of CO-4/5/6/7/8/11. | **Publish the score + badge when there is something meaningful to share** (≈ first release / critical mass); then hold ≥ target and treat regressions as findings (CO-18). |
 | **OpenSSF Security Baseline (OSPS)** | **Level 3** (the high-value/critical tier) is the binding bar. Criteria that need build artifacts are carried as dated accepted-gaps (§5). | All L3 criteria demonstrably met by GA. |
 | **OpenSSF Best Practices Badge** | **Silver** is the target; "passing" criteria met as gates land. | Gold at/after GA, when two-person human review and full release provenance exist. |
 
@@ -81,10 +81,10 @@ exists) · **Drop** (reasoned N/A, recorded — not carried as debt).
 
 | CO | Objective | Disposition | Console7-repo posture (and OpenSSF expression) |
 |---|---|---|---|
-| **CO-1** | Governance, ownership, tiering | **Adopt** | 1.1 owner = maintainers (1LoD); tier = T1 (§2). 1.2 evidence-based — Scorecard + signed history + dated reviews. 1.3 exception register = §5. 1.4 risk-committee reporting → **public Scorecard + quarterly review of this doc** is the proportionate, transparent substitute. 1.5 controlled artifact = **this document**. *(OSPS: Governance.)* |
+| **CO-1** | Governance, ownership, tiering | **Adopt** | 1.1 owner = maintainers (1LoD); tier = T1 (§2). 1.2 evidence-based — Scorecard (private now) + signed history + dated reviews. 1.3 exception register = §5. 1.4 risk-committee reporting → the **public standard + threat model + quarterly review of this doc** is the transparency substitute now; the **public Scorecard badge joins when results are meaningful to publish** (§3). 1.5 controlled artifact = **this document**. *(OSPS: Governance.)* |
 | **CO-2** | Secure-by-design & threat modelling | **Adopt** | Threat model = `DESIGN.md` §10 + `docs/THREAT-MODEL.md` (placeholder, filled in P0). Paved road = the provider-seam architecture (`ARCHITECTURE.md` §5). |
 | **CO-3** | Developer enablement & competency | **Adopt** (relax 3.3) | 3.1/3.2 approved toolchain = Go + Claude Code (the only approved AI tool, CO-12.1); RBAC = GitHub org + WIF on any minted identity. 3.3 formal training: N/A for a small maintainer set — recorded as accepted. |
-| **CO-4** | Source integrity & change provenance | **Adopt; human-review leg = Target** | 4.1 protected history ✓ (linear history, no force-push). 4.2 **signed commits required ✓ now** — public repo unlocks the ruleset Linden-class private repos cannot. 4.3/4.4 **technical SoD bound now** (`enforce_admins` on; required review + required status checks; no self-approve; **DCO sign-off** on every commit). The **independent-*human*-reviewer** leg is a dated accepted-gap (§5), compensated by automated gates + AI security review + the mandatory human merge gate. *(Scorecard: Branch-Protection, Code-Review, Signed-Releases-prep; OSPS: Access Control.)* |
+| **CO-4** | Source integrity & change provenance | **Adopt; human-review leg = Target** | 4.1 protected history ✓ (linear history, no force-push). 4.2 **signed commits required ✓ now** — public repo unlocks the ruleset Linden-class private repos cannot. 4.3/4.4 **technical SoD bound for contributors now** (required review + required status checks; no self-approve; **DCO sign-off** on every commit). Two single-maintainer reductions are dated accepted-gaps (§5 #1): the **independent-*human*-reviewer** leg, and **`enforce_admins`** (the lone maintainer retains admin bypass until a second maintainer / critical mass) — both compensated by automated gates + AI security review + the mandatory human merge gate. *(Scorecard: Branch-Protection, Code-Review, Signed-Releases-prep; OSPS: Access Control.)* |
 | **CO-5** | Supply-chain integrity | **Adopt (preventative) + Target (artifacts)** | 5.1 approved registries — Go module proxy + checksum DB; actions **SHA-pinned from workflow #1**. 5.5 pinning ✓ now (Dependabot keeps pins fresh). 5.2 SBOM, 5.3 SLSA L3 provenance, 5.4 signed artifacts + admission = **Target** (no build artifact exists yet) — §5. *(Scorecard: Pinned-Dependencies, Dependency-Update-Tool; OSPS: Build & Release.)* |
 | **CO-6** | Build / CI/CD integrity | **Adopt (preventative) + Target** | 6.1 pipelines-as-code ✓. 6.3 **least-privilege `GITHUB_TOKEN` (`permissions: contents: read`) from workflow #1**; no `pull_request_target` foot-guns. 6.5 tamper-evident logs ✓ (Actions). 6.2 ephemeral hardened builders, 6.4 independent prod-approval gate = **Target** (no build/deploy from this repo yet). *(Scorecard: Token-Permissions, Dangerous-Workflow.)* |
 | **CO-7** | Continuous security testing | **Adopt (secrets now) + Target (rest)** | 7.1 **secrets scan live now** (gitleaks CI + GitHub native secret-scanning & push-protection — free on public). SAST (**CodeQL — free on public**), SCA (`govulncheck` + Dependabot), IaC scan, image scan each **switch on when the artifact they test lands** (Go code / `go.mod` / `deploy/` / images). 7.3 blocking thresholds ✓. 7.2 DAST, 7.4 pentest/red-team, **fuzzing** (Go native) = **Target** (§5). 7.5 no prod data in tests — N/A (no prod data). *(Scorecard: SAST, Fuzzing; OSPS: Quality.)* |
@@ -110,7 +110,7 @@ exceptions Console7 carries at commencement — there are no silent gaps.
 
 | # | Target (CO / OSPS) | Why it can't fully bind yet | Interim slice (now) | Full trajectory |
 |---|---|---|---|---|
-| 1 | **Independent human review** (CO-4.3/4.4; Badge silver/gold) | Single maintainer; no second human reviewer | Automated gates + AI security review on every PR + **mandatory human merge gate**; `enforce_admins` so even a maintainer PRs everything | **A second maintainer / community reviewer before GA**; required independent approval |
+| 1 | **Independent human review + maintainer admin-bypass** (CO-4.3/4.4; Badge silver/gold) | Single maintainer: no second human reviewer, and flipping `enforce_admins` now would gate the lone maintainer out of their own merges | Branch protection binds all contributors; automated gates + AI security review on every PR + **mandatory human merge gate** | At **critical mass / a second maintainer** (targeted before GA): flip **`enforce_admins: true`** (maintainer PRs everything too) and require **independent human approval** |
 | 2 | **SBOM** (CO-5.2; OSPS Build&Release) | No release artifact to describe | Document the CycloneDX/SPDX plan; wire it into the first build | SBOM generated at build, bound to artifact digest, vuln-evaluated continuously |
 | 3 | **SLSA L3 provenance** (CO-5.3) | No build pipeline / artifact | Plan the hardened ephemeral builder (GH Actions OIDC + `slsa-github-generator`) | L3 provenance on every released artifact |
 | 4 | **Signed releases + admission** (CO-5.4; Scorecard Signed-Releases) | No release exists | Decide signing identity now (cosign keyless / Sigstore); distinct identities per artifact tier (`ARCHITECTURE.md` §6.4) | Sign on release; verify-on-admission rejects unsigned/unattested |
@@ -139,9 +139,11 @@ control they satisfy):
 1. **Repo-governance gates** — gitleaks secret-scan CI (+ enable GitHub native
    secret-scanning & push-protection), SHA-pinned actions, least-privilege
    `GITHUB_TOKEN`, Dependabot (actions; Go modules when `go.mod` lands), OpenSSF
-   Scorecard workflow + badge. *(CO-4, CO-5, CO-6, CO-7.1, CO-8.)*
-2. **Branch-protection tightening** — `enforce_admins: true`; required PR review;
-   required status checks (once the gates above are green checks); DCO required check.
+   Scorecard workflow (**results private — artifact only, no public publish/badge
+   yet**; §3). *(CO-4, CO-5, CO-6, CO-7.1, CO-8.)*
+2. **Branch-protection tightening** — required PR review; required status checks
+   (once the gates above are green checks); DCO required check. **`enforce_admins`
+   stays off** until critical mass / a second maintainer (tracked target §5 #1).
    *(CO-4.4, CO-6.4-prep.)*
 3. **OSS-governance docs** — `CONTRIBUTING.md` (DCO), `CODE_OF_CONDUCT.md`
    (Contributor Covenant), `CODEOWNERS`, a thin `GOVERNANCE.md`/`MAINTAINERS.md`,
