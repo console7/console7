@@ -17,6 +17,79 @@ These are the specification. Implement to them; do not redesign them.
 > instruction. Do not attempt to build the whole product in one task. Work to the
 > roadmap phase, in small reviewable steps.
 
+## Current state (read this first)
+
+The repository is a **docs-only skeleton**. There is **no source code yet** — only
+the normative docs, `LICENSE`, `SECURITY.md`, and `docs/adr/0001-language.md`. The
+directory tree in `ARCHITECTURE.md` §6.3 (`sdk/`, `control-plane/`, `keybroker/`,
+`sandbox/`, `providers/`, `deploy/`, `conformance/`) **does not exist on disk** —
+it is the target layout to be created.
+
+The next unit of work is **P0 scaffolding** — the kickoff prompt in
+`docs/BOOTSTRAP.md` ("scaffolding only; implement NOTHING behind the interfaces"):
+create the §6.3 tree, define the `sdk/interfaces` provider contracts as typed Go
+interfaces with SECURITY docstrings, scaffold the conformance harness, add
+`docs/THREAT-MODEL.md`. Drive subsequent work down the prompt ladder, one roadmap
+phase-gate per PR.
+
+## Architecture in one screen
+
+Full detail is in `ARCHITECTURE.md`; this is the orientation so you don't have to
+reconstruct it. **Everything runs in the adopter's cloud tenancy; the only boundary
+crossing is model inference** to the adopter-chosen backend.
+
+- **Control plane** (Tier-1, hardened, modular monolith, **holds no keys at rest**):
+  Web-CLI UI + API gateway → **Orchestrator** (session lifecycle, *stamps lineage*
+  human→NHI→action, cross-repo coordination) → **PDP** (resolves the *target's*
+  tier × stratum → session profile) → **Inference Router**, **DLP**, **Evidence
+  Sink** (WORM, hash-chained, signed). Lives in `control-plane/`.
+- **Key broker** (peeled out early, separately hardened, **distinct signing
+  identity**): ephemeral identity minting + per-user subscription-token vault +
+  SSO→NHI binding and commit/artefact signing. Lives in `keybroker/`. Never fuse it
+  with the control plane.
+- **Data plane** (per-session, ephemeral, **untrusted**): the gVisor/microVM
+  **sandbox** wrapping the genuine Claude Code engine (`policyHelper` renders locked
+  managed-settings + PreToolUse hooks), the **default-deny egress proxy** (the
+  *authoritative* perimeter), and the operate-lane **Observe Gateway**. Lives in
+  `sandbox/`. Distinct base-image artifact.
+- **Provider seams** (the "bring-your-own" contract surface, in `sdk/interfaces`):
+  `CloudProvider`, `SecretsProvider`, `IdentityProvider`, `SCMProvider`,
+  `InferenceBackend`, `PolicyEngine`, `PolicySoR`, `EvidenceSink`, `ObserveGateway`.
+  Reference implementations (GCP/GitHub/Vertex/OPA/GCS) live in `providers/` —
+  **reference set only**; community providers live out-of-tree against the published
+  SDK.
+
+Monorepo **core + a standalone published SDK + an out-of-tree ecosystem**. Distinct
+trust tiers ship as **distinct, separately-signed artifacts** (control-plane image /
+key-broker image / sandbox base image / SDK packages). An interface change, its
+reference implementation, and its conformance test land in **one atomic PR** — this
+is why core is a monorepo.
+
+## Build, test, lint (Go)
+
+The implementation language is **Go** (`docs/adr/0001-language.md`) — it covers the
+SDK, control plane, key broker, sandbox control-side helpers, and reference
+providers. It does **not** cover the wrapped Claude Code engine (Node/Python, run
+as-is in the sandbox and reached over its CLI / Agent SDK) or the `control-plane/ui`
+front end (may use web tooling in its own build).
+
+There is **no `go.mod` or build tooling yet** — it gets created during P0
+scaffolding. Once a Go module exists, the canonical commands are the standard
+toolchain (use these; no custom wrappers exist):
+
+```bash
+go build ./...                       # build everything
+go test ./...                        # run all tests
+go test ./sdk/...                    # run one package tree
+go test -run TestName ./path/to/pkg  # run a single test
+go vet ./...                         # vet
+gofmt -l .                           # list unformatted files (CI-gated)
+```
+
+The published SDK = a **Go module**; any npm/PyPI/crate packages are generated
+bindings, not reimplementations. When you add the module, prefer a tight dependency
+surface — this is a Tier-1, public, security-sensitive codebase.
+
 ## How to work here
 
 - Work to the **current roadmap phase** and its exit criteria. Do not pull work
