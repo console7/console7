@@ -45,6 +45,9 @@ func providersUnderTest() testkit.ProviderUnderTest {
 			OrgAPIEndpoint:       "https://vertex.internal/inference",
 			SubscriptionEnabled:  true,
 		}),
+		// The registry MemSecrets checks ownership against is also the rig the injection
+		// contract uses to provision a real owned sandbox.
+		SecretsRig: reg,
 	}
 }
 

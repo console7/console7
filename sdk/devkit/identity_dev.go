@@ -19,8 +19,13 @@ import (
 // subject without verifying the signature — not a real OIDC verification (issuer/
 // audience/JWKS rotation are Phase-1+).
 //
-// The dev assertion format is:  subject|expiryUnixSeconds|base64url(ed25519 sig)
-// where the signature is over "subject|expiryUnixSeconds".
+// The dev assertion format is:
+//
+//	base64url(subject)|expiryUnixSeconds|base64url(ed25519 sig)
+//
+// where the signature is over "base64url(subject)|expiryUnixSeconds". The subject is
+// base64url-encoded (not raw) because Subject is an unrestricted string — a raw subject
+// containing the "|" delimiter would otherwise be parsed as multiple fields.
 type DevIdentity struct {
 	pub    ed25519.PublicKey // the dev IdP verifying key.
 	groups map[interfaces.Subject][]interfaces.Group
@@ -46,18 +51,22 @@ func (d *DevIdentity) Authenticate(ctx context.Context, token interfaces.AuthnTo
 	if len(parts) != 3 {
 		return "", errors.New("devkit: malformed dev assertion")
 	}
-	subject, expStr, sigB64 := parts[0], parts[1], parts[2]
-	if subject == "" {
-		return "", errors.New("devkit: dev assertion has empty subject")
-	}
+	subjB64, expStr, sigB64 := parts[0], parts[1], parts[2]
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil {
 		return "", errors.New("devkit: dev assertion signature not valid base64url")
 	}
-	signed := subject + "|" + expStr
+	signed := subjB64 + "|" + expStr
 	// Verify the signature BEFORE trusting any claim in the token.
 	if !ed25519.Verify(d.pub, []byte(signed), sig) {
 		return "", errors.New("devkit: dev assertion signature does not verify")
+	}
+	subjBytes, err := base64.RawURLEncoding.DecodeString(subjB64)
+	if err != nil {
+		return "", errors.New("devkit: dev assertion subject not valid base64url")
+	}
+	if len(subjBytes) == 0 {
+		return "", errors.New("devkit: dev assertion has empty subject")
 	}
 	expUnix, err := strconv.ParseInt(expStr, 10, 64)
 	if err != nil {
@@ -66,7 +75,7 @@ func (d *DevIdentity) Authenticate(ctx context.Context, token interfaces.AuthnTo
 	if !time.Unix(expUnix, 0).After(d.now()) {
 		return "", errors.New("devkit: dev assertion expired")
 	}
-	return interfaces.Subject(subject), nil
+	return interfaces.Subject(subjBytes), nil
 }
 
 // ResolveGroups returns the subject's groups from the authoritative in-memory map. The
@@ -83,7 +92,8 @@ func (d *DevIdentity) ResolveGroups(ctx context.Context, subject interfaces.Subj
 // test/bench analogue of a browser completing SSO and presenting a token; it lives here
 // (not in a _test.go) so the broker bench in another package can drive a login.
 func IssueDevAssertion(priv ed25519.PrivateKey, subject interfaces.Subject, exp time.Time) interfaces.AuthnToken {
-	signed := string(subject) + "|" + strconv.FormatInt(exp.Unix(), 10)
+	subjB64 := base64.RawURLEncoding.EncodeToString([]byte(subject))
+	signed := subjB64 + "|" + strconv.FormatInt(exp.Unix(), 10)
 	sig := ed25519.Sign(priv, []byte(signed))
 	return interfaces.AuthnToken(signed + "|" + base64.RawURLEncoding.EncodeToString(sig))
 }

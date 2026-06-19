@@ -92,3 +92,36 @@ func TestBind_RejectsEmptySubjectOrSession(t *testing.T) {
 		t.Error("bound an NHI without a session")
 	}
 }
+
+func TestBind_RejectsUnknownPersona(t *testing.T) {
+	binder := NewNHIBinder(NewDevCA())
+	for _, p := range []interfaces.Persona{"actuate", "admin", "", "AUTHOR"} {
+		if _, err := binder.Bind("alice", "s1", p); err == nil {
+			t.Errorf("bound an NHI with unknown persona %q", p)
+		}
+	}
+	// The two valid personas are accepted.
+	for _, p := range []interfaces.Persona{interfaces.PersonaAuthor, interfaces.PersonaOperate} {
+		if _, err := binder.Bind("alice", "s1", p); err != nil {
+			t.Errorf("rejected valid persona %q: %v", p, err)
+		}
+	}
+}
+
+func TestVerify_RejectsMalformedKeyLengths(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewNHIBinder(ca).Bind("alice", "s1", interfaces.PersonaAuthor)
+	payload := []byte("commit")
+	sig := signer.Sign(payload)
+
+	// A wrong-length CA root must error, not panic.
+	if err := Verify(ed25519.PublicKey{1, 2, 3}, payload, sig); err == nil {
+		t.Error("verified against a malformed CA root key")
+	}
+	// A wrong-length certificate public key must error, not panic.
+	bad := sig
+	bad.Cert.Pub = ed25519.PublicKey{1, 2, 3}
+	if err := Verify(ca.Root(), payload, bad); err == nil {
+		t.Error("verified a signature with a malformed certificate public key")
+	}
+}

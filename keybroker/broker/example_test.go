@@ -35,6 +35,7 @@ func ExampleBroker_MintSessionIdentity() {
 		Authn:           authn,
 		SessionID:       "s1",
 		Persona:         interfaces.PersonaAuthor,
+		Repo:            interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
 		Branch:          "feature/x",
 		Scopes:          []string{"repo:read"},
 		TTL:             time.Hour,

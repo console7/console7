@@ -3,6 +3,8 @@ package devkit
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,11 +44,28 @@ func TestDevIdentity_Authenticate_RejectsForgedOrTampered(t *testing.T) {
 		t.Error("forged assertion accepted — client-asserted identity was trusted without verification")
 	}
 
-	// A token whose claimed subject is swapped after signing must not verify.
+	// A token whose subject field is swapped after signing must not verify (the original
+	// signature is kept; only the base64 subject field is replaced).
 	valid := string(IssueDevAssertion(priv, "alice", time.Now().Add(time.Hour)))
-	tampered := interfaces.AuthnToken("mallory" + valid[len("alice"):])
+	parts := strings.SplitN(valid, "|", 3)
+	mallorySubj := base64.RawURLEncoding.EncodeToString([]byte("mallory"))
+	tampered := interfaces.AuthnToken(mallorySubj + "|" + parts[1] + "|" + parts[2])
 	if _, err := id.Authenticate(context.Background(), tampered); err == nil {
 		t.Error("tampered subject accepted — signature did not bind the subject")
+	}
+}
+
+func TestDevIdentity_Authenticate_PreservesDelimiterBearingSubject(t *testing.T) {
+	id, priv := newDevIdentity(t, nil)
+	// Subject is an unrestricted string; one containing the field delimiter must round-trip.
+	subj := interfaces.Subject("alice|cn=svc/role")
+	tok := IssueDevAssertion(priv, subj, time.Now().Add(time.Hour))
+	got, err := id.Authenticate(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Authenticate of a delimiter-bearing subject: %v", err)
+	}
+	if got != subj {
+		t.Errorf("subject = %q, want %q", got, subj)
 	}
 }
 

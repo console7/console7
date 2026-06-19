@@ -75,6 +75,11 @@ func (s *MemSCM) MintWorkingCredential(ctx context.Context, req interfaces.Worki
 	if req.Branch == "" {
 		return interfaces.CredentialRef{}, errors.New("devkit: MintWorkingCredential requires a working branch")
 	}
+	// The credential MUST be repo-scoped (SECURITY contract); refuse a zero RepoRef so a
+	// missing-repo wiring bug cannot produce an unscoped/unusable token.
+	if req.Repo.Host == "" || req.Repo.Owner == "" || req.Repo.Name == "" {
+		return interfaces.CredentialRef{}, errors.New("devkit: MintWorkingCredential requires a fully-specified repo")
+	}
 	now := s.now()
 	// Like every minted credential, the SCM token must die with the session: cap its
 	// expiry to no later than min(now+ttl, SessionDeadline) and refuse an absent/past

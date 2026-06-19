@@ -34,6 +34,7 @@ type MemSecrets struct {
 	rootKey    []byte                            // KEK; random per process.
 	wrappedDEK map[interfaces.Subject][]byte     // per-user DEK, sealed under rootKey.
 	sealed     map[interfaces.Subject]sealedBlob // subscription token, sealed under the user's DEK.
+	revoked    map[interfaces.Subject]bool       // tombstones: a store after revoke must refuse.
 	leases     map[string]lease                  // ephemeral credential leases by Ref.
 	sandboxes  *SandboxRegistry                  // ownership oracle for injection.
 	now        func() time.Time                  // injectable clock; defaults to time.Now.
@@ -64,6 +65,7 @@ func NewMemSecrets(sandboxes *SandboxRegistry) *MemSecrets {
 		rootKey:    kek,
 		wrappedDEK: make(map[interfaces.Subject][]byte),
 		sealed:     make(map[interfaces.Subject]sealedBlob),
+		revoked:    make(map[interfaces.Subject]bool),
 		leases:     make(map[string]lease),
 		sandboxes:  sandboxes,
 		now:        time.Now,
@@ -140,6 +142,13 @@ func (m *MemSecrets) StoreSubscriptionToken(ctx context.Context, tok interfaces.
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Refuse a store for a revoked subject. The check and the write happen under the same
+	// lock the revoke uses, so a concurrent RevokeSubject cannot interleave to leave fresh
+	// recoverable material behind after revocation (the post-revoke unrecoverability
+	// contract holds under an offboarding/login race).
+	if m.revoked[tok.Subject] {
+		return errors.New("devkit: refusing to store a token for a revoked subject")
+	}
 	m.wrappedDEK[tok.Subject] = wrapped
 	m.sealed[tok.Subject] = sealedTok
 	return nil
@@ -206,6 +215,9 @@ func (m *MemSecrets) RevokeSubject(ctx context.Context, subject interfaces.Subje
 	defer m.mu.Unlock()
 	delete(m.wrappedDEK, subject)
 	delete(m.sealed, subject)
+	// Tombstone the subject so an in-flight StoreSubscriptionToken that seals outside the
+	// lock cannot resurrect material after this revocation commits.
+	m.revoked[subject] = true
 	for ref, l := range m.leases {
 		if l.subject == subject {
 			delete(m.leases, ref)

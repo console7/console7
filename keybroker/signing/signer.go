@@ -3,7 +3,6 @@ package signing
 import (
 	"crypto/ed25519"
 	"errors"
-	"strings"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
@@ -49,19 +48,23 @@ func (s *SessionSigner) Sign(payload []byte) Signature {
 // (2) that key signed the payload, and (3) the signature's lineage fields agree with the
 // certificate. Any break is an error — lineage that does not verify is no lineage.
 func Verify(caRoot ed25519.PublicKey, payload []byte, sig Signature) error {
-	// (3) the signature's claimed lineage must match what the certificate binds. The
-	// Subject and NHI are certified directly; the SessionID is not a separate certified
-	// field, so it is bound transitively by requiring the certified NHI to encode it
-	// (nhi/<session>/<persona>) — otherwise sig.SessionID would be forgeable metadata an
-	// evidence consumer might trust.
-	if sig.NHI != sig.Cert.NHI || sig.Subject != sig.Cert.Subject {
+	// (0) guard key sizes before any ed25519.Verify — it PANICS on a wrong-length public
+	// key, so a malformed (e.g. externally-decoded) evidence record must be rejected, not
+	// allowed to crash the verifier.
+	if len(caRoot) != ed25519.PublicKeySize {
+		return errors.New("signing: CA root key has the wrong length")
+	}
+	if len(sig.Cert.Pub) != ed25519.PublicKeySize {
+		return errors.New("signing: certificate public key has the wrong length")
+	}
+	// (3) the signature's claimed lineage must match what the certificate binds — NHI,
+	// Subject, and Session are all certified fields, so each is bound exactly (a free
+	// sig.SessionID would otherwise be forgeable metadata an evidence consumer might trust).
+	if sig.NHI != sig.Cert.NHI || sig.Subject != sig.Cert.Subject || sig.SessionID != sig.Cert.Session {
 		return errors.New("signing: signature lineage does not match its certificate")
 	}
-	if !strings.HasPrefix(sig.Cert.NHI, nhiPrefix(sig.SessionID)) {
-		return errors.New("signing: signature session does not match the certified NHI")
-	}
-	// (1) the CA root must have certified this NHI->key->Subject binding.
-	if !ed25519.Verify(caRoot, certTBS(sig.Cert.NHI, sig.Cert.Subject, sig.Cert.Pub), sig.Cert.CASig) {
+	// (1) the CA root must have certified this NHI->session->Subject->key binding.
+	if !ed25519.Verify(caRoot, certTBS(sig.Cert.NHI, sig.Cert.Session, sig.Cert.Subject, sig.Cert.Pub), sig.Cert.CASig) {
 		return errors.New("signing: certificate does not chain to the trusted CA root")
 	}
 	// (2) the certified NHI key must have signed the payload.

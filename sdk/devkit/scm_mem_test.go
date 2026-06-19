@@ -57,6 +57,8 @@ func TestMemSCM_MintWorkingCredential_RefusesMissingDeadlineOrLineage(t *testing
 		{"past deadline", interfaces.WorkingCredentialRequest{Subject: "alice", SessionID: "s1", Repo: repo, Branch: "feature/x", SessionDeadline: time.Now().Add(-time.Minute)}},
 		{"empty subject", interfaces.WorkingCredentialRequest{SessionID: "s1", Repo: repo, Branch: "feature/x", SessionDeadline: future}},
 		{"empty session", interfaces.WorkingCredentialRequest{Subject: "alice", Repo: repo, Branch: "feature/x", SessionDeadline: future}},
+		{"empty repo", interfaces.WorkingCredentialRequest{Subject: "alice", SessionID: "s1", Branch: "feature/x", SessionDeadline: future}},
+		{"partial repo", interfaces.WorkingCredentialRequest{Subject: "alice", SessionID: "s1", Repo: interfaces.RepoRef{Host: "github.com"}, Branch: "feature/x", SessionDeadline: future}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

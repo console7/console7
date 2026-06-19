@@ -23,6 +23,21 @@ type ProviderUnderTest struct {
 	PolicySoR interfaces.PolicySoR
 	Evidence  interfaces.EvidenceSink
 	Observe   interfaces.ObserveGateway
+
+	// SecretsRig is an OPTIONAL test capability. The SecretsProvider interface alone
+	// cannot mint an owned SandboxHandle, so without a rig the InjectSubscriptionToken
+	// check can only probe the refusal paths with a bogus handle — and a provider that
+	// rejects unknown handles but SKIPS the attended/beneficiary checks would pass
+	// spuriously. Supplying a rig lets the suite provision a real owned sandbox and
+	// confirm the attended/single-beneficiary gate is what drives the refusals (the
+	// attended single-beneficiary case must succeed).
+	SecretsRig SubscriptionTestRig
+}
+
+// SubscriptionTestRig provisions a sandbox owned by a (subject, session) so the
+// conformance suite can exercise subscription injection against a real, owned target.
+type SubscriptionTestRig interface {
+	Provision(subject interfaces.Subject, session interfaces.SessionID) interfaces.SandboxHandle
 }
 
 // Contract names one provider-interface method whose SECURITY clause a conformance
@@ -153,6 +168,45 @@ func registry() []check {
 					Subject: confSubject, SessionID: "conf", Sandbox: dummy, Attended: true, Beneficiaries: 2,
 				}); err == nil {
 					return errors.New("injected a subscription token for a multi-beneficiary session")
+				}
+				// Without a rig the above only proves "some error" — a provider could pass
+				// by rejecting the unknown handle while ignoring the attended/beneficiary
+				// gate. With a rig, exercise the gate against a REAL owned sandbox so the
+				// refusals are attributable to it, and confirm the valid case succeeds.
+				if p.SecretsRig == nil {
+					return nil
+				}
+				const owner = interfaces.Subject("conf-inject-owner")
+				const session = interfaces.SessionID("conf-inject")
+				if err := p.Secrets.StoreSubscriptionToken(ctx, interfaces.SubscriptionToken{
+					Subject: owner, Token: []byte("conf-inject-token"),
+				}); err != nil {
+					return fmt.Errorf("StoreSubscriptionToken (for injection check) errored: %w", err)
+				}
+				owned := p.SecretsRig.Provision(owner, session)
+				other := p.SecretsRig.Provision("conf-inject-other", "conf-inject-other-session")
+				// Valid owned sandbox, but unattended / fan-out / non-owner must still refuse.
+				if err := p.Secrets.InjectSubscriptionToken(ctx, interfaces.SubscriptionInjection{
+					Subject: owner, SessionID: session, Sandbox: owned, Attended: false, Beneficiaries: 1,
+				}); err == nil {
+					return errors.New("injected into an unattended session despite a valid owned sandbox")
+				}
+				if err := p.Secrets.InjectSubscriptionToken(ctx, interfaces.SubscriptionInjection{
+					Subject: owner, SessionID: session, Sandbox: owned, Attended: true, Beneficiaries: 2,
+				}); err == nil {
+					return errors.New("injected for a multi-beneficiary session despite a valid owned sandbox")
+				}
+				if err := p.Secrets.InjectSubscriptionToken(ctx, interfaces.SubscriptionInjection{
+					Subject: owner, SessionID: session, Sandbox: other, Attended: true, Beneficiaries: 1,
+				}); err == nil {
+					return errors.New("injected into a non-owner sandbox")
+				}
+				// The attended, single-beneficiary case into the owner's sandbox must
+				// succeed — proving the refusals above came from the gate, not the handle.
+				if err := p.Secrets.InjectSubscriptionToken(ctx, interfaces.SubscriptionInjection{
+					Subject: owner, SessionID: session, Sandbox: owned, Attended: true, Beneficiaries: 1,
+				}); err != nil {
+					return fmt.Errorf("attended single-beneficiary injection into the owner sandbox should succeed: %w", err)
 				}
 				return nil
 			},

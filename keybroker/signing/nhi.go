@@ -3,6 +3,7 @@ package signing
 import (
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
@@ -42,6 +43,14 @@ func (b *NHIBinder) Bind(subject interfaces.Subject, session interfaces.SessionI
 	if session == "" {
 		return nil, errors.New("signing: cannot bind an NHI without a session")
 	}
+	// Reject an unknown persona at the identity root: the interface has only author and
+	// operate (and deliberately no actuate persona), so an invalid privilege label must
+	// not enter signed evidence or downstream policy (DESIGN.md §1.2; GOAL.md tenet 6).
+	switch persona {
+	case interfaces.PersonaAuthor, interfaces.PersonaOperate:
+	default:
+		return nil, fmt.Errorf("signing: unknown persona %q", persona)
+	}
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return nil, errors.New("signing: ephemeral key generation failed")
@@ -52,7 +61,7 @@ func (b *NHIBinder) Bind(subject interfaces.Subject, session interfaces.SessionI
 	// authoritative binding regardless; the name is a self-describing evidence label, not
 	// an identity key.
 	nhi := nhiPrefix(session) + string(persona)
-	cert := b.ca.Issue(nhi, subject, pub)
+	cert := b.ca.Issue(nhi, session, subject, pub)
 	return &SessionSigner{
 		Subject:   subject,
 		SessionID: session,

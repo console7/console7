@@ -221,3 +221,20 @@ func TestMemSecrets_Revoke_MakesMaterialUnrecoverable(t *testing.T) {
 		t.Error("injection succeeded after revocation — material was recoverable")
 	}
 }
+
+func TestMemSecrets_Revoke_TombstonesFutureStores(t *testing.T) {
+	reg := NewSandboxRegistry()
+	m := NewMemSecrets(reg)
+	ctx := context.Background()
+	if err := m.RevokeSubject(ctx, "alice"); err != nil {
+		t.Fatalf("RevokeSubject: %v", err)
+	}
+	// A store after revocation must be refused, so an in-flight store racing a revoke
+	// cannot resurrect recoverable material once revocation has committed.
+	if err := m.StoreSubscriptionToken(ctx, interfaces.SubscriptionToken{Subject: "alice", Token: []byte("tok")}); err == nil {
+		t.Error("stored a token for a revoked subject — post-revoke unrecoverability violated")
+	}
+	if _, ok := m.sealed["alice"]; ok {
+		t.Error("material present for a revoked subject after a store attempt")
+	}
+}

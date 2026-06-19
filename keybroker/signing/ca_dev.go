@@ -18,12 +18,16 @@ type DevCA struct {
 
 // Cert binds a non-human identity to a public key and to the human Subject it acts for,
 // signed by the CA root. It is the verifiable link in the lineage chain: a verifier that
-// trusts the CA root can confirm a given NHI key legitimately speaks for a given Subject.
+// trusts the CA root can confirm a given NHI key legitimately speaks for a given Subject
+// in a given session.
 type Cert struct {
 	NHI     string
+	Session interfaces.SessionID
 	Subject interfaces.Subject
 	Pub     ed25519.PublicKey
-	// CASig is the CA root's signature over the canonical (NHI, Subject, Pub) tuple.
+	// CASig is the CA root's signature over the canonical (NHI, Session, Subject, Pub)
+	// tuple. Session is certified as its own field — not inferred from the NHI string —
+	// so a Signature's SessionID is bound exactly, not by a prefix match.
 	CASig []byte
 }
 
@@ -37,11 +41,11 @@ func NewDevCA() *DevCA {
 	return &DevCA{rootPriv: priv, rootPub: pub}
 }
 
-// Issue signs a certificate binding nhi + subject + pub. The CA does not retain the
-// certificate; the holder (a SessionSigner) carries it and presents it at verify time.
-func (c *DevCA) Issue(nhi string, subject interfaces.Subject, pub ed25519.PublicKey) Cert {
-	sig := ed25519.Sign(c.rootPriv, certTBS(nhi, subject, pub))
-	return Cert{NHI: nhi, Subject: subject, Pub: pub, CASig: sig}
+// Issue signs a certificate binding nhi + session + subject + pub. The CA does not retain
+// the certificate; the holder (a SessionSigner) carries it and presents it at verify time.
+func (c *DevCA) Issue(nhi string, session interfaces.SessionID, subject interfaces.Subject, pub ed25519.PublicKey) Cert {
+	sig := ed25519.Sign(c.rootPriv, certTBS(nhi, session, subject, pub))
+	return Cert{NHI: nhi, Session: session, Subject: subject, Pub: pub, CASig: sig}
 }
 
 // Root returns the CA's public key — the trust anchor a verifier pins.
@@ -54,10 +58,11 @@ func (c *DevCA) Root() ed25519.PublicKey {
 // (both derived from external input — an SSO assertion, a session ID) can re-partition
 // the tuple and bind a chosen key to a different (NHI, Subject), the way a delimiter-only
 // encoding could. The domain tag separates these bytes from any other signing context.
-func certTBS(nhi string, subject interfaces.Subject, pub ed25519.PublicKey) []byte {
+func certTBS(nhi string, session interfaces.SessionID, subject interfaces.Subject, pub ed25519.PublicKey) []byte {
 	var b []byte
 	b = append(b, "c7-cert-v1"...)
 	b = appendField(b, []byte(nhi))
+	b = appendField(b, []byte(session))
 	b = appendField(b, []byte(subject))
 	b = appendField(b, pub)
 	return b
