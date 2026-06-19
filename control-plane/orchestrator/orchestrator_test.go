@@ -142,7 +142,7 @@ func TestSpike_SessionLifecycle(t *testing.T) {
 	}
 	wantEvents := []string{
 		"session-start", "sandbox-provisioned", "inference-resolved", "egress-narrowed",
-		"subscription-injected", "commit-signed", "pr-opened", "session-end",
+		"subscription-injected", "commit-signed", "pr-opening", "pr-opened", "session-end",
 	}
 	if b.evidence.Len() != len(wantEvents) {
 		t.Fatalf("evidence has %d records, want %d", b.evidence.Len(), len(wantEvents))

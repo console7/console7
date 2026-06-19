@@ -196,7 +196,14 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		if derr := o.Cloud.DestroySandbox(cleanupCtx, sandbox); derr != nil {
 			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: destroy-sandbox after %s failed (sandbox may be live): %w", stage, derr))
 		}
-		_ = emit(cleanupCtx, "session-aborted", stage+": "+cause.Error())
+		// Surface (never swallow) a failure to record the abort — e.g. SignSession refusing to
+		// sign past the session deadline on a session that overran. A dropped close-out record
+		// must be visible so an operator can escalate. (Residual for a real deployment: terminal
+		// teardown/abort evidence should use a teardown-scoped signer that outlives the work
+		// deadline, so close-out can always be recorded; tracked for the keybroker.)
+		if eerr := emit(cleanupCtx, "session-aborted", stage+": "+cause.Error()); eerr != nil {
+			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to record session-aborted: %w", eerr))
+		}
 		return Summary{}, outErr
 	}
 	if err := stamp("sandbox-provisioned", sandbox.ID); err != nil {
@@ -276,6 +283,16 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 
 	// 8. PR-only exit: propose the change as a PR. The session never merges or actuates —
 	// author, approve, and actuate are separated (tenet 5/6).
+	//
+	// Write-ahead the INTENT before the external side-effect: the PR is the one irreversible
+	// outward action, so the WORM log must durably record that we are opening it BEFORE the
+	// call, not only confirm it after. Otherwise a post-open evidence failure would leave a PR
+	// open with no record of it. (Residual for a real SCM provider: if the post-open
+	// confirmation cannot commit, a compensating close / idempotent reconcile is also needed;
+	// tracked for providers/scm-github.)
+	if err := stamp("pr-opening", req.Branch+" -> main"); err != nil {
+		return abort(err, "pr-intent-evidence")
+	}
 	prRef, err := o.Broker.OpenPullRequest(ctx, interfaces.PullRequest{
 		Repo:  req.Repo,
 		Head:  req.Branch,

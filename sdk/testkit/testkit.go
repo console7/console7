@@ -107,26 +107,41 @@ func registry() []check {
 					Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://approved.internal"}},
 					MaxTTL:    time.Minute,
 				}
-				h1, err := p.Cloud.ProvisionSandbox(ctx, spec)
-				if err != nil {
-					return fmt.Errorf("provision failed: %w", err)
+				// A sandbox is never reused across sessions, users, OR personas: provision
+				// four sandboxes that each differ from the base in exactly one of those
+				// dimensions and require all handles to be distinct and non-empty. Varying only
+				// the session (the original check) would let a provider that keys uniqueness by
+				// session alone — but reuses a handle for a different user or persona — slip
+				// through, violating the security clause.
+				variants := []interfaces.SandboxSpec{
+					spec,
+					func() interfaces.SandboxSpec { s := spec; s.SessionID = "conf-session-b"; return s }(),
+					func() interfaces.SandboxSpec {
+						s := spec
+						s.SessionID, s.Subject = "conf-session-u", interfaces.Subject("conf-other-subject")
+						return s
+					}(),
+					func() interfaces.SandboxSpec {
+						s := spec
+						s.SessionID, s.Persona = "conf-session-p", interfaces.PersonaOperate
+						return s
+					}(),
 				}
-				spec.SessionID = interfaces.SessionID("conf-session-b")
-				h2, err := p.Cloud.ProvisionSandbox(ctx, spec)
-				if err != nil {
-					return fmt.Errorf("second provision failed: %w", err)
+				seen := make(map[string]bool, len(variants))
+				for i, v := range variants {
+					h, err := p.Cloud.ProvisionSandbox(ctx, v)
+					if err != nil {
+						return fmt.Errorf("provision %d failed: %w", i, err)
+					}
+					if h.ID == "" {
+						return errors.New("provisioned an empty sandbox handle")
+					}
+					if seen[h.ID] {
+						return errors.New("reused one sandbox handle across distinct session/user/persona")
+					}
+					seen[h.ID] = true
+					defer func(h interfaces.SandboxHandle) { _ = p.Cloud.DestroySandbox(ctx, h) }(h)
 				}
-				// A sandbox is never reused: two provisions yield two distinct, non-empty
-				// handles (a shared/empty handle would mean one environment serving two
-				// sessions).
-				if h1.ID == "" || h2.ID == "" {
-					return errors.New("provisioned an empty sandbox handle")
-				}
-				if h1.ID == h2.ID {
-					return errors.New("reused one sandbox handle across two sessions")
-				}
-				_ = p.Cloud.DestroySandbox(ctx, h1)
-				_ = p.Cloud.DestroySandbox(ctx, h2)
 				return nil
 			},
 		},
