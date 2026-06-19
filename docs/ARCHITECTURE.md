@@ -173,10 +173,13 @@ signed release, one SBOM, one provenance trail.
 
 Two carve-outs keep it from sprawling:
 
-- **The interface contracts and extensibility SDK are published as independently
-  versioned, standalone packages** (npm / PyPI / Go module / crate), even though
-  they are *developed* in the monorepo. Their stability is the promise to adopters
-  and connector authors; nobody should fork the repo to write a provider.
+- **The interface contracts and extensibility SDK are published as an independently
+  versioned, standalone package** — the canonical, system-of-record SDK is a **Go
+  module** (`docs/adr/0001-language.md`) — even though it is *developed* in the
+  monorepo. Any npm / PyPI / crate artifacts are **generated or hand-maintained
+  bindings** over that Go module, not independent reimplementations. The SDK's
+  stability is the promise to adopters and connector authors; nobody should fork the
+  repo to write a provider.
 - **Community and third-party provider implementations live out-of-tree**, in their
   own repos, against the published SDK — the Terraform-core-plus-providers /
   out-of-tree-CSI pattern. Core ships only a **reference** provider set. This keeps
