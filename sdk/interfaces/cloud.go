@@ -10,8 +10,14 @@ import (
 // provision time, not negotiated with the workload afterwards.
 type SandboxSpec struct {
 	SessionID SessionID
-	Persona   Persona
-	Egress    EgressPolicy
+	// Subject is the human principal the session acts for. The provider records the
+	// (Subject, SessionID) -> SandboxHandle binding it attests to, so a later
+	// subscription injection can be verified to reach only its owner's sandbox (no
+	// pooling — DESIGN.md §2.2). It is identity to bind, never a credential: no secret
+	// material crosses this seam.
+	Subject Subject
+	Persona Persona
+	Egress  EgressPolicy
 	// MaxTTL bounds the sandbox's lifetime; it is destroyed no later than this even
 	// if teardown is not called (ephemeral by default — ARCHITECTURE.md §1).
 	MaxTTL time.Duration

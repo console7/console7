@@ -8,4 +8,8 @@ profile** — egress allowlist, autonomy ceiling, persona constraints, human-gat
 §4.2). Integrates a `PolicyEngine` (OPA/Cedar). **Scope follows the artefact, not the
 launcher**, and the PDP does **not** own the system of record (`DESIGN.md` §4.1).
 
-> P0: placeholder — no implementation.
+> Phase 1 (minimal): `ResolveProfile` (currently in `../orchestrator/pdp.go`) resolves the
+> target's tier × stratum through the `PolicySoR` seam and derives a fixed single-lane
+> `SessionProfile` (author × T3), failing closed on an unresolved target. The full
+> tier × stratum → profile policy — autonomy-ceiling/human-gate matrices, take-the-max +
+> step-up across targets, `PolicyEngine` integration — is Phase 3 (docs/ROADMAP.md).

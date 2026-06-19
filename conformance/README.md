@@ -9,12 +9,15 @@ asserts that each provider implementation upholds the SECURITY contracts in
 [`../sdk/interfaces/`](../sdk/interfaces/), driving the harness in
 [`../sdk/testkit/`](../sdk/testkit/).
 
-**Skeleton at P0** (`go test ./conformance/...`):
+**Active suite** (`go test ./conformance/...`):
 
-- `harness_test.go` — wires the suite to the `testkit` harness; the one non-stub test
-  asserts the scaffolding composes.
-- `contracts_test.go` — one **stub case per provider-interface method**, keyed to the
-  must-never SECURITY clause it will assert. Every case **skips** — no logic yet.
+- `harness_test.go` — wires the suite to the `testkit` harness; `TestHarnessWiring` is
+  the aggregate gate over every supplied provider.
+- `contracts_test.go` — one case per provider-interface method, keyed to the must-never
+  SECURITY clause it asserts. **Seven of nine seams are asserted for real** against the
+  dev/in-memory providers — Cloud, Secrets, Identity, SCM, Inference, PolicySoR, Evidence
+  (16 method-contracts); the remaining two (PolicyEngine, ObserveGateway) still **skip**
+  until their providers land in Phases 2–3.
 
 The full suite (and the control-objective mapping) is a **Phase-5** deliverable
 (`docs/ROADMAP.md`). An interface change, its reference implementation, and its

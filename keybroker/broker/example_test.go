@@ -46,13 +46,14 @@ func ExampleBroker_MintSessionIdentity() {
 		return
 	}
 
-	// The NHI signs a commit; the lineage verifies back to the human subject.
+	// The NHI signs a commit via the broker (its key never leaves it); the lineage verifies
+	// back to the human subject.
 	digest := []byte("sha256:commit")
-	sig := minted.Signer.Sign(digest)
+	sig, _ := b.SignSession(context.Background(), "s1", digest)
 	verified := signing.Verify(ca.Root(), digest, sig) == nil
 
 	fmt.Println("subject:", minted.Identity.Subject)
-	fmt.Println("nhi:", minted.Signer.NHI)
+	fmt.Println("nhi:", minted.NHI)
 	fmt.Println("lineage verified:", verified)
 	// Output:
 	// subject: alice

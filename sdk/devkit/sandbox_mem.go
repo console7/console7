@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
+	"time"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
@@ -33,6 +34,15 @@ type SandboxRegistry struct {
 type binding struct {
 	subject interfaces.Subject
 	session interfaces.SessionID
+	// expiry bounds the binding's life. A zero value never expires; otherwise ownership
+	// (and thus injection) fails closed once the wall clock passes it, so a token cannot be
+	// injected into a sandbox the CloudProvider considers gone past its MaxTTL.
+	expiry time.Time
+}
+
+// live reports whether the binding is still within its (optional) expiry.
+func (b binding) live() bool {
+	return b.expiry.IsZero() || time.Now().Before(b.expiry)
 }
 
 // NewSandboxRegistry returns an empty registry.
@@ -43,45 +53,82 @@ func NewSandboxRegistry() *SandboxRegistry {
 	}
 }
 
-// Provision registers a fresh sandbox owned by (subject, session) and returns its
-// handle. It models the CloudProvider provisioning a per-session sandbox; here it only
+// Provision registers a fresh, non-expiring sandbox owned by (subject, session) and returns
+// its handle. It models the CloudProvider provisioning a per-session sandbox; here it only
 // records the ownership binding the SecretsProvider will later check.
 func (r *SandboxRegistry) Provision(subject interfaces.Subject, session interfaces.SessionID) interfaces.SandboxHandle {
+	return r.ProvisionWithExpiry(subject, session, time.Time{})
+}
+
+// ProvisionWithExpiry is Provision with a hard ownership expiry: past expiry the binding is
+// no longer owned, so injection into it fails closed (the lazy equivalent of the sandbox
+// being reaped at its MaxTTL). A zero expiry never expires.
+func (r *SandboxRegistry) ProvisionWithExpiry(subject interfaces.Subject, session interfaces.SessionID, expiry time.Time) interfaces.SandboxHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	id := "sbx-" + randHex(8)
-	r.bound[id] = binding{subject: subject, session: session}
+	r.bound[id] = binding{subject: subject, session: session, expiry: expiry}
 	return interfaces.SandboxHandle{ID: id}
 }
 
-// Owns reports whether h is a known sandbox owned by exactly this subject and session.
-// An unknown handle is not owned (fail closed).
+// Owns reports whether h is a known, unexpired sandbox owned by exactly this subject and
+// session. An unknown, mismatched, or expired handle is not owned (fail closed).
 func (r *SandboxRegistry) Owns(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	b, ok := r.bound[h.ID]
-	return ok && b.subject == subject && b.session == session
+	return ok && b.subject == subject && b.session == session && b.live()
 }
 
-// deliver places material into the sandbox's injected slot. Unexported: only a
-// SecretsProvider in this package may deliver, and only after its own ownership +
-// attended checks pass. A copy is stored so the caller's transient plaintext can be
-// zeroed independently.
-func (r *SandboxRegistry) deliver(h interfaces.SandboxHandle, material []byte) {
+// Destroy removes a sandbox's ownership binding and wipes any material injected into it.
+// It models the CloudProvider tearing the sandbox down: afterwards the handle is unknown,
+// so Owns fails closed and Injected reports nothing — there is no path back. Destroying an
+// unknown handle is a no-op (idempotent at the registry; MemCloud is the one that fails
+// closed on a double destroy).
+func (r *SandboxRegistry) Destroy(h interfaces.SandboxHandle) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	delete(r.bound, h.ID)
+	delete(r.injected, h.ID)
+}
+
+// DeliverIfOwned atomically re-checks ownership and, only if it still holds, places a copy
+// of material into the sandbox's injected slot — returning whether it delivered. Doing the
+// ownership check and the delivery under a SINGLE lock closes the race where a Destroy
+// between a separate Owns and deliver would let material land in a just-destroyed sandbox.
+// Only a SecretsProvider in this package calls it, and only after its own attended /
+// single-beneficiary checks pass. A copy is stored so the caller's transient plaintext can
+// be zeroed independently.
+func (r *SandboxRegistry) DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.bound[h.ID]
+	if !ok || b.subject != subject || b.session != session || !b.live() {
+		return false
+	}
 	cp := make([]byte, len(material))
 	copy(cp, material)
 	r.injected[h.ID] = cp
+	return true
 }
 
 // Injected returns the material delivered to a sandbox, if any. It is a test-only
 // inspection hook — it lets a bench assert a token landed in the OWNER's sandbox (and,
 // by checking every other handle, nowhere else). It is deliberately the ONLY read path
 // for injected material; there is no read path on the SecretsProvider itself.
+//
+// It enforces expiry on this READ path: an expired sandbox's material is unreachable
+// (and lazily wiped) here regardless of whether any CloudProvider method has run, so a
+// token cannot be read past the sandbox's MaxTTL even without an explicit teardown — the
+// registry's Owns / DeliverIfOwned / Injected paths are all fail-closed past expiry.
 func (r *SandboxRegistry) Injected(h interfaces.SandboxHandle) ([]byte, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if b, bound := r.bound[h.ID]; !bound || !b.live() {
+		// Unknown or expired binding: wipe any lingering material and report nothing.
+		delete(r.injected, h.ID)
+		return nil, false
+	}
 	m, ok := r.injected[h.ID]
 	if !ok {
 		return nil, false
