@@ -20,7 +20,9 @@ export const meta = {
   ],
 }
 
-const base = (args && args.base) || 'main'
+// `args` is injected by the Workflow runtime; `typeof` keeps this safe even if a
+// runtime ever omits the binding.
+const base = (typeof args !== 'undefined' && args && args.base) || 'main'
 const diffCmd = `git --no-pager diff ${base}...HEAD`
 
 const FINDINGS = {

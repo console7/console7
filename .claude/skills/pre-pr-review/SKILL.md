@@ -1,6 +1,6 @@
 ---
 name: pre-pr-review
-description: Run a local adversarial review fan-out (correctness + security + spec-alignment) on a substantive change BEFORE pushing/opening a PR in the console7 repo. Use after staging/committing code or security-relevant contracts and before `git push`. Defence-in-depth that front-runs the authoritative Codex/CI/human gates; skip for pure docs/typos.
+description: For a substantive (non-doc) change to the console7 repo — provider interfaces, Go/shell logic, CI workflows, .claude/ hooks/skills, deploy config — run a local adversarial review (correctness + security + spec-alignment) and reconcile findings before `git push`. Defence-in-depth that front-runs the authoritative Codex/CI/human gates; skip for pure docs, comments, or typos.
 ---
 
 # Pre-PR adversarial review (Console7)
@@ -28,43 +28,42 @@ catch — locally, in one pass — the issues that would otherwise cost a push +
 - **Skip** (proportionality, `GOAL.md` tenet 8) for pure docs, comments, typos,
   formatting, or trivial renames. State that you skipped and why.
 
-## How to run it — an adversarial fan-out
+## How to run it — three independent adversarial lenses
 
-In **one message**, spawn three review sub-agents (the `Agent` tool) so they run
-concurrently. Give each the **diff** (`git diff main...HEAD` or the staged diff) and
-the **normative docs it needs**, and prompt each to **find deviations — not to bless
-the change**. Independence is the point: a fresh reader catches what the author
-rationalized.
+The method is fixed; the *mechanism* depends on what your harness exposes. Run all
+three lenses over the **diff** (`git diff main...HEAD` or the staged diff), each
+prompted to **find deviations — not to bless the change**. Independence is the point:
+a fresh reader catches what the author rationalized, and one lens catches what another
+misses (on the PR that motivated this skill, the correctness lens caught a DCO-bypass
+the security lens had test-passed over).
 
-1. **Correctness reviewer** — logic bugs, fail-open defaults, zero-value traps,
-   boundary/ordering errors, error handling. Prompt: *"Find correctness bugs in this
-   diff. Assume it is wrong; prove where. Check zero values, empty inputs, and
-   off-by-one/ordering."*
-2. **Security / threat reviewer** — give it `docs/DESIGN.md` §10 + `GOAL.md` tenets.
-   Prompt: *"Which abuse class (control-plane-as-target, lethal trifecta, cross-tier
-   escalation, subscription misuse, sub-agent lineage, supply chain) could this
-   weaken? Does anything return/persist long-lived credentials, widen scope, or fail
-   open?"*
-3. **Spec-alignment reviewer** — give it `GOAL.md`, `docs/DESIGN.md`,
-   `docs/ARCHITECTURE.md`, and the SDLC standard. Prompt: *"Does this deviate from a
-   tenet or doc section? In particular: does any SECURITY docstring claim a guarantee
-   the signature/type cannot actually enforce?"* — this last is the exact class Codex
-   kept finding (a contract promising what its inputs can't support).
+1. **Correctness** — logic bugs, fail-open defaults, zero-value traps, empty-input /
+   boundary / ordering errors, error handling. *"Assume it is wrong; prove where."*
+2. **Security / threat** — given `docs/DESIGN.md` §10 + `GOAL.md` tenets: *"Which
+   abuse class (control-plane-as-target, lethal trifecta, cross-tier escalation,
+   subscription misuse, sub-agent lineage, supply chain) could this weaken? Does
+   anything return/persist long-lived credentials, widen scope, or fail open?"*
+3. **Spec-alignment** — given `GOAL.md`, `docs/DESIGN.md`, `docs/ARCHITECTURE.md`,
+   and the SDLC standard: *"Does this deviate from a tenet or doc section? In
+   particular, does any SECURITY docstring claim a guarantee the signature/type
+   cannot actually enforce?"* — the exact class Codex kept finding (a contract
+   promising what its inputs can't support).
+
+Pick the mechanism your harness offers, in order of preference:
+
+- **Sub-agent fan-out (richest).** If your harness can spawn sub-agents (e.g. an
+  `Agent` / `Task` tool), launch the three lenses concurrently in **one message**,
+  giving each the diff and the docs it needs. Tool names vary by harness — use
+  whatever yours exposes.
+- **One-command Workflow (opt-in).** `.claude/workflows/pre-pr-review.mjs` runs the
+  same three lenses and synthesizes them; it requires opting into the Workflow tool.
+- **Built-in skills (always available, the guaranteed fallback).** Run `/code-review`
+  (correctness) and `/security-review` (security) — these ship with Claude Code — and
+  do the spec-alignment lens yourself against the doc section the change maps to.
 
 Then **reconcile every finding before pushing**: fix it, or record a reasoned
 dismissal (as you would for a Codex finding — see `console7-repo-workflow`). Only
 then `git push`.
-
-For a one-command version, an opt-in Workflow fan-out is provided at
-`.claude/workflows/pre-pr-review.mjs` (runs the same three lenses and synthesizes);
-it requires the user to opt into the Workflow tool. The `Agent`-tool fan-out above
-needs no opt-in and is the default.
-
-## Lightweight alternative
-
-For a smaller substantive change, the built-in `/code-review` and `/security-review`
-skills cover the correctness and security lenses; add a quick spec-alignment check
-against the doc section the change maps to. Reconcile, then push.
 
 ## Relationship to the other guards
 

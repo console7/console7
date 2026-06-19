@@ -96,20 +96,6 @@ if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]])git[[:space:]]+push\b'; then
   if printf '%s' "$cmd" | grep -Eq '(--force\b|--force-with-lease\b|[[:space:]]-f\b)' && printf '%s' "$cmd" | grep -Eq '(refs/heads/)?main\b'; then
     block "CO-4.1" "force-push to main is prohibited (protected, linear history)."
   fi
-
-  # Advisory (NON-BLOCKING): pushing a feature branch whose diff vs main touches
-  # non-doc files — nudge to run the local adversarial review first. This NEVER
-  # blocks: "not reviewed" is a judgement call, not a violation, and making
-  # self-review a hard gate would turn an in-band check into a false control of
-  # record (tenet 2). Emitted as PreToolUse additionalContext so the agent sees it.
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  if [ -n "$branch" ] && [ "$branch" != "main" ]; then
-    changed="$(git diff --name-only main...HEAD 2>/dev/null || true)"
-    if [ -n "$changed" ] && printf '%s' "$changed" | grep -qvE '(\.md$|^docs/)'; then
-      printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Console7 pre-push reminder: this feature branch changed non-doc files. For substantive changes, run the pre-pr-review skill (adversarial correctness + security + spec-alignment over the diff) and reconcile findings BEFORE pushing. Defence-in-depth, not a gate; skip for pure docs."}}'
-      exit 0
-    fi
-  fi
 fi
 
 # DCO sign-off on commits. Allow an amend that preserves the message/trailers
@@ -121,6 +107,25 @@ if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]])git[[:space:]]+commit\b'; then
     :
   else
     block "CO-4 (DCO)" "commits must carry a DCO sign-off: add -s (use 'git commit -S -s …'). Signing itself is enforced by branch protection."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Advisory (NON-BLOCKING) — pre-push review reminder. Runs LAST, after every
+# blocking check, so it can NEVER pre-empt one (notably the DCO check on a
+# combined `git commit … && git push`). It never blocks: "not reviewed" is a
+# judgement call, not a violation, and a hard self-review gate would turn an
+# in-band check into a false control of record (tenet 2). Emitted as PreToolUse
+# additionalContext (static string — no untrusted data interpolated) so the agent
+# sees the nudge; control then falls through to the final allow (exit 0).
+# ---------------------------------------------------------------------------
+if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]])git[[:space:]]+push\b'; then
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [ -n "$branch" ] && [ "$branch" != "main" ] && [ "$branch" != "HEAD" ]; then
+    changed="$(git diff --name-only main...HEAD 2>/dev/null || true)"
+    if [ -n "$changed" ] && printf '%s' "$changed" | grep -qvE '(\.md$|^docs/)'; then
+      printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Console7 pre-push reminder: this feature branch changed non-doc files. For substantive changes, run the pre-pr-review skill (adversarial correctness + security + spec-alignment over the diff) and reconcile findings BEFORE pushing. Defence-in-depth, not a gate; skip for pure docs."}}'
+    fi
   fi
 fi
 
