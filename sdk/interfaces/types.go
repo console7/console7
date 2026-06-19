@@ -41,6 +41,11 @@ const (
 // Tier is the target artefact's criticality tier (T1 highest consequence … T4
 // lowest). Rigour scales to tier; the objective is never waived, only its mechanism
 // (GOAL.md tenet 8).
+//
+// WARNING: the underlying int values do NOT encode restrictiveness — Tier1 (most
+// restrictive) is numerically less than Tier4 (least), and TierUnknown is zero.
+// Callers MUST NOT compare Tiers as ints for take-the-max (DESIGN.md §4.2); doing so
+// silently downgrades a mixed-tier session. Use MoreRestrictiveThan / MostRestrictive.
 type Tier int
 
 const (
@@ -50,6 +55,46 @@ const (
 	Tier3
 	Tier4 // lowest consequence — highest volume.
 )
+
+// restrictiveness ranks a Tier so that a larger rank is MORE restrictive. Any
+// unknown/unrecognised value ranks highest, so cross-tier resolution fails closed.
+func (t Tier) restrictiveness() int {
+	switch t {
+	case Tier1:
+		return 4
+	case Tier2:
+		return 3
+	case Tier3:
+		return 2
+	case Tier4:
+		return 1
+	default: // TierUnknown and any out-of-range value.
+		return 5
+	}
+}
+
+// MoreRestrictiveThan reports whether t is strictly more restrictive than o. This is
+// the only correct way to order Tiers; never compare the raw int values.
+func (t Tier) MoreRestrictiveThan(o Tier) bool {
+	return t.restrictiveness() > o.restrictiveness()
+}
+
+// MostRestrictive returns the most restrictive Tier among those given — the
+// "take-the-max" reduction a cross-resource session binds to (DESIGN.md §4.2). With
+// no arguments it returns TierUnknown, the fail-closed most-restrictive default; if
+// any input is TierUnknown (an unresolved target), the result is TierUnknown.
+func MostRestrictive(tiers ...Tier) Tier {
+	if len(tiers) == 0 {
+		return TierUnknown
+	}
+	winner := tiers[0]
+	for _, t := range tiers[1:] {
+		if t.MoreRestrictiveThan(winner) {
+			winner = t
+		}
+	}
+	return winner
+}
 
 // Stratum is the target artefact's authoring stratum (S1 Engineered … S5 Agentic).
 type Stratum int

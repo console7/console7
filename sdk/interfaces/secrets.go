@@ -30,6 +30,23 @@ type SealedToken struct {
 	KMSKeyRef string
 }
 
+// SubscriptionInjection identifies a per-user subscription-token injection into one
+// attended session's sandbox. It carries exactly the facts a provider needs to
+// uphold the injection invariant: the token's owner (the only permitted
+// beneficiary), the session and sandbox it is bound to, and that a human is present.
+type SubscriptionInjection struct {
+	// Subject is the token's owner — the ONLY permitted beneficiary (no pooling).
+	Subject Subject
+	// SessionID is the session the sandbox belongs to; lets the provider bind the
+	// injection to a single session and refuse a mismatched/stale handle.
+	SessionID SessionID
+	// Sandbox is the owning subject's sandbox to inject into.
+	Sandbox SandboxHandle
+	// Attended MUST be true: a subscription token backs only attended, single-user
+	// sessions. The provider MUST refuse injection when it is false (DESIGN.md §3).
+	Attended bool
+}
+
 // SecretsProvider abstracts secret storage, envelope encryption, and KMS
 // (ARCHITECTURE.md §5; default ref: GCP Secret Manager + Cloud KMS). It is a broker,
 // not a vault the control plane reads: it mints and injects, it does not hand keys
@@ -59,11 +76,13 @@ type SecretsProvider interface {
 	// InjectSubscriptionToken decrypts a user's subscription token and injects it
 	// directly into THAT user's sandbox at session start.
 	//
-	// SECURITY: the implementation MUST inject the token only into the owning
-	// Subject's sandbox, MUST NOT return the plaintext token to the caller (the
-	// control plane never sees it), and MUST NEVER use it for any beneficiary but its
-	// owner or for any unattended/orchestrated session (DESIGN.md §2.2, §3).
-	InjectSubscriptionToken(ctx context.Context, subject Subject, h SandboxHandle) error
+	// SECURITY: the implementation MUST verify in.Sandbox belongs to in.Subject's
+	// session and MUST refuse injection when in.Attended is false; it MUST inject the
+	// token only into that owning sandbox, MUST NOT return the plaintext token to the
+	// caller (the control plane never sees it), and MUST NEVER use it for any
+	// beneficiary but its owner or for any unattended/orchestrated session (DESIGN.md
+	// §2.2, §3).
+	InjectSubscriptionToken(ctx context.Context, in SubscriptionInjection) error
 
 	// RevokeSubject deletes a user's stored material on revocation/offboarding
 	// (e.g. SCIM deprovision).

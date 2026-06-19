@@ -18,6 +18,19 @@ type PRRef struct {
 	Number int
 }
 
+// WorkingCredentialRequest asks for a short-lived SCM credential bound to a session.
+// It carries the authenticated subject and the session so the issued credential
+// anchors the SSO -> per-session non-human-identity lineage (DESIGN.md §2.3) and can
+// be revoked when the session ends, rather than degrading into a bare repo/branch
+// token.
+type WorkingCredentialRequest struct {
+	Subject   Subject
+	SessionID SessionID
+	Repo      RepoRef
+	// Branch is the working branch; push MUST be restricted to it.
+	Branch string
+}
+
 // SCMProvider abstracts repository clone, branch, pull-request, and short-lived
 // token issuance (ARCHITECTURE.md §5; default ref: GitHub App). The SCM identity is
 // minted per session and scoped to the working branch (DESIGN.md §2.1).
@@ -25,12 +38,13 @@ type SCMProvider interface {
 	// MintWorkingCredential issues a short-lived, per-install, repo-scoped SCM
 	// credential for a session and returns only an opaque, expiring reference.
 	//
-	// SECURITY: the credential MUST be short-lived and scoped to the single repo,
-	// and push MUST be restricted to the session's working branch — it MUST NEVER be
-	// able to push to a protected/default branch (DESIGN.md §2.1). The implementation
-	// MUST return a CredentialRef, NEVER a durable token, and MUST ensure the sandbox
-	// git client never sees long-lived credential material.
-	MintWorkingCredential(ctx context.Context, repo RepoRef, branch string) (CredentialRef, error)
+	// SECURITY: the credential MUST be short-lived, scoped to req.Repo, and bound to
+	// req.Subject's per-session identity (req.SessionID) so lineage is preserved and
+	// it dies with the session; push MUST be restricted to req.Branch — it MUST NEVER
+	// be able to push to a protected/default branch (DESIGN.md §2.1, §2.3). The
+	// implementation MUST return a CredentialRef, NEVER a durable token, and MUST
+	// ensure the sandbox git client never sees long-lived credential material.
+	MintWorkingCredential(ctx context.Context, req WorkingCredentialRequest) (CredentialRef, error)
 
 	// OpenPullRequest opens a pull request proposing the session's change.
 	//

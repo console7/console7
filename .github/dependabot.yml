@@ -2,9 +2,9 @@ version: 2
 
 # CO-5.5 — automated, tested dependency-update flow keeps pins current. Actions
 # are pinned to commit SHAs; Dependabot bumps the SHA and updates the trailing
-# version comment. The Go-modules stanza is ready to enable the moment go.mod
-# lands (uncomment it then — keeping it commented avoids a "manifest not found"
-# error until the module exists).
+# version comment. The Go-modules stanza is enabled now that go.mod exists
+# (scaffold/p0): the module is dependency-free today, so Dependabot simply has
+# nothing to bump until the first require lands.
 
 updates:
   - package-ecosystem: github-actions
@@ -15,10 +15,10 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # - package-ecosystem: gomod
-  #   directory: /
-  #   schedule:
-  #     interval: weekly
-  #   open-pull-requests-limit: 5
-  #   commit-message:
-  #     prefix: "chore(deps)"
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"

@@ -11,8 +11,11 @@ const (
 	// ModeSubscription backs ONLY attended, single-user, first-party interactive
 	// sessions (one human, one credential, one beneficiary).
 	ModeSubscription InferenceMode = iota
-	// ModeOrgAPI backs anything orchestrated, scheduled, triggered, headless, or
-	// multi-beneficiary, via an org API key (Vertex / Bedrock / direct Anthropic).
+	// ModeOrgAPI backs any session without a present human or with more than one
+	// beneficiary — orchestrated, scheduled, webhook-triggered, headless/unattended,
+	// or cross-repo fan-out — via an org API key (Vertex / Bedrock / direct
+	// Anthropic). The discriminator is human presence and single beneficiary, NOT
+	// invocation mode (DESIGN.md §3).
 	ModeOrgAPI
 )
 
@@ -45,11 +48,14 @@ type InferenceBackend interface {
 	// attended/unattended seam in policy.
 	//
 	// SECURITY: the implementation MUST refuse a ModeSubscription selection that is
-	// not Attended, and MUST route anything orchestrated/scheduled/triggered/headless
-	// or multi-beneficiary to ModeOrgAPI — a subscription credential MUST NEVER back
-	// an unattended or multi-beneficiary session (DESIGN.md §3; GOAL.md tenet 7). The
-	// seam trigger MUST be a configurable enterprise policy (flip policy, not
-	// architecture). The implementation MUST NOT pool one user's subscription across
-	// beneficiaries.
+	// not Attended, and MUST route to ModeOrgAPI any session without a present human
+	// or with more than one beneficiary (orchestrated, scheduled, triggered,
+	// headless/unattended, or cross-repo fan-out) — a subscription credential MUST
+	// NEVER back an unattended or multi-beneficiary session (DESIGN.md §3; GOAL.md
+	// tenet 7). The discriminator is human presence and single beneficiary, NOT
+	// invocation mode: a forked/headless `claude -p` INSIDE an attended single-user
+	// session stays on ModeSubscription and MUST NOT be rerouted. The seam trigger
+	// MUST be a configurable enterprise policy (flip policy, not architecture), and
+	// the implementation MUST NOT pool one user's subscription across beneficiaries.
 	Resolve(ctx context.Context, sel InferenceSelection) (BackendEndpoint, error)
 }
