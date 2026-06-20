@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Never commit the real file —
+# project identifiers stay out of git (ADR-0002; repo hygiene).
+project_id = "console7-example"
+region     = "us-east4"

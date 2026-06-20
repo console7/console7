@@ -1,0 +1,68 @@
+name: terraform (fmt · validate · tfsec)
+
+# CO-05 / CO-12.7 — IaC quality + security gate for deploy/ Terraform. Per CLAUDE.md
+# and the SDLC standard: SHA-pinned actions, least privilege, pinned tool versions.
+# Guarded on the presence of deploy/gcp/*.tf so it activates when the module lands and
+# skips cleanly otherwise. Note: standalone tfsec is being folded into Trivy upstream;
+# swap the tfsec step to `trivy config` for a maintained engine (same rule set) — see
+# deploy/gcp/README.md.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: detect terraform
+    runs-on: ubuntu-latest
+    outputs:
+      has_tf: ${{ steps.detect.outputs.has_tf }}
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: detect
+        run: |
+          if ls deploy/gcp/*.tf >/dev/null 2>&1; then
+            echo "has_tf=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tf=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  terraform:
+    name: fmt · validate · tfsec
+    needs: detect
+    if: needs.detect.outputs.has_tf == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.12.2
+          terraform_wrapper: false
+
+      - name: fmt
+        run: terraform fmt -check -recursive deploy/gcp
+
+      - name: init (no backend)
+        run: terraform -chdir=deploy/gcp init -backend=false
+
+      - name: validate
+        run: terraform -chdir=deploy/gcp validate
+
+      - name: tfsec
+        uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6 # v1.0.3
+        with:
+          working_directory: deploy/gcp
+          soft_fail: false

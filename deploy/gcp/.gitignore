@@ -1,0 +1,12 @@
+# Terraform working dirs and state — never commit (ADR-0002; repo hygiene).
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Adopter inputs may carry project identifiers — commit only the example.
+*.tfvars
+!*.tfvars.example
+
+# The dependency lock is the supply-chain pin — keep it committed.
+!.terraform.lock.hcl

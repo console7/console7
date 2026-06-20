@@ -15,6 +15,11 @@ gcloud-key*.json
 .azure/
 .kube/config
 secrets/
+# Exception: deploy/gcp/modules/secrets/ is the SecretsProvider *infrastructure*
+# module (Terraform — KMS / service account / IAM only; no secret material). The broad
+# secrets/ guard above still applies everywhere else, and gitleaks + secret-scan CI
+# scan this path's contents regardless.
+!deploy/gcp/modules/secrets/
 *.tfstate
 *.tfstate.*
 .terraform/
