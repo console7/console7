@@ -1,11 +1,19 @@
-# Console7 secrets infrastructure: a KMS key ring + CMEK for Secret Manager envelope
-# encryption, and the least-privilege workload identity the control plane impersonates
-# to reach secrets. Upholds the SecretsProvider SECURITY contract
-# (providers/secrets-gcp): no operator read path, scoped access; per-user keys/secrets
-# are minted at RUNTIME by the provider, never declared here.
+# Console7 secrets substrate: a KMS key ring + a key-encryption key (KEK), and the
+# least-privilege workload identity the control plane impersonates.
 #
-# Prerequisite (bootstrap, not this module): cloudkms.googleapis.com and
-# secretmanager.googleapis.com are already enabled on the project.
+# The KEK is used by the SecretsProvider (providers/secrets-gcp) for PROVIDER-SIDE
+# envelope encryption — wrapping per-user data-encryption keys at runtime (the GCP
+# analogue of sdk/devkit MemSecrets' KEK-wrapped-per-user-DEK model, upholding the
+# "per-user key, never pool" contract). It is NOT a Secret-Manager-configured CMEK, so
+# the WORKLOAD SA (not the Secret Manager service agent) holds encrypt/decrypt on it.
+#
+# Scope: this module provisions the KMS substrate + the workload identity only. The
+# provider's own least-privilege Secret Manager role bindings (create / add-version /
+# access / destroy, name-prefix scoped) land atomically with providers/secrets-gcp,
+# where the exact needs are known — not guessed here ahead of the provider.
+#
+# Prerequisite (bootstrap, not this module): cloudkms.googleapis.com enabled on the
+# project (secretmanager.googleapis.com is enabled with the provider PR).
 
 resource "google_kms_key_ring" "this" {
   project  = var.project_id
@@ -13,11 +21,11 @@ resource "google_kms_key_ring" "this" {
   location = var.region
 }
 
-# CMEK protecting Console7-managed Secret Manager material. Auto-rotated; guarded
-# against accidental destroy — losing this key cryptographically shreds every secret
-# it wraps.
+# The key-encryption key (KEK) the provider uses for per-user-DEK envelope encryption.
+# Auto-rotated; guarded against accidental destroy — losing it cryptographically shreds
+# every per-user DEK (and thus every secret) it wraps.
 resource "google_kms_crypto_key" "secrets" {
-  name            = "${var.name_prefix}-secret-manager-cmek"
+  name            = "${var.name_prefix}-secrets-kek"
   key_ring        = google_kms_key_ring.this.id
   purpose         = "ENCRYPT_DECRYPT"
   rotation_period = var.kms_rotation_period
@@ -28,41 +36,19 @@ resource "google_kms_crypto_key" "secrets" {
 }
 
 # The identity the control plane assumes (via GKE Workload Identity, bound in the gke
-# module — deferred, as it needs the cluster KSA) to reach secrets. Created with NO
-# human impersonation binding, so there is no operator read path by construction.
+# module — deferred, as it needs the cluster KSA). Created with NO human impersonation
+# binding, so there is no operator read path by construction. Its Secret Manager role
+# bindings land with providers/secrets-gcp.
 resource "google_service_account" "workload" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-cp-secrets"
   display_name = "Console7 control-plane secrets workload identity (least-privilege; no operator read path)"
 }
 
-# Encrypt/decrypt on ONLY this CMEK — not project-wide KMS access.
+# Encrypt/decrypt on ONLY this KEK — the workload SA wraps/unwraps per-user DEKs with it
+# (provider-side envelope encryption); not project-wide KMS access.
 resource "google_kms_crypto_key_iam_member" "workload_encrypt_decrypt" {
   crypto_key_id = google_kms_crypto_key.secrets.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:${google_service_account.workload.email}"
-}
-
-# The project number is required for the Secret Manager IAM condition below — its
-# resource.name uses the project NUMBER, not the ID.
-data "google_project" "this" {
-  project_id = var.project_id
-}
-
-# Secret access granted to the workload SA alone — never to a human or group, so the
-# operator read path is closed for humans/groups by construction — and further scoped
-# by IAM condition to Console7-managed secrets only (name prefix), upholding least
-# privilege (tenet 5) and the "never pool" contract at the infra floor. The condition
-# only narrows access, so a mis-specified expression fails closed (denies, never
-# over-grants); verify against the live project at first apply.
-resource "google_project_iam_member" "workload_secret_accessor" {
-  project = var.project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.workload.email}"
-
-  condition {
-    title       = "console7-managed-secrets-only"
-    description = "Restrict the workload SA to Console7-managed secrets by name prefix."
-    expression  = "resource.name.startsWith(\"projects/${data.google_project.this.number}/secrets/${var.name_prefix}-\")"
-  }
 }

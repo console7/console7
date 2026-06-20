@@ -1,22 +1,26 @@
-# `modules/secrets` — `SecretsProvider` infrastructure (GCP Secret Manager + Cloud KMS)
+# `modules/secrets` — `SecretsProvider` substrate (GCP Cloud KMS + workload identity)
 
-The static GCP infrastructure the [`secrets-gcp`](../../../../providers/secrets-gcp)
+The KMS substrate and workload identity the [`secrets-gcp`](../../../../providers/secrets-gcp)
 reference `SecretsProvider` runs against. Upholds the SECURITY contract: **no operator
-read path**, scoped credentials, per-user keys minted **at runtime** (not here).
+read path**, per-user keys minted **at runtime** (not here), never pooled.
 
 Provisions:
 
-- a **KMS key ring** and an auto-rotated **CMEK** (`ENCRYPT_DECRYPT`) for Secret
-  Manager envelope encryption (`prevent_destroy` — losing the key shreds every secret
-  it wraps);
+- a **KMS key ring** and an auto-rotated **key-encryption key (KEK)** (`ENCRYPT_DECRYPT`,
+  `prevent_destroy`) the provider uses for **provider-side envelope encryption** —
+  wrapping per-user DEKs at runtime (the GCP analogue of `MemSecrets`' KEK/DEK model).
+  It is **not** a Secret-Manager-configured CMEK, so the **workload SA** (not the Secret
+  Manager service agent) holds encrypt/decrypt on it;
 - a **least-privilege workload service account** the control plane impersonates, with
-  encrypt/decrypt on **only** that CMEK and `secretmanager.secretAccessor` **scoped by
-  IAM condition to Console7-managed secrets** (name prefix), and **no human/group
-  binding** — so the operator read path is closed for humans/groups by construction.
+  encrypt/decrypt on **only** that KEK and **no human/group binding** — so the operator
+  read path is closed for humans/groups by construction.
 
-Deliberately **not** here: project/billing creation (human bootstrap), API enablement
-(bootstrap), per-user secrets/keys (runtime provider code), and the GKE Workload
-Identity binding (the `gke` module — it needs the cluster's KSA).
+Deliberately **not** here: project/billing (human bootstrap), API enablement
+(bootstrap), per-user secrets/keys (runtime provider code), the GKE Workload Identity
+binding (the `gke` module — needs the cluster's KSA), and **the provider's Secret
+Manager role bindings** (read + create/add-version/destroy) — those land **atomically
+with `providers/secrets-gcp`**, where the exact least-privilege needs are known, rather
+than guessed here ahead of the provider.
 
 ## Inputs
 
@@ -31,6 +35,6 @@ Identity binding (the `gke` module — it needs the cluster's KSA).
 
 | Output | Description |
 |---|---|
-| `workload_service_account_email` | The least-privilege secrets SA (GKE WI binding deferred) |
-| `kms_crypto_key_id` | The Secret Manager CMEK |
+| `workload_service_account_email` | The least-privilege secrets SA (GKE WI + Secret Manager bindings deferred) |
+| `kms_crypto_key_id` | The secrets KEK (per-user-DEK envelope encryption) |
 | `kms_key_ring_id` | The KMS key ring |
