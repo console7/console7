@@ -3,10 +3,11 @@
 // drives the harness in sdk/testkit.
 //
 // Seven of the nine seams are asserted for real: CloudProvider, SecretsProvider,
-// IdentityProvider, SCMProvider, InferenceBackend, and PolicySoR against their devkit
-// in-memory providers, and EvidenceSink against the REAL control-plane/evidence sink (the
-// production type, signing checkpoints through a keybroker-minted sink signer). The remaining
-// two seams
+// IdentityProvider, SCMProvider, and PolicySoR against their devkit in-memory providers;
+// InferenceBackend against the REAL providers/inference-anthropic reference (a pure routing
+// decision, so there is no in-memory double to swap for); and EvidenceSink against the REAL
+// control-plane/evidence sink (the production type, signing checkpoints through a
+// keybroker-minted sink signer). The remaining two seams
 // (PolicyEngine, ObserveGateway) have no implementation yet, so their cases skip until
 // their providers land in Phases 2–3 (docs/ROADMAP.md; the full nine-seam suite is the
 // Phase-5 deliverable). See conformance/README.md.
@@ -28,6 +29,7 @@ import (
 
 	"github.com/console7/console7/control-plane/evidence"
 	"github.com/console7/console7/keybroker/signing"
+	inferenceanthropic "github.com/console7/console7/providers/inference-anthropic"
 	"github.com/console7/console7/sdk/devkit"
 	"github.com/console7/console7/sdk/interfaces"
 	"github.com/console7/console7/sdk/testkit"
@@ -51,16 +53,19 @@ func providersUnderTest() testkit.ProviderUnderTest {
 	if err != nil {
 		panic("conformance: sink signer mint failed: " + err.Error())
 	}
+	// The InferenceBackend contract runs against the REAL Anthropic reference provider.
+	// Subscription routing is enabled so the attended/single-beneficiary happy path is
+	// exercised alongside the contract's unattended/fan-out refusals.
+	inference, err := inferenceanthropic.New(inferenceanthropic.Config{SubscriptionEnabled: true})
+	if err != nil {
+		panic("conformance: anthropic inference backend: " + err.Error())
+	}
 	return testkit.ProviderUnderTest{
-		Cloud:    devkit.NewMemCloud(reg),
-		Secrets:  devkit.NewMemSecrets(reg),
-		Identity: devkit.NewDevIdentity(idpPub, nil),
-		SCM:      devkit.NewMemSCM(15 * time.Minute),
-		Inference: devkit.NewPolicyInference(devkit.SeamPolicy{
-			SubscriptionEndpoint: "https://subscription.internal/inference",
-			OrgAPIEndpoint:       "https://vertex.internal/inference",
-			SubscriptionEnabled:  true,
-		}),
+		Cloud:     devkit.NewMemCloud(reg),
+		Secrets:   devkit.NewMemSecrets(reg),
+		Identity:  devkit.NewDevIdentity(idpPub, nil),
+		SCM:       devkit.NewMemSCM(15 * time.Minute),
+		Inference: inference,
 		PolicySoR: devkit.NewFixedPolicySoR(interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}),
 		Evidence:  evidence.NewInMemory(sinkSigner, evCA.Root(), 0),
 		// The registry MemSecrets checks ownership against is also the rig the injection
