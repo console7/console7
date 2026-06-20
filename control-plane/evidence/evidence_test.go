@@ -387,6 +387,57 @@ func TestVerify_RejectsUnsealedTail(t *testing.T) {
 	}
 }
 
+func TestSeal_RejectsUnverifiableSignature(t *testing.T) {
+	// The sink trusts ca1's root, but the injected signer is certified by a DIFFERENT CA, so its
+	// checkpoint signature will not verify under the sink's root. Seal must fail closed and
+	// commit NO checkpoint, rather than store one VerifyCheckpoints would later reject (so the
+	// orchestrator cannot report a "successful" terminal seal from a miswired signer).
+	ca1 := signing.NewDevCA()
+	ca2 := signing.NewDevCA()
+	signer, _ := signing.NewSinkSigner(ca2, "x")
+	s := New(newMemStore(), signer, ca1.Root(), 0)
+	ctx := context.Background()
+	if _, err := s.Append(ctx, rec("e", time.Unix(0, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Seal(ctx); err == nil {
+		t.Error("Seal committed a checkpoint whose signature does not verify under the sink's CA root")
+	}
+	if len(s.Checkpoints()) != 0 {
+		t.Errorf("a non-verifying seal must not be committed, got %d checkpoints", len(s.Checkpoints()))
+	}
+}
+
+func TestVerify_RejectsTailAppendedByAnotherSink(t *testing.T) {
+	// A shared/durable Store can grow via another Sink instance. Verify must read the store's
+	// length, not this sink's cached counter, or it would accept a longer unsealed tail.
+	ca := signing.NewDevCA()
+	signer, _ := signing.NewSinkSigner(ca, "shared")
+	store := newMemStore()
+	ctx := context.Background()
+
+	s1 := New(store, signer, ca.Root(), 0)
+	if _, err := s1.Append(ctx, rec("a", time.Unix(0, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Seal(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Verify(); err != nil {
+		t.Fatalf("s1 is fully sealed and should verify: %v", err)
+	}
+
+	// A second sink over the SAME store appends a record but does not seal it.
+	s2 := New(store, signer, ca.Root(), 0)
+	if _, err := s2.Append(ctx, rec("b", time.Unix(1, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	// s1's cached count is stale (1) but the store now holds 2 records with an unsealed tail.
+	if err := s1.Verify(); err == nil {
+		t.Error("Verify accepted a store tail appended by another sink without sealing (trusted the cached counter)")
+	}
+}
+
 func TestNew_HydratesFromNonEmptyStore(t *testing.T) {
 	ca := signing.NewDevCA()
 	signer, _ := signing.NewSinkSigner(ca, "resume-sink")

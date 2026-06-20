@@ -24,8 +24,14 @@ func (s *Sink) Verify() error {
 	if err := s.VerifyCheckpoints(s.caRoot, s.sinkID); err != nil {
 		return err
 	}
+	// Read the STORE's actual length, not this sink's cached counter: a shared/durable Store can
+	// be appended through another Sink instance or process, leaving a longer unsealed tail this
+	// sink never sealed. Trusting s.count would accept that tail as fully sealed.
+	n, err := s.store.Len(context.Background())
+	if err != nil {
+		return fmt.Errorf("evidence: head-seal length read failed: %w", err)
+	}
 	s.mu.Lock()
-	count := s.count
 	var head Checkpoint
 	sealed := len(s.checkpoints) > 0
 	if sealed {
@@ -33,15 +39,15 @@ func (s *Sink) Verify() error {
 	}
 	s.mu.Unlock()
 
-	if count == 0 {
+	if n == 0 {
 		return nil
 	}
 	if !sealed {
 		return errors.New("evidence: log has records but no checkpoint seals the head")
 	}
-	// The latest checkpoint must cover the current head: every committed record is sealed.
-	if head.Count != count || head.HeadSequence != count-1 {
-		return fmt.Errorf("evidence: head not sealed — latest checkpoint covers %d of %d records", head.Count, count)
+	// The latest checkpoint must cover the store's current head: every committed record is sealed.
+	if head.Count != n || head.HeadSequence != n-1 {
+		return fmt.Errorf("evidence: head not sealed — latest checkpoint covers %d of %d records", head.Count, n)
 	}
 	return nil
 }

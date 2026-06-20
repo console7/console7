@@ -166,7 +166,10 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return nil
 	}
 	if err := stamp("session-start", string(subject)+" -> "+nhi); err != nil {
-		return Summary{}, err
+		// stamp may have committed the record but failed on Stream; route through sealOrJoin so
+		// even this pre-provision terminal path anchors any committed head (a no-op if nothing was
+		// committed, since the sink cannot seal an empty chain).
+		return Summary{}, o.sealOrJoin(cleanupCtx, err, "at session-start")
 	}
 
 	// 4. Provision the sandbox with the profile's default-deny egress.
@@ -184,14 +187,9 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	if err != nil {
 		// No sandbox to tear down; record the failure against the chain and surface it. The
 		// session-start record is already committed, so seal a checkpoint here too (joined into
-		// the error) — this is a terminal path with committed evidence, so it must get a
-		// sink-signed head and surface any signer failure, like every other terminal path.
-		outErr := fmt.Errorf("orchestrator: provision-sandbox: %w", err)
+		// the error) — this is a terminal path with committed evidence.
 		_ = emit(cleanupCtx, "session-aborted", "provision-sandbox: "+err.Error())
-		if serr := o.sealCheckpoint(cleanupCtx); serr != nil {
-			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to seal evidence checkpoint on provision failure: %w", serr))
-		}
-		return Summary{}, outErr
+		return Summary{}, o.sealOrJoin(cleanupCtx, fmt.Errorf("orchestrator: provision-sandbox: %w", err), "on provision failure")
 	}
 
 	// From here on, any failure must tear the sandbox down — never leave it live. Teardown
@@ -215,10 +213,7 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		}
 		// Seal a sink-signed checkpoint over the chain head at teardown (no-op if the sink does
 		// not support it). This anchors the close-out even if the per-record stamp above failed.
-		if serr := o.sealCheckpoint(cleanupCtx); serr != nil {
-			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to seal evidence checkpoint on abort: %w", serr))
-		}
-		return Summary{}, outErr
+		return Summary{}, o.sealOrJoin(cleanupCtx, outErr, "on abort")
 	}
 	if err := stamp("sandbox-provisioned", sandbox.ID); err != nil {
 		return abort(err, "sandbox-provisioned-evidence")
@@ -326,27 +321,23 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	if err := o.Cloud.DestroySandbox(cleanupCtx, sandbox); err != nil {
 		// Use the cleanup context (not the possibly-cancelled request ctx) so a sink that
 		// honours cancellation still records this teardown failure — the sandbox may be live.
-		outErr := fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
 		_ = emit(cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
-		// Surface (don't swallow) a failed close-out seal here too, mirroring the abort path: an
-		// operator must be able to tell the chain has no sink-signed head at teardown.
-		if serr := o.sealCheckpoint(cleanupCtx); serr != nil {
-			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to seal evidence checkpoint on destroy failure: %w", serr))
-		}
-		return Summary{}, outErr
+		return Summary{}, o.sealOrJoin(cleanupCtx, fmt.Errorf("orchestrator: destroy-sandbox: %w", err), "on destroy failure")
 	}
 	// The terminal session-end record has the same cancellation-resilience requirement as the
 	// abort record: teardown already succeeded on cleanupCtx, so a cancelled request must not
-	// drop the close-out evidence. Emit it on cleanupCtx (and count it).
+	// drop the close-out evidence. Emit it on cleanupCtx (and count it). Even if this per-record
+	// close-out fails (e.g. the session signer passed its deadline), seal the chain anyway — the
+	// long-lived sink signer can still anchor the head — and surface both errors.
 	if err := emit(cleanupCtx, "session-end", string(req.SessionID)); err != nil {
-		return Summary{}, err
+		return Summary{}, o.sealOrJoin(cleanupCtx, err, "at session-end")
 	}
 	records++
 
 	// Seal a sink-signed checkpoint over the final chain head so every completed session ends
 	// with a fresh, sink-attested close-out (no-op if the sink does not support sealing).
-	if err := o.sealCheckpoint(cleanupCtx); err != nil {
-		return Summary{}, fmt.Errorf("orchestrator: seal evidence checkpoint at session-end: %w", err)
+	if err := o.sealOrJoin(cleanupCtx, nil, "at session-end"); err != nil {
+		return Summary{}, err
 	}
 
 	return Summary{
@@ -410,6 +401,18 @@ func (o *Orchestrator) sealCheckpoint(ctx context.Context) error {
 		return sealer.Seal(ctx)
 	}
 	return nil
+}
+
+// sealOrJoin seals a terminal checkpoint and folds any seal failure into cause (which may be
+// nil on the success path). EVERY terminal return that may have committed evidence routes
+// through this, so a teardown always anchors the chain with a sink-signed head and a seal
+// failure is always surfaced — no terminal path can silently skip the seal. `where` names the
+// path for the joined error.
+func (o *Orchestrator) sealOrJoin(ctx context.Context, cause error, where string) error {
+	if serr := o.sealCheckpoint(ctx); serr != nil {
+		return errors.Join(cause, fmt.Errorf("orchestrator: failed to seal evidence checkpoint %s: %w", where, serr))
+	}
+	return cause
 }
 
 // evidenceDomain separates the bytes signed for an evidence record from every other use of
