@@ -387,6 +387,54 @@ func TestVerify_RejectsUnsealedTail(t *testing.T) {
 	}
 }
 
+func TestAppend_AppendedAtMonotonicAcrossClockRollback(t *testing.T) {
+	s, _ := newTestSink(t, 0)
+	ctx := context.Background()
+	// Simulate the previous append carrying a FUTURE timestamp (as if the wall clock has since
+	// stepped backward): the next append must clamp to >= it, never regress the authoritative
+	// timeline.
+	future := time.Now().UTC().Add(time.Hour)
+	s.lastAppendedAt = future
+	ref, err := s.Append(ctx, rec("e", time.Unix(0, 0).UTC(), "p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.AppendedAt.Before(future) {
+		t.Errorf("AppendedAt %v regressed below the previous append %v", ref.AppendedAt, future)
+	}
+}
+
+func TestSeal_CoversStoreHeadGrownByAnotherSink(t *testing.T) {
+	// A shared Store grown by a second Sink: Seal must cover the store's CURRENT head, not this
+	// sink's stale cached prefix (else it signs an old head and reports success while later
+	// records stay unsealed).
+	ca := signing.NewDevCA()
+	signer, _ := signing.NewSinkSigner(ca, "shared")
+	store := newMemStore()
+	ctx := context.Background()
+
+	s1 := New(store, signer, ca.Root(), 0)
+	if _, err := s1.Append(ctx, rec("a", time.Unix(0, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	s2 := New(store, signer, ca.Root(), 0)
+	if _, err := s2.Append(ctx, rec("b", time.Unix(1, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	// s1's cached head is record 0, but the store head is now record 1.
+	if err := s1.Seal(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cps := s1.Checkpoints()
+	last := cps[len(cps)-1]
+	if last.Count != 2 || last.HeadSequence != 1 {
+		t.Errorf("seal covered head=%d count=%d, want head=1 count=2 (sealed a stale prefix)", last.HeadSequence, last.Count)
+	}
+	if err := s1.Verify(); err != nil {
+		t.Errorf("verify after sealing the current head: %v", err)
+	}
+}
+
 func TestSeal_RejectsUnverifiableSignature(t *testing.T) {
 	// The sink trusts ca1's root, but the injected signer is certified by a DIFFERENT CA, so its
 	// checkpoint signature will not verify under the sink's root. Seal must fail closed and

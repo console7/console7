@@ -39,7 +39,10 @@ func (s *SessionSigner) Sign(payload []byte) Signature {
 		Subject:   s.Subject,
 		SessionID: s.SessionID,
 		Sig:       ed25519.Sign(s.priv, payload),
-		Cert:      s.cert,
+		// Deep-copy the certificate: a shallow copy would alias this long-lived signer's own
+		// cert.Pub/cert.CASig backing arrays, so a caller mutating the returned signature's cert
+		// bytes would corrupt the signer (mirrors SinkSigner.SignCheckpoint).
+		Cert: s.cert.clone(),
 	}
 }
 
