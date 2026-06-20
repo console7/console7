@@ -47,11 +47,12 @@ type EvidenceSink interface {
 	//
 	// SECURITY: the store MUST be append-only/WORM — the implementation MUST NEVER
 	// expose a path to update or delete a previously written record, and MUST chain
-	// and sign each record for tamper-evidence (DESIGN.md §6). It MUST stamp its own
-	// authoritative AppendedAt and chain on that, NEVER trusting rec.ObservedAt for
-	// ordering. It MUST fail closed: if the record cannot be durably and immutably
-	// committed, Append MUST error rather than drop it silently. It MUST NOT route
-	// evidence through, or share a mutable backing store with, the operational
+	// each record and cryptographically sign the chain — per-record and/or via signed
+	// checkpoints over the chain head — for tamper-evidence (DESIGN.md §6). It MUST
+	// stamp its own authoritative AppendedAt and chain on that, NEVER trusting
+	// rec.ObservedAt for ordering. It MUST fail closed: if the record cannot be durably
+	// and immutably committed, Append MUST error rather than drop it silently. It MUST
+	// NOT route evidence through, or share a mutable backing store with, the operational
 	// database.
 	Append(ctx context.Context, rec EvidenceRecord) (RecordRef, error)
 

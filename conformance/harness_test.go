@@ -2,10 +2,11 @@
 // implementation upholds the SECURITY contracts declared in sdk/interfaces. It
 // drives the harness in sdk/testkit.
 //
-// Seven of the nine seams have a dev/in-memory implementation and are asserted for real
-// against the devkit providers: CloudProvider, SecretsProvider, IdentityProvider,
-// SCMProvider, InferenceBackend, PolicySoR, and EvidenceSink (the last three's Cloud/SoR/
-// Evidence cases added with the Phase-1 orchestration spine). The remaining two seams
+// Seven of the nine seams are asserted for real: CloudProvider, SecretsProvider,
+// IdentityProvider, SCMProvider, InferenceBackend, and PolicySoR against their devkit
+// in-memory providers, and EvidenceSink against the REAL control-plane/evidence sink (the
+// production type, signing checkpoints through a keybroker-minted sink signer). The remaining
+// two seams
 // (PolicyEngine, ObserveGateway) have no implementation yet, so their cases skip until
 // their providers land in Phases 2–3 (docs/ROADMAP.md; the full nine-seam suite is the
 // Phase-5 deliverable). See conformance/README.md.
@@ -25,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/console7/console7/control-plane/evidence"
+	"github.com/console7/console7/keybroker/signing"
 	"github.com/console7/console7/sdk/devkit"
 	"github.com/console7/console7/sdk/interfaces"
 	"github.com/console7/console7/sdk/testkit"
@@ -40,6 +43,14 @@ func providersUnderTest() testkit.ProviderUnderTest {
 	if err != nil {
 		panic("conformance: idp keygen failed: " + err.Error())
 	}
+	// The EvidenceSink contracts run against the REAL control-plane evidence sink (the
+	// production type), not the devkit double. It seals checkpoints through a keybroker-minted
+	// sink signer; the Append/Stream contracts do not seal, but the signer must be wired.
+	evCA := signing.NewDevCA()
+	sinkSigner, err := signing.NewSinkSigner(evCA, "conf-evidence-sink")
+	if err != nil {
+		panic("conformance: sink signer mint failed: " + err.Error())
+	}
 	return testkit.ProviderUnderTest{
 		Cloud:    devkit.NewMemCloud(reg),
 		Secrets:  devkit.NewMemSecrets(reg),
@@ -51,7 +62,7 @@ func providersUnderTest() testkit.ProviderUnderTest {
 			SubscriptionEnabled:  true,
 		}),
 		PolicySoR: devkit.NewFixedPolicySoR(interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}),
-		Evidence:  devkit.NewMemEvidence(),
+		Evidence:  evidence.NewInMemory(sinkSigner, evCA.Root(), 0),
 		// The registry MemSecrets checks ownership against is also the rig the injection
 		// contract uses to provision a real owned sandbox, and the store the MemCloud above
 		// provisions into and wipes on destroy.
