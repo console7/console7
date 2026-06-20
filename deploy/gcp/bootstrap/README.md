@@ -31,22 +31,32 @@ These are the human-authority acts; do them once, signed in as yourself:
   --create-project --billing-account 0X0X0X-0X0X0X-0X0X0X
 ```
 
-Idempotent (re-linking billing is a no-op). It provisions only the substrate the
-**current** deploy module needs and prints the values to wire into the adopter config
-repo: it enables the required APIs, creates a **versioned, private** Terraform state
-bucket, and sets up **Workload Identity Federation** (a pool + GitHub OIDC provider
-whose **provider-level condition restricts it to the one `owner/repo` you pass**) —
-**no service-account key is ever created or stored** (tenet 5).
+Idempotent (re-applies state-bucket hardening and prunes stale impersonators on
+re-run). It provisions only the substrate the **current** deploy module needs and
+prints the values to wire into the adopter config repo: it enables the required APIs,
+creates a **versioned, private** Terraform state bucket (UBLA + public-access-prevention
+enforced even if the bucket pre-exists), and sets up **Workload Identity Federation** (a
+pool + GitHub OIDC provider whose **provider-level condition restricts it to the one
+`owner/repo` *and* the one deploy workflow** — an unrelated workflow added to the repo
+cannot mint a token at all) — **no service-account key is ever created or stored**
+(tenet 5). `--name-prefix` isolates the pool + identities so a second prefixed bootstrap
+in a shared project doesn't collide with the first.
 
 It then creates **two CD identities, mirroring tenet 6 (observe ≠ actuate)** so that a
 human merge is the precondition for any change:
 
-- a **PLAN** identity — **read-only** (project viewer + IAM read + state read),
-  impersonable from **any branch**, for the PR `terraform plan` that posts the effect
-  diff;
+- a **PLAN** identity — **read-only** (project viewer + IAM read + state **read**),
+  impersonable from **any branch**, for the PR `terraform plan`. The pipeline runs plan
+  with `-lock=false`, so this identity has **no state-write** — a compromised plan job
+  cannot mutate or delete state.
 - an **APPLY** identity — **admin-grade** for the resources the modules provision,
   impersonable **only from the default branch** (`refs/heads/main`). It is bound via a
   `repository_ref` attribute, so a PR or feature branch **cannot** assume it.
+
+> **PR plans are inherently lower-trust:** a pull request can edit `deploy.yml` itself,
+> so the PLAN identity is deliberately read-only and write-incapable. Protect the
+> workflow with **CODEOWNERS + branch protection** on `.github/workflows/` so workflow
+> changes are reviewed.
 
 > The apply identity is admin-grade by necessity (it creates KMS keys, service
 > accounts, IAM). Its safety rests on three layers: the provider is locked to your one
