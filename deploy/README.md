@@ -19,5 +19,11 @@ The distinct trust tiers deploy as **distinct, separately-signed artifacts** —
 control-plane image, key-broker/signing image, sandbox base image — and **MUST NOT**
 be fused (`ARCHITECTURE.md` §6.4).
 
+The **adoption & deployment model** — how adopters consume Console7 by pinned
+reference, refresh by reviewed version bump, and deploy keyless with no runtime
+phone-home — is recorded in [`docs/adr/0002-adoption-deployment-model.md`](../docs/adr/0002-adoption-deployment-model.md).
+This subtree is **partitioned by target** (e.g. `deploy/gcp/`, `deploy/local/`) so
+parallel targets do not collide.
+
 > P0 scaffolding: directory + responsibilities only — **no manifests, no real config,
 > no secrets.**
