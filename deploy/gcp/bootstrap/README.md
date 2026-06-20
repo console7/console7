@@ -61,8 +61,10 @@ human merge is the precondition for any change:
 > The apply identity is admin-grade by necessity (it creates KMS keys, service
 > accounts, IAM). Its safety rests on three layers: the provider is locked to your one
 > repo, impersonation is locked to the default branch, and a human merges before that
-> branch moves. **Strongly recommended:** also run the apply job under a **protected
-> GitHub environment** (required reviewers, branch policy) for defence in depth.
+> branch moves. A **protected GitHub environment** (required reviewers, branch policy)
+> adds a second approval gate — but GitHub only offers environment protection on a
+> **public repo or a paid plan**; on a free private repo the WIF-`main` lock plus the
+> reviewed merge is the actuation gate.
 
 The APPLY identity is granted only the roles the current module provisions (KMS admin,
 SA admin, `objectAdmin` on the state bucket). Later module PRs (`gke`, `networking`,
@@ -86,10 +88,12 @@ wires the bootstrap outputs into it as GitHub Actions **variables** (not secrets
   --apply-sa console7-apply@my-console7.iam.gserviceaccount.com
 ```
 
-From there, refreshing Console7 is a **reviewed version bump** in that repo (ADR-0002):
-a bot raises the pinned module `?ref=`, the PR runs `terraform plan` as the **plan**
-identity and posts the effect diff, a human merges, and the merge-to-`main` job applies
-as the **apply** identity. The maintainer is never in the loop.
+The **first deploy is deliberate** — instantiating the template does **not** auto-apply;
+trigger it from the repo's Actions tab (`console7 deploy` → Run workflow). After that,
+refreshing Console7 is a **reviewed version bump** (ADR-0002): a bot raises the pinned
+`CONSOLE7_REF` in `.github/workflows/deploy.yml`, the PR runs `terraform plan` as the
+**plan** identity and posts the effect diff, a human merges, and the merge-to-`main` job
+applies as the **apply** identity. The maintainer is never in the loop.
 
 ## Security posture (at a glance)
 
