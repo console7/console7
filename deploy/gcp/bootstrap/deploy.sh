@@ -97,7 +97,10 @@ gh variable set GCP_APPLY_SA           --repo "$ADOPTER_REPO" --body "$APPLY_SA"
 cat <<EOF
 
 ==> $ADOPTER_REPO scaffolded. Next:
-  1. Review its pinned module ?ref= in main.tf and the generated terraform.tfvars.
-  2. The keyless deploy workflow authenticates via the variables above (no secrets set).
-  3. Refresh Console7 by bumping the pinned ?ref= via a reviewed PR (ADR-0002).
+  1. (Optional) add a protected 'console7-apply' environment for a second approval gate
+     — public repo / paid plan only; otherwise the reviewed merge to main is the gate.
+  2. Trigger the FIRST deploy deliberately: Actions tab -> 'console7 deploy' -> Run
+     workflow (instantiation does not auto-apply).
+  3. Refresh Console7 later by bumping CONSOLE7_REF in .github/workflows/deploy.yml via
+     a reviewed PR — the plan runs on the PR, merge to main applies (ADR-0002).
 EOF
