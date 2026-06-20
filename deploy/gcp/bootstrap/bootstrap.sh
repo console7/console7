@@ -153,7 +153,9 @@ gcloud services enable \
   cloudresourcemanager.googleapis.com \
   storage.googleapis.com \
   --project="$PROJECT_ID"
-# secretmanager.googleapis.com is enabled with the providers/secrets-gcp PR.
+# secretmanager.googleapis.com is enabled by the deploy module itself
+# (google_project_service in deploy/gcp/modules/secrets); the APPLY identity is granted
+# serviceUsageAdmin below so `terraform apply` can manage that enablement.
 
 # --- 3. Terraform state bucket --------------------------------------------------------
 if gcloud storage buckets describe "gs://${STATE_BUCKET}" >/dev/null 2>&1; then
@@ -245,9 +247,17 @@ grant_project_role "$PLAN_SA_EMAIL" "roles/iam.securityReviewer" # read IAM poli
 gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
   --member="serviceAccount:${PLAN_SA_EMAIL}" --role="roles/storage.objectViewer"
 
-log "granting APPLY identity least-privilege roles for the current module"
+log "granting APPLY identity least-privilege roles for the current modules"
 grant_project_role "$APPLY_SA_EMAIL" "roles/cloudkms.admin"
 grant_project_role "$APPLY_SA_EMAIL" "roles/iam.serviceAccountAdmin"
+# providers/secrets-gcp's deploy delta (deploy/gcp/modules/secrets) adds three resource kinds
+# the APPLY identity must be able to manage:
+#   - enabling secretmanager.googleapis.com via google_project_service -> serviceUsageAdmin
+#   - creating the custom least-privilege Secret Manager roles -> iam.roleAdmin
+#   - the project-level IAM bindings for the workload SA -> resourcemanager.projectIamAdmin
+grant_project_role "$APPLY_SA_EMAIL" "roles/serviceusage.serviceUsageAdmin"
+grant_project_role "$APPLY_SA_EMAIL" "roles/iam.roleAdmin"
+grant_project_role "$APPLY_SA_EMAIL" "roles/resourcemanager.projectIamAdmin"
 # State read/write is scoped to the state bucket only, not project-wide storage admin.
 gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
   --member="serviceAccount:${APPLY_SA_EMAIL}" --role="roles/storage.objectAdmin"

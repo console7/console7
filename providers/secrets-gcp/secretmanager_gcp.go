@@ -12,12 +12,12 @@ import (
 
 // smStore is the real SecretStore: per-subject secrets in GCP Secret Manager. Replication is
 // user-managed and pinned to one region, keeping payloads in-region (no egress of adopter
-// data). Labels carry no PII. The workload SA's least-privilege role (deploy/gcp/modules/
-// secrets) grants exactly create / versions.add / versions.access / secrets.delete at PROJECT
-// scope — that narrow verb set (no get, no list, no IAM-policy verbs) is the boundary. The
-// "<prefix>-sub-*" naming is a provider-side convention (and a future IAM-condition hardening
-// target), not a current IAM restriction: secrets.create is evaluated at the project parent,
-// so a name-prefix condition would deny every create.
+// data). Labels carry no PII. The workload SA's least-privilege grants (deploy/gcp/modules/
+// secrets) are split: secrets.create is project-scoped/unconditioned (a parent-evaluated verb
+// that cannot be name-conditioned), while the resource-scoped verbs (versions.add /
+// versions.access / secrets.delete) are IAM-conditioned to "<prefix>-sub-*" — so a compromised
+// workload cannot read, re-version, or delete unrelated project secrets. No get/list (no
+// enumeration), no IAM-policy verbs (no self-grant).
 type smStore struct {
 	client    *secretmanager.Client
 	projectID string

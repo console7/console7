@@ -3,12 +3,46 @@ package secretsgcp
 import (
 	"bytes"
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/console7/console7/sdk/devkit"
 	"github.com/console7/console7/sdk/interfaces"
 )
+
+// hookStore wraps InMemoryStore to inject deterministic races: onPut/onGet fire INSIDE the
+// provider's Put/Get (before the delegate runs), and failDestroy forces Destroy to error.
+// This lets a single-threaded test land a RevokeSubject at the exact interleave the Codex
+// findings describe.
+type hookStore struct {
+	*InMemoryStore
+	onPut       func()
+	onGet       func()
+	failDestroy bool
+}
+
+func (h *hookStore) Put(ctx context.Context, secretID string, payload []byte) (string, error) {
+	if h.onPut != nil {
+		h.onPut()
+	}
+	return h.InMemoryStore.Put(ctx, secretID, payload)
+}
+
+func (h *hookStore) Get(ctx context.Context, secretID string) ([]byte, bool, error) {
+	if h.onGet != nil {
+		h.onGet()
+	}
+	return h.InMemoryStore.Get(ctx, secretID)
+}
+
+func (h *hookStore) Destroy(ctx context.Context, secretID string) error {
+	if h.failDestroy {
+		return errors.New("induced Destroy failure")
+	}
+	return h.InMemoryStore.Destroy(ctx, secretID)
+}
 
 // White-box tests (package secretsgcp) so they can inspect the fake store's sealed payloads
 // and prove the at-rest invariants — there is deliberately no exported read path on the
@@ -285,6 +319,78 @@ func TestInject_RefusesRevokedSubjectEvenIfMaterialPresent(t *testing.T) {
 	}
 	if _, ok := reg.Injected(box); ok {
 		t.Error("material delivered for a revoked subject")
+	}
+}
+
+func TestInject_AtomicRevocationDuringInject(t *testing.T) {
+	// A RevokeSubject that lands AFTER the early backstop check but while the token is being
+	// fetched/decrypted must still block delivery — the final revocation check is atomic with
+	// DeliverIfOwned under p.mu. We set the tombstone (without deleting the at-rest material)
+	// from inside Get, so the payload is still readable yet the subject is revoked by the time
+	// delivery is attempted.
+	reg := devkit.NewSandboxRegistry()
+	store := &hookStore{InMemoryStore: NewInMemoryStore()}
+	p := NewWithPorts(NewInMemoryKEK(), store, reg, "console7", func() time.Time { return fixedNow })
+	ctx := context.Background()
+	if err := p.StoreSubscriptionToken(ctx, interfaces.SubscriptionToken{Subject: "alice", Token: []byte("tok")}); err != nil {
+		t.Fatal(err)
+	}
+	box := reg.Provision("alice", "s1")
+	store.onGet = func() { // mid-injection revoke: tombstone only, material left in place
+		p.mu.Lock()
+		p.revoked["alice"] = true
+		p.mu.Unlock()
+	}
+
+	if err := p.InjectSubscriptionToken(ctx, interfaces.SubscriptionInjection{
+		Subject: "alice", SessionID: "s1", Sandbox: box, Attended: true, Beneficiaries: 1,
+	}); err == nil {
+		t.Error("expected refusal when revocation races injection, got nil")
+	}
+	if _, ok := reg.Injected(box); ok {
+		t.Error("token delivered despite a revocation that landed before delivery")
+	}
+}
+
+func TestStore_CompensatingShredOnRevokeDuringStore(t *testing.T) {
+	// A RevokeSubject that lands during the remote Put must not leave recoverable material:
+	// the compensating shred deletes it and the store reports failure.
+	reg := devkit.NewSandboxRegistry()
+	store := &hookStore{InMemoryStore: NewInMemoryStore()}
+	p := NewWithPorts(NewInMemoryKEK(), store, reg, "console7", func() time.Time { return fixedNow })
+	ctx := context.Background()
+	store.onPut = func() { _ = p.RevokeSubject(ctx, "alice") } // revoke commits during the Put
+
+	err := p.StoreSubscriptionToken(ctx, interfaces.SubscriptionToken{Subject: "alice", Token: []byte("tok")})
+	if err == nil {
+		t.Error("expected an error when revocation races the store, got nil")
+	}
+	if _, ok := store.Stored(p.secretID("alice")); ok {
+		t.Error("material remained after a revoke-during-store — compensating shred did not run")
+	}
+}
+
+func TestStore_CompensatingShredFailureSurfaced(t *testing.T) {
+	// If the compensating shred itself fails, the store MUST NOT report a clean shred — the
+	// material may remain, and the caller has to know.
+	reg := devkit.NewSandboxRegistry()
+	store := &hookStore{InMemoryStore: NewInMemoryStore(), failDestroy: true}
+	p := NewWithPorts(NewInMemoryKEK(), store, reg, "console7", func() time.Time { return fixedNow })
+	ctx := context.Background()
+	store.onPut = func() {
+		// Set the tombstone directly (RevokeSubject would also hit the failing Destroy); this
+		// isolates the store's own compensating-delete failure path.
+		p.mu.Lock()
+		p.revoked["alice"] = true
+		p.mu.Unlock()
+	}
+
+	err := p.StoreSubscriptionToken(ctx, interfaces.SubscriptionToken{Subject: "alice", Token: []byte("tok")})
+	if err == nil {
+		t.Fatal("expected an error when the compensating delete fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "may remain") {
+		t.Errorf("error must surface that material may remain, got: %v", err)
 	}
 }
 
