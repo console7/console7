@@ -155,6 +155,16 @@ maintainer involvement**.
   shipped artefacts, kept current with the code.
 - **Community:** contribution, review, and provider-interface stability guarantees
   appropriate to a product enterprises bet on.
+- **Dogfood — local cloudless target:** Console7 is exercised *on itself* via the
+  out-of-tree local single-host target (`docs/adr/0003-local-cloudless-target.md`) — as
+  much, and as early, as each piece is genuinely possible. Its phased dogfood plan lives
+  **in that repo, not duplicated here** (the link is access-gated — deliberate, to avoid
+  over-disclosing on a public repo, not a broken reference):
+  [console7-cloud-local `docs/ROADMAP.md`](https://github.com/console7/console7-cloud-local/blob/main/docs/ROADMAP.md).
+  **Working this repo? Treat that as a live, gated workstream — consult it; don't take
+  this public roadmap as the whole plan.** Cross-gate worth knowing: the local CI/CD
+  adoption-loop dogfood unlocks with **signed release images (#11)** — landing #11
+  should trigger it.
 
 ## Control-objective onramp (summary)
 
