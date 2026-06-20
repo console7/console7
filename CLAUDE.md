@@ -104,6 +104,11 @@ surface — this is a Tier-1, public, security-sensitive codebase.
   diff) — and reconcile findings **before** `git push`. It is defence-in-depth that
   front-runs the authoritative Codex/CI/human gates (tenet 2), never a replacement;
   skip it for pure docs (proportionality, tenet 8).
+- **Orchestrating your own dev work.** For *how* to drive agents building this repo —
+  when to use a `claude -p` sub-claude vs the `Workflow`/`Agent` tools, and how to log
+  a run — see [`docs/dev/agent-orchestration.md`](docs/dev/agent-orchestration.md) and
+  the [dev-session ledger](docs/dev-sessions.md). Default to `Workflow`/`Agent`;
+  reserve sub-claudes for long autonomous implementation runs that each land a PR.
 - Everything composes against `sdk/interfaces`. An interface change, its reference
   implementation, and its conformance test land in **one atomic PR**.
 - If you believe a requirement or tenet is **wrong**, say so in the PR description
