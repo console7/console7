@@ -97,10 +97,14 @@ gh variable set GCP_APPLY_SA           --repo "$ADOPTER_REPO" --body "$APPLY_SA"
 cat <<EOF
 
 ==> $ADOPTER_REPO scaffolded. Next:
-  1. (Optional) add a protected 'console7-apply' environment for a second approval gate
-     — public repo / paid plan only; otherwise the reviewed merge to main is the gate.
-  2. Trigger the FIRST deploy deliberately: Actions tab -> 'console7 deploy' -> Run
+  1. Gate the apply. Branch protection (required PR review) and environment protection
+     (required reviewers) are available on PUBLIC repos (all plans) or PRIVATE repos on a
+     plan that includes them — a GitHub FREE PRIVATE repo has NEITHER, so its only gate
+     is who can push to main (the APPLY identity trusts any workflow on main: restrict
+     write/admin access, or use a public repo / capable plan for an enforced review gate).
+  2. Before the FIRST deploy, REVIEW .github/workflows/deploy.yml (esp. CONSOLE7_REF) and
+     the Actions variables, then run it deliberately: Actions -> 'console7 deploy' -> Run
      workflow (instantiation does not auto-apply).
-  3. Refresh Console7 later by bumping CONSOLE7_REF in .github/workflows/deploy.yml via
-     a reviewed PR — the plan runs on the PR, merge to main applies (ADR-0002).
+  3. Refresh later by bumping CONSOLE7_REF via a PR — plan runs on the PR, merge applies.
+     An ENFORCED review on that merge needs branch protection (public repo / capable plan).
 EOF
