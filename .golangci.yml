@@ -1,0 +1,64 @@
+# Console7 code-quality configuration — the source of truth for the CI lint gate
+# (the control of record, tenet 2). Sprint 3 of the enforcement plan additionally
+# wires the local pre-pr-review defence-in-depth tier to this same file. Implements
+# CO-17 (code quality, maintainability, tech-debt tracking) of
+# docs/standards/console7-sdlc-standard.md, which requires golangci-lint wired as a
+# blocking gate the moment go.mod lands. See docs/dev/code-quality-enforcement-plan.md.
+#
+# Enforcement model: clean-as-you-code. CI runs with --new-from-merge-base=origin/main
+# so new/changed lines are held to the bar while the legacy baseline is remediated
+# (Sprint 2) before whole-tree enforcement turns on (Sprint 3).
+#
+# Thresholds here are the Sprint-1 starting proposal; Sprint 2 calibrates them
+# against measured whole-tree worst-case so the targets are evidence-based.
+
+version: "2"
+
+linters:
+  # The `standard` set gives errcheck, govet, ineffassign, staticcheck, unused for
+  # free; we add the maintainability axes CI has had no signal on until now.
+  default: standard
+  enable:
+    - gocyclo # cyclomatic complexity (per function)
+    - gocognit # cognitive complexity (per function)
+    - dupl # copy-paste duplication
+    - funlen # function length
+    - nestif # deeply nested if-blocks
+    - revive # style + exported-symbol doc rules
+    - gosec # security smells (additive overlap; CodeQL remains the SAST of record)
+
+  settings:
+    gocyclo:
+      min-complexity: 15
+    gocognit:
+      min-complexity: 20
+    dupl:
+      threshold: 100
+    funlen:
+      lines: 80
+      statements: 40
+    nestif:
+      min-complexity: 5
+    revive:
+      rules:
+        # Require doc comments on exported symbols — the SDK is a published contract
+        # surface, so exported docstrings are part of the deliverable.
+        - name: exported
+
+  exclusions:
+    generated: lax
+    rules:
+      # Test files trade brevity for thoroughness: table-driven tests are long and
+      # repetitive by nature, and complexity/duplication metrics there measure the
+      # wrong thing. Keep correctness/security linters on; relax the size/shape ones.
+      - path: _test\.go
+        linters:
+          - funlen
+          - dupl
+          - gocyclo
+          - gocognit
+          - nestif
+
+formatters:
+  enable:
+    - gofmt
