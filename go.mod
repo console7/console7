@@ -9,11 +9,14 @@
 // GOAL.md tenet 10). The core (sdk/, control-plane/, keybroker/) stays import-free of
 // these; they are reachable only from providers/secrets-gcp.
 //
-// The go directive below is set by the toolchain to the minimum the dependency closure
-// requires; CI installs it via go-version-file, so it stays consistent.
+// The dependency closure raised the go directive to the 1.25 line; it is pinned to a
+// PATCHED 1.25.x (not 1.25.0) so the govulncheck gate is clean — CI installs exactly this
+// version via go-version-file, and the .0 release carries stdlib CVEs (net/textproto,
+// crypto/x509, net/http, …) fixed only in later 1.25.x patches. Bump this when govulncheck
+// flags a newer stdlib fix.
 module github.com/console7/console7
 
-go 1.25.0
+go 1.25.11
 
 require (
 	cloud.google.com/go/kms v1.31.0
@@ -42,12 +45,12 @@ require (
 	go.opentelemetry.io/otel v1.42.0 // indirect
 	go.opentelemetry.io/otel/metric v1.42.0 // indirect
 	go.opentelemetry.io/otel/trace v1.42.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9 // indirect
