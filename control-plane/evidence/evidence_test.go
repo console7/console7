@@ -435,6 +435,41 @@ func TestSeal_CoversStoreHeadGrownByAnotherSink(t *testing.T) {
 	}
 }
 
+// emptyIDSigner is a miswired CheckpointSigner that reports no identity.
+type emptyIDSigner struct{}
+
+func (emptyIDSigner) SinkID() string { return "" }
+func (emptyIDSigner) SignCheckpoint(context.Context, []byte) (signing.SinkSignature, error) {
+	return signing.SinkSignature{}, nil
+}
+
+func TestSeal_NilStoreErrorsNotPanics(t *testing.T) {
+	ca := signing.NewDevCA()
+	signer, _ := signing.NewSinkSigner(ca, "x")
+	// A miswired sink (nil store) must return a clean error from Seal, never panic — a panic on
+	// the orchestrator's terminal seal path would crash teardown.
+	s := New(nil, signer, ca.Root(), 0)
+	if err := s.Seal(context.Background()); err == nil {
+		t.Error("Seal on a nil-store sink should error")
+	}
+}
+
+func TestSeal_RejectsEmptySinkID(t *testing.T) {
+	ca := signing.NewDevCA()
+	s := New(newMemStore(), emptyIDSigner{}, ca.Root(), 0)
+	ctx := context.Background()
+	if _, err := s.Append(ctx, rec("e", time.Unix(0, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	// An empty sink identity must fail closed rather than commit an unattributed checkpoint.
+	if err := s.Seal(ctx); err == nil {
+		t.Error("Seal committed a checkpoint with an empty sink identity")
+	}
+	if len(s.Checkpoints()) != 0 {
+		t.Errorf("no checkpoint should be committed with an empty sink identity, got %d", len(s.Checkpoints()))
+	}
+}
+
 func TestSeal_RejectsUnverifiableSignature(t *testing.T) {
 	// The sink trusts ca1's root, but the injected signer is certified by a DIFFERENT CA, so its
 	// checkpoint signature will not verify under the sink's root. Seal must fail closed and
@@ -514,5 +549,36 @@ func TestNew_HydratesFromNonEmptyStore(t *testing.T) {
 	// The hash chain continues unbroken across the construction boundary.
 	if err := s2.VerifyChain(); err != nil {
 		t.Errorf("chain broken across resume: %v", err)
+	}
+}
+
+func TestVerify_ConcurrentWithAppend(t *testing.T) {
+	// Append/Seal/Verify run concurrently on one sink (the orchestrator shares a single sink
+	// across sessions). Verify reads the store length and checkpoint snapshot under s.mu, so this
+	// must be race-free (run under -race) and never panic.
+	s, _ := newTestSink(t, 0)
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 60; i++ {
+			if _, err := s.Append(ctx, rec("e", time.Unix(int64(i), 0).UTC(), "p")); err != nil {
+				t.Errorf("append %d: %v", i, err)
+				return
+			}
+			if err := s.Seal(ctx); err != nil {
+				t.Errorf("seal %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_ = s.Verify()
+			_ = s.VerifyChain()
+		}
 	}
 }

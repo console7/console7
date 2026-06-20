@@ -26,18 +26,21 @@ func (s *Sink) Verify() error {
 	}
 	// Read the STORE's actual length, not this sink's cached counter: a shared/durable Store can
 	// be appended through another Sink instance or process, leaving a longer unsealed tail this
-	// sink never sealed. Trusting s.count would accept that tail as fully sealed.
-	n, err := s.store.Len(context.Background())
-	if err != nil {
-		return fmt.Errorf("evidence: head-seal length read failed: %w", err)
-	}
+	// sink never sealed. Trusting s.count would accept that tail as fully sealed. Take the length
+	// AND the checkpoint snapshot under the SAME s.mu (the lock Append/Seal serialize on) so a
+	// concurrent append cannot slip a new unsealed tail in between the two reads and let a stale
+	// length match a stale checkpoint.
 	s.mu.Lock()
+	n, err := s.store.Len(context.Background())
 	var head Checkpoint
 	sealed := len(s.checkpoints) > 0
 	if sealed {
 		head = s.checkpoints[len(s.checkpoints)-1]
 	}
 	s.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("evidence: head-seal length read failed: %w", err)
+	}
 
 	if n == 0 {
 		return nil
