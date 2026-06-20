@@ -23,7 +23,7 @@ github.com/console7/console7/control-plane/orchestrator 76
 github.com/console7/console7/keybroker/broker 74
 github.com/console7/console7/keybroker/signing 94
 github.com/console7/console7/providers/inference-anthropic 100
-github.com/console7/console7/providers/scm-github 59
+github.com/console7/console7/providers/scm-github 60
 github.com/console7/console7/providers/secrets-gcp 63
 github.com/console7/console7/sdk/devkit 86
 "

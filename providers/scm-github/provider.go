@@ -143,45 +143,57 @@ func NewWithPorts(auth AppAuth, pr PullRequestOpener, ttl time.Duration, extraPr
 	}
 }
 
+// validateWorkingCredentialRequest fails closed on any malformed mint request BEFORE
+// any remote work: it requires lineage (subject + session), a working branch, a
+// fully-specified repo on the host this provider serves, a future session deadline,
+// and a non-protected branch. `now` is the caller's single clock read so the deadline
+// check matches the one the mint path later re-validates against.
+func (p *Provider) validateWorkingCredentialRequest(ctx context.Context, req interfaces.WorkingCredentialRequest, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The credential MUST be bound to the per-session identity for lineage; refuse to mint an
+	// unattributable one (DESIGN.md §2.3).
+	if req.Subject == "" || req.SessionID == "" {
+		return errors.New("scmgithub: MintWorkingCredential requires a subject and session for lineage")
+	}
+	if req.Branch == "" {
+		return errors.New("scmgithub: MintWorkingCredential requires a working branch")
+	}
+	// The credential MUST be repo-scoped; refuse a zero RepoRef so a missing-repo wiring bug
+	// cannot produce an unscoped token request.
+	if req.Repo.Host == "" || req.Repo.Owner == "" || req.Repo.Name == "" {
+		return errors.New("scmgithub: MintWorkingCredential requires a fully-specified repo")
+	}
+	// Refuse a repo on a different SCM host than this provider serves: the adapter scopes the token
+	// by owner/name against ITS configured endpoint, so a homonymous repo on another host
+	// (github.com vs a GHES instance) would otherwise be minted instead of failing closed.
+	if req.Repo.Host != p.expectedHost {
+		return fmt.Errorf("scmgithub: repo host %q is not the host this provider serves (%q)", req.Repo.Host, p.expectedHost)
+	}
+	// Like every minted credential, the SCM token must die with the session: refuse an
+	// absent/past deadline rather than mint one that could outlive the session (DESIGN.md §2.1).
+	if req.SessionDeadline.IsZero() || !req.SessionDeadline.After(now) {
+		return errors.New("scmgithub: MintWorkingCredential requires a SessionDeadline in the future")
+	}
+	// Refuse a protected/default branch before any remote work. Push MUST be restricted to a
+	// working branch (in-band defence-in-depth; the authoritative restriction is the repo ruleset
+	// + egress boundary). protected is immutable post-construction, so no lock is needed.
+	if p.protected[req.Branch] {
+		return errors.New("scmgithub: refusing to scope a working credential to a protected branch")
+	}
+	return nil
+}
+
 // MintWorkingCredential mints a short-lived, repo-scoped, least-privilege installation token,
 // holds it behind an opaque ref, and returns only that ref plus its expiry — never the durable
 // token. It refuses to scope a credential to a protected/default branch, and caps the expiry to
 // no later than the session deadline so the SCM token dies with the session like every other
 // minted credential.
 func (p *Provider) MintWorkingCredential(ctx context.Context, req interfaces.WorkingCredentialRequest) (interfaces.CredentialRef, error) {
-	if err := ctx.Err(); err != nil {
-		return interfaces.CredentialRef{}, err
-	}
-	// The credential MUST be bound to the per-session identity for lineage; refuse to mint an
-	// unattributable one (DESIGN.md §2.3).
-	if req.Subject == "" || req.SessionID == "" {
-		return interfaces.CredentialRef{}, errors.New("scmgithub: MintWorkingCredential requires a subject and session for lineage")
-	}
-	if req.Branch == "" {
-		return interfaces.CredentialRef{}, errors.New("scmgithub: MintWorkingCredential requires a working branch")
-	}
-	// The credential MUST be repo-scoped; refuse a zero RepoRef so a missing-repo wiring bug
-	// cannot produce an unscoped token request.
-	if req.Repo.Host == "" || req.Repo.Owner == "" || req.Repo.Name == "" {
-		return interfaces.CredentialRef{}, errors.New("scmgithub: MintWorkingCredential requires a fully-specified repo")
-	}
-	// Refuse a repo on a different SCM host than this provider serves: the adapter scopes the token
-	// by owner/name against ITS configured endpoint, so a homonymous repo on another host
-	// (github.com vs a GHES instance) would otherwise be minted instead of failing closed.
-	if req.Repo.Host != p.expectedHost {
-		return interfaces.CredentialRef{}, fmt.Errorf("scmgithub: repo host %q is not the host this provider serves (%q)", req.Repo.Host, p.expectedHost)
-	}
 	now := p.now()
-	// Like every minted credential, the SCM token must die with the session: refuse an
-	// absent/past deadline rather than mint one that could outlive the session (DESIGN.md §2.1).
-	if req.SessionDeadline.IsZero() || !req.SessionDeadline.After(now) {
-		return interfaces.CredentialRef{}, errors.New("scmgithub: MintWorkingCredential requires a SessionDeadline in the future")
-	}
-	// Refuse a protected/default branch before any remote work. Push MUST be restricted to a
-	// working branch (in-band defence-in-depth; the authoritative restriction is the repo ruleset
-	// + egress boundary). protected is immutable post-construction, so no lock is needed.
-	if p.protected[req.Branch] {
-		return interfaces.CredentialRef{}, errors.New("scmgithub: refusing to scope a working credential to a protected branch")
+	if err := p.validateWorkingCredentialRequest(ctx, req, now); err != nil {
+		return interfaces.CredentialRef{}, err
 	}
 
 	// Mint the real, repo-scoped, least-privilege installation token. The working credential needs

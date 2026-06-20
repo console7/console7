@@ -48,6 +48,8 @@ const (
 // silently downgrades a mixed-tier session. Use MoreRestrictiveThan / MostRestrictive.
 type Tier int
 
+// The Tier constants ascend from highest to lowest consequence; see the type's
+// WARNING above — their int order does NOT encode restrictiveness.
 const (
 	TierUnknown Tier = iota // fail-closed default: treat as the most restrictive.
 	Tier1                   // highest consequence — human gate, full attestation.
@@ -110,6 +112,8 @@ func MostRestrictive(tiers ...Tier) Tier {
 // Stratum is the target artefact's authoring stratum (S1 Engineered … S5 Agentic).
 type Stratum int
 
+// The Stratum constants ascend from the engineered (S1) to the agentic (S5) end of
+// the authoring spectrum; StratumUnknown is the fail-closed zero value.
 const (
 	StratumUnknown Stratum = iota // fail-closed default.
 	Stratum1                      // S1 Engineered.
@@ -169,9 +173,9 @@ type CredentialRef struct {
 	Expiry time.Time
 }
 
-// Persona-scoped identity minted per session. It is the non-human identity (NHI)
-// that the human Subject acts through; lineage is stamped Subject -> NHI -> action
-// at the orchestrator (DESIGN.md §2.3).
+// SessionIdentity is a persona-scoped identity minted per session. It is the
+// non-human identity (NHI) that the human Subject acts through; lineage is stamped
+// Subject -> NHI -> action at the orchestrator (DESIGN.md §2.3).
 type SessionIdentity struct {
 	Subject   Subject
 	SessionID SessionID

@@ -94,33 +94,96 @@ type Summary struct {
 	Records      int
 }
 
-// Run executes one governed task end to end, stamping a signed evidence record at every
-// lifecycle step. Any failure after the sandbox is provisioned tears it down and records a
-// session-aborted event before returning — the session never leaves a sandbox live.
-func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, error) {
+// session carries the per-run state threaded across the lifecycle phases so each phase
+// is a small method rather than one 80-statement function. The session-bounding defer
+// (ReleaseSession) and the evidence/seal ORDERING stay in Run; these helpers only
+// relocate code, never reorder effects.
+type session struct {
+	o          *Orchestrator
+	ctx        context.Context
+	cleanupCtx context.Context
+	req        LaunchRequest
+	subject    interfaces.Subject
+	nhi        string
+	profile    interfaces.SessionProfile
+	deadline   time.Time
+	sandbox    interfaces.SandboxHandle
+	records    int
+	// work outputs, filled by the operate phases and read into the final Summary.
+	endpoint  interfaces.BackendEndpoint
+	digest    []byte
+	commitSig signing.Signature
+	prRef     interfaces.PRRef
+}
+
+// emit writes a signed evidence record under the given context. A failure to record
+// evidence is itself fatal — an unattested action must not proceed silently.
+func (s *session) emit(c context.Context, event, detail string) error {
+	return s.o.appendSigned(c, s.req.SessionID, s.subject, s.req.Persona, s.nhi, event, detail)
+}
+
+// stamp wraps emit for the happy path: it records under the request context and counts the
+// record toward the Summary's tally.
+func (s *session) stamp(event, detail string) error {
+	if err := s.emit(s.ctx, event, detail); err != nil {
+		return err
+	}
+	s.records++
+	return nil
+}
+
+// abort tears the sandbox down — never leave it live — and records a session-aborted event
+// before returning. Teardown uses cleanupCtx (not the request ctx), so a cancelled/expired
+// request cannot skip it, and a teardown failure is surfaced (joined with the cause), never
+// swallowed: a failed destroy can mean the sandbox and injected credentials are still live.
+func (s *session) abort(cause error, stage string) error {
+	outErr := fmt.Errorf("orchestrator: %s: %w", stage, cause)
+	if derr := s.o.Cloud.DestroySandbox(s.cleanupCtx, s.sandbox); derr != nil {
+		outErr = errors.Join(outErr, fmt.Errorf("orchestrator: destroy-sandbox after %s failed (sandbox may be live): %w", stage, derr))
+	}
+	// Surface (never swallow) a failure to record the abort — e.g. SignSession refusing to
+	// sign past the session deadline on a session that overran. A dropped close-out record
+	// must be visible so an operator can escalate. (Residual, now PARTIALLY closed: the
+	// sink's own checkpoint seal below uses a long-lived signer that outlives the work
+	// deadline, so even when the per-record close-out lineage stamp fails the chain still
+	// gets a fresh sink-signed head. The per-record close-out lineage signature still needs a
+	// teardown-scoped session signer; tracked for the keybroker.)
+	if eerr := s.emit(s.cleanupCtx, "session-aborted", stage+": "+cause.Error()); eerr != nil {
+		outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to record session-aborted: %w", eerr))
+	}
+	// Seal a sink-signed checkpoint over the chain head at teardown (no-op if the sink does
+	// not support it). This anchors the close-out even if the per-record stamp above failed.
+	return s.o.sealOrJoin(s.cleanupCtx, outErr, "on abort")
+}
+
+// prepare runs the linear pre-provision setup: it validates the seams, authenticates the
+// human, resolves the target profile, and mints the per-session identity. It returns the
+// session state Run then threads through the lifecycle phases. Nothing here provisions an
+// external resource, so a failure simply returns the error — there is no sandbox to tear
+// down yet and no evidence has been committed.
+func (o *Orchestrator) prepare(ctx context.Context, req LaunchRequest) (*session, error) {
 	if o.Broker == nil || o.Cloud == nil || o.Evidence == nil || o.SoR == nil {
-		return Summary{}, errors.New("orchestrator: missing a required seam (broker/cloud/evidence/sor)")
+		return nil, errors.New("orchestrator: missing a required seam (broker/cloud/evidence/sor)")
 	}
 	// Validate the broker's own seams up front, BEFORE provisioning anything, so a
 	// misconfigured broker fails closed without leaking a sandbox (a later nil-seam call
 	// would otherwise abort mid-session — or, without the broker's own guards, panic).
 	if o.Broker.Inference == nil || o.Broker.SCM == nil || o.Broker.Secrets == nil {
-		return Summary{}, errors.New("orchestrator: broker is missing a required seam (inference/scm/secrets)")
+		return nil, errors.New("orchestrator: broker is missing a required seam (inference/scm/secrets)")
 	}
 
 	// 1. Authenticate the human BEFORE touching the policy system-of-record, so an
 	// unauthenticated caller cannot probe which targets exist or spend SoR capacity. The
 	// broker verifies the SSO assertion; a caller-asserted subject is never trusted.
-	subject, err := o.Broker.Authenticate(ctx, req.Authn)
-	if err != nil {
-		return Summary{}, err
+	if _, err := o.Broker.Authenticate(ctx, req.Authn); err != nil {
+		return nil, err
 	}
 
 	// 2. Resolve the target's profile through the PolicySoR seam (fail closed on unknown),
 	// now that the caller is authenticated.
 	profile, err := ResolveProfile(ctx, o.SoR, req.Repo, req.Persona, o.EgressAllowlist, o.MaxTTL)
 	if err != nil {
-		return Summary{}, err
+		return nil, err
 	}
 
 	// 3. Mint the per-session identity: bind the NHI (its signing key stays in the broker)
@@ -139,112 +202,53 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		SessionDeadline: deadline,
 	})
 	if err != nil {
-		return Summary{}, err
+		return nil, err
 	}
 	// The minted identity's verified subject is authoritative.
-	subject = minted.Identity.Subject
-	nhi := minted.NHI
-	// The session's signing key lives in the broker; release it at teardown so it cannot
-	// outlive the session. cleanupCtx is detached from the request context so teardown still
-	// runs even if the caller cancels or times out mid-session.
-	cleanupCtx := context.WithoutCancel(ctx)
-	defer o.Broker.ReleaseSession(req.SessionID)
+	// cleanupCtx is detached from the request context so teardown still runs even if the
+	// caller cancels or times out mid-session.
+	//
+	// CAUTION: the identity is now minted but its broker-held signing key is not yet released.
+	// The caller (Run) MUST `defer o.Broker.ReleaseSession(req.SessionID)` immediately on
+	// success, before any further fallible step — a fallible call inserted between this return
+	// and that defer would leak the session's signing key past its lifetime.
+	return &session{
+		o: o, ctx: ctx, cleanupCtx: context.WithoutCancel(ctx), req: req,
+		subject: minted.Identity.Subject, nhi: minted.NHI, profile: profile, deadline: deadline,
+	}, nil
+}
 
-	// emit writes a signed evidence record under the given context; stamp wraps it for the
-	// happy path (request context, counted). A failure to record evidence is itself fatal —
-	// an unattested action must not proceed silently. session-aborted records are emitted on
-	// the cleanup context (so a cancelled request cannot erase them) and are uncounted.
-	records := 0
-	emit := func(c context.Context, event, detail string) error {
-		return o.appendSigned(c, req.SessionID, subject, req.Persona, nhi, event, detail)
-	}
-	stamp := func(event, detail string) error {
-		if err := emit(ctx, event, detail); err != nil {
-			return err
-		}
-		records++
-		return nil
-	}
-	if err := stamp("session-start", string(subject)+" -> "+nhi); err != nil {
-		// stamp may have committed the record but failed on Stream; route through sealOrJoin so
-		// even this pre-provision terminal path anchors any committed head (a no-op if nothing was
-		// committed, since the sink cannot seal an empty chain).
-		return Summary{}, o.sealOrJoin(cleanupCtx, err, "at session-start")
-	}
-
-	// 4. Provision the sandbox with the profile's default-deny egress.
-	sandbox, err := o.Cloud.ProvisionSandbox(ctx, interfaces.SandboxSpec{
-		SessionID: req.SessionID,
-		Subject:   subject,
-		Persona:   req.Persona,
-		Egress:    interfaces.EgressPolicy{Allowlist: profile.EgressAllowlist},
-		// Cap the sandbox to the time REMAINING until the session deadline, not a fresh full
-		// MaxTTL: identity/SCM minting and early evidence already consumed part of the budget,
-		// so the sandbox (and any injected material) must die with the same absolute deadline
-		// the credentials were capped to, even if teardown is missed.
-		MaxTTL: time.Until(deadline),
-	})
-	if err != nil {
-		// No sandbox to tear down; record the failure against the chain and surface it. The
-		// session-start record is already committed, so seal a checkpoint here too (joined into
-		// the error) — this is a terminal path with committed evidence.
-		_ = emit(cleanupCtx, "session-aborted", "provision-sandbox: "+err.Error())
-		return Summary{}, o.sealOrJoin(cleanupCtx, fmt.Errorf("orchestrator: provision-sandbox: %w", err), "on provision failure")
-	}
-
-	// From here on, any failure must tear the sandbox down — never leave it live. Teardown
-	// uses cleanupCtx (not the request ctx), so a cancelled/expired request cannot skip it,
-	// and a teardown failure is surfaced (joined with the cause), never swallowed: a failed
-	// destroy can mean the sandbox and injected credentials are still live.
-	abort := func(cause error, stage string) (Summary, error) {
-		outErr := fmt.Errorf("orchestrator: %s: %w", stage, cause)
-		if derr := o.Cloud.DestroySandbox(cleanupCtx, sandbox); derr != nil {
-			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: destroy-sandbox after %s failed (sandbox may be live): %w", stage, derr))
-		}
-		// Surface (never swallow) a failure to record the abort — e.g. SignSession refusing to
-		// sign past the session deadline on a session that overran. A dropped close-out record
-		// must be visible so an operator can escalate. (Residual, now PARTIALLY closed: the
-		// sink's own checkpoint seal below uses a long-lived signer that outlives the work
-		// deadline, so even when the per-record close-out lineage stamp fails the chain still
-		// gets a fresh sink-signed head. The per-record close-out lineage signature still needs a
-		// teardown-scoped session signer; tracked for the keybroker.)
-		if eerr := emit(cleanupCtx, "session-aborted", stage+": "+cause.Error()); eerr != nil {
-			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to record session-aborted: %w", eerr))
-		}
-		// Seal a sink-signed checkpoint over the chain head at teardown (no-op if the sink does
-		// not support it). This anchors the close-out even if the per-record stamp above failed.
-		return Summary{}, o.sealOrJoin(cleanupCtx, outErr, "on abort")
-	}
-	if err := stamp("sandbox-provisioned", sandbox.ID); err != nil {
-		return abort(err, "sandbox-provisioned-evidence")
-	}
-
+// resolveInference resolves the session's model endpoint, gates it against the egress
+// allowlist, narrows the sandbox perimeter to exactly that endpoint, and — for a
+// subscription session — injects the owner's vaulted token. Every failure path aborts.
+func (o *Orchestrator) resolveInference(s *session) error {
 	// 5. Resolve inference. Subscription backs a session ONLY when it is attended AND the
 	// user opted into their vaulted subscription; an attended session without it routes the
 	// org API like any unattended session (tenet 7 — subscription is permitted, never
 	// mandatory). The resolved endpoint MUST already be on the egress allowlist — the
 	// boundary is authoritative, so an endpoint the perimeter would deny aborts the session
 	// rather than running against an unreachable model.
-	useSubscription := req.Attended && req.UseSubscription
+	useSubscription := s.req.Attended && s.req.UseSubscription
 	mode := interfaces.ModeOrgAPI
 	if useSubscription {
 		mode = interfaces.ModeSubscription
 	}
-	endpoint, err := o.Broker.ResolveInference(ctx, interfaces.InferenceSelection{
-		SessionID:     req.SessionID,
-		Subject:       subject,
+	endpoint, err := o.Broker.ResolveInference(s.ctx, interfaces.InferenceSelection{
+		SessionID:     s.req.SessionID,
+		Subject:       s.subject,
 		Mode:          mode,
-		Attended:      req.Attended,
+		Attended:      s.req.Attended,
 		Beneficiaries: 1,
 	})
 	if err != nil {
-		return abort(err, "resolve-inference")
+		return s.abort(err, "resolve-inference")
 	}
-	if !onAllowlist(endpoint.URL, profile.EgressAllowlist) {
-		return abort(fmt.Errorf("resolved endpoint %q is not on the egress allowlist", endpoint.URL), "egress-check")
+	if !onAllowlist(endpoint.URL, s.profile.EgressAllowlist) {
+		return s.abort(fmt.Errorf("resolved endpoint %q is not on the egress allowlist", endpoint.URL), "egress-check")
 	}
-	if err := stamp("inference-resolved", endpoint.URL); err != nil {
-		return abort(err, "inference-evidence")
+	s.endpoint = endpoint
+	if err := s.stamp("inference-resolved", endpoint.URL); err != nil {
+		return s.abort(err, "inference-evidence")
 	}
 
 	// 4b. Narrow the sandbox's egress to exactly the resolved endpoint — the perimeter is
@@ -252,11 +256,11 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	// to the subscription endpoint). Approved registry/MCP destinations fold into this
 	// allowlist in later phases; for the single-lane PoC the inference endpoint is the only
 	// permitted destination. ApplyEgressPolicy enforces narrow-only at the boundary.
-	if err := o.Cloud.ApplyEgressPolicy(ctx, sandbox, interfaces.EgressPolicy{Allowlist: []string{endpoint.URL}}); err != nil {
-		return abort(err, "narrow-egress")
+	if err := o.Cloud.ApplyEgressPolicy(s.ctx, s.sandbox, interfaces.EgressPolicy{Allowlist: []string{endpoint.URL}}); err != nil {
+		return s.abort(err, "narrow-egress")
 	}
-	if err := stamp("egress-narrowed", endpoint.URL); err != nil {
-		return abort(err, "egress-evidence")
+	if err := s.stamp("egress-narrowed", endpoint.URL); err != nil {
+		return s.abort(err, "egress-evidence")
 	}
 
 	// 6. (subscription) Inject the user's ALREADY-VAULTED subscription token into their OWN
@@ -264,30 +268,36 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	// passes through the control plane. The seam enforces attended && single-beneficiary &&
 	// owning-sandbox.
 	if useSubscription {
-		if err := o.Broker.InjectSubscription(ctx, interfaces.SubscriptionInjection{
-			Subject:       subject,
-			SessionID:     req.SessionID,
-			Sandbox:       sandbox,
+		if err := o.Broker.InjectSubscription(s.ctx, interfaces.SubscriptionInjection{
+			Subject:       s.subject,
+			SessionID:     s.req.SessionID,
+			Sandbox:       s.sandbox,
 			Attended:      true,
 			Beneficiaries: 1,
 		}); err != nil {
-			return abort(err, "inject-subscription")
+			return s.abort(err, "inject-subscription")
 		}
-		if err := stamp("subscription-injected", sandbox.ID); err != nil {
-			return abort(err, "subscription-evidence")
+		if err := s.stamp("subscription-injected", s.sandbox.ID); err != nil {
+			return s.abort(err, "subscription-evidence")
 		}
 	}
+	return nil
+}
 
+// propose does the work, signs the resulting commit digest with the session NHI, and opens
+// the change as a PR (the only outward side-effect). Every failure path aborts.
+func (o *Orchestrator) propose(s *session) error {
 	// 7. "Do the work" → a commit digest → sign it with the session NHI (via the broker, so
 	// the key never enters the control plane). The signature is the crypto-attested output,
 	// recorded in the chain (tenet 6; ROADMAP Phase 1).
-	digest := commitDigest(req)
-	commitSig, err := o.Broker.SignSession(ctx, req.SessionID, digest)
+	s.digest = commitDigest(s.req)
+	commitSig, err := o.Broker.SignSession(s.ctx, s.req.SessionID, s.digest)
 	if err != nil {
-		return abort(err, "sign-commit")
+		return s.abort(err, "sign-commit")
 	}
-	if err := stamp("commit-signed", hex.EncodeToString(digest)); err != nil {
-		return abort(err, "commit-evidence")
+	s.commitSig = commitSig
+	if err := s.stamp("commit-signed", hex.EncodeToString(s.digest)); err != nil {
+		return s.abort(err, "commit-evidence")
 	}
 
 	// 8. PR-only exit: propose the change as a PR. The session never merges or actuates —
@@ -299,56 +309,109 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	// open with no record of it. (Residual for a real SCM provider: if the post-open
 	// confirmation cannot commit, a compensating close / idempotent reconcile is also needed;
 	// tracked for providers/scm-github.)
-	if err := stamp("pr-opening", req.Branch+" -> main"); err != nil {
-		return abort(err, "pr-intent-evidence")
+	if err := s.stamp("pr-opening", s.req.Branch+" -> main"); err != nil {
+		return s.abort(err, "pr-intent-evidence")
 	}
-	prRef, err := o.Broker.OpenPullRequest(ctx, interfaces.PullRequest{
-		Repo:  req.Repo,
-		Head:  req.Branch,
+	prRef, err := o.Broker.OpenPullRequest(s.ctx, interfaces.PullRequest{
+		Repo:  s.req.Repo,
+		Head:  s.req.Branch,
 		Base:  "main",
-		Title: "Console7 session " + string(req.SessionID),
-		Body:  "Proposed by attended author session; lineage " + string(subject) + " -> " + nhi + ".",
+		Title: "Console7 session " + string(s.req.SessionID),
+		Body:  "Proposed by attended author session; lineage " + string(s.subject) + " -> " + s.nhi + ".",
 	})
 	if err != nil {
-		return abort(err, "open-pr")
+		return s.abort(err, "open-pr")
 	}
-	if err := stamp("pr-opened", prRef.URL); err != nil {
-		return abort(err, "pr-evidence")
+	s.prRef = prRef
+	if err := s.stamp("pr-opened", prRef.URL); err != nil {
+		return s.abort(err, "pr-evidence")
+	}
+	return nil
+}
+
+// Run executes one governed task end to end, stamping a signed evidence record at every
+// lifecycle step. Any failure after the sandbox is provisioned tears it down and records a
+// session-aborted event before returning — the session never leaves a sandbox live.
+func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, error) {
+	s, err := o.prepare(ctx, req)
+	if err != nil {
+		return Summary{}, err
+	}
+	// The session's signing key lives in the broker; release it at teardown so it cannot
+	// outlive the session (registered after the identity is minted).
+	defer o.Broker.ReleaseSession(req.SessionID)
+
+	if err := s.stamp("session-start", string(s.subject)+" -> "+s.nhi); err != nil {
+		// stamp may have committed the record but failed on Stream; route through sealOrJoin so
+		// even this pre-provision terminal path anchors any committed head (a no-op if nothing was
+		// committed, since the sink cannot seal an empty chain).
+		return Summary{}, o.sealOrJoin(s.cleanupCtx, err, "at session-start")
+	}
+
+	// 4. Provision the sandbox with the profile's default-deny egress.
+	sandbox, err := o.Cloud.ProvisionSandbox(ctx, interfaces.SandboxSpec{
+		SessionID: req.SessionID,
+		Subject:   s.subject,
+		Persona:   req.Persona,
+		Egress:    interfaces.EgressPolicy{Allowlist: s.profile.EgressAllowlist},
+		// Cap the sandbox to the time REMAINING until the session deadline, not a fresh full
+		// MaxTTL: identity/SCM minting and early evidence already consumed part of the budget,
+		// so the sandbox (and any injected material) must die with the same absolute deadline
+		// the credentials were capped to, even if teardown is missed.
+		MaxTTL: time.Until(s.deadline),
+	})
+	if err != nil {
+		// No sandbox to tear down; record the failure against the chain and surface it. The
+		// session-start record is already committed, so seal a checkpoint here too (joined into
+		// the error) — this is a terminal path with committed evidence.
+		_ = s.emit(s.cleanupCtx, "session-aborted", "provision-sandbox: "+err.Error())
+		return Summary{}, o.sealOrJoin(s.cleanupCtx, fmt.Errorf("orchestrator: provision-sandbox: %w", err), "on provision failure")
+	}
+	s.sandbox = sandbox
+	if err := s.stamp("sandbox-provisioned", sandbox.ID); err != nil {
+		return Summary{}, s.abort(err, "sandbox-provisioned-evidence")
+	}
+
+	if err := o.resolveInference(s); err != nil {
+		return Summary{}, err
+	}
+	if err := o.propose(s); err != nil {
+		return Summary{}, err
 	}
 
 	// 9. Teardown. Destruction is irreversible and wipes the injected token; it uses
 	// cleanupCtx so a cancelled request cannot skip it. Record the end.
-	if err := o.Cloud.DestroySandbox(cleanupCtx, sandbox); err != nil {
+	if err := o.Cloud.DestroySandbox(s.cleanupCtx, s.sandbox); err != nil {
 		// Use the cleanup context (not the possibly-cancelled request ctx) so a sink that
 		// honours cancellation still records this teardown failure — the sandbox may be live.
-		_ = emit(cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
-		return Summary{}, o.sealOrJoin(cleanupCtx, fmt.Errorf("orchestrator: destroy-sandbox: %w", err), "on destroy failure")
+		_ = s.emit(s.cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
+		return Summary{}, o.sealOrJoin(s.cleanupCtx, fmt.Errorf("orchestrator: destroy-sandbox: %w", err), "on destroy failure")
 	}
 	// The terminal session-end record has the same cancellation-resilience requirement as the
 	// abort record: teardown already succeeded on cleanupCtx, so a cancelled request must not
 	// drop the close-out evidence. Emit it on cleanupCtx (and count it). Even if this per-record
 	// close-out fails (e.g. the session signer passed its deadline), seal the chain anyway — the
 	// long-lived sink signer can still anchor the head — and surface both errors.
-	if err := emit(cleanupCtx, "session-end", string(req.SessionID)); err != nil {
-		return Summary{}, o.sealOrJoin(cleanupCtx, err, "at session-end")
+	if err := s.emit(s.cleanupCtx, "session-end", string(req.SessionID)); err != nil {
+		return Summary{}, o.sealOrJoin(s.cleanupCtx, err, "at session-end")
 	}
-	records++
+	s.records++
 
 	// Seal a sink-signed checkpoint over the final chain head so every completed session ends
 	// with a fresh, sink-attested close-out (no-op if the sink does not support sealing).
-	if err := o.sealOrJoin(cleanupCtx, nil, "at session-end"); err != nil {
+	if err := o.sealOrJoin(s.cleanupCtx, nil, "at session-end"); err != nil {
 		return Summary{}, err
 	}
 
 	return Summary{
-		Subject:      subject,
-		NHI:          nhi,
-		Sandbox:      sandbox,
-		Inference:    endpoint,
-		PR:           prRef,
-		CommitDigest: digest,
-		CommitSig:    commitSig,
-		Records:      records,
+		Subject:      s.subject,
+		NHI:          s.nhi,
+		Sandbox:      s.sandbox,
+		Inference:    s.endpoint,
+		PR:           s.prRef,
+		CommitDigest: s.digest,
+		CommitSig:    s.commitSig,
+		Records:      s.records,
 	}, nil
 }
 
