@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+#
+# Console7 GCP bootstrap — the one-time, human-actuated setup the deploy module (../)
+# and the keyless CD pipeline depend on. Run it with YOUR OWN gcloud auth: per ADR-0002,
+# creating the project, linking billing, and establishing the CD identities is the
+# human-authority bootstrap act, never something the module does.
+#
+# Idempotent. Provisions ONLY the substrate the current deploy module needs:
+#   - enables the required Google APIs
+#   - creates a versioned, private GCS bucket for Terraform state
+#   - creates a Workload Identity Federation pool + GitHub OIDC provider, restricted at
+#     the PROVIDER level to a single owner/repo (keyless CD — no SA key; tenet 5)
+#   - creates TWO least-privilege identities, mirroring tenet 6 (observe != actuate):
+#       * PLAN  — read-only (project viewer + IAM read + state read), impersonable from
+#         ANY branch, for the PR `terraform plan` that posts the effect diff;
+#       * APPLY — admin-grade for the resources the modules provision, impersonable
+#         ONLY from the default branch (refs/heads/<branch>), so a human merge to that
+#         branch is the precondition for any actuation. The apply roles are only what
+#         the CURRENT module provisions; later module PRs extend them — never ahead.
+#
+# Stores no secret and prints no credential. See ./README.md.
+
+set -euo pipefail
+
+# --- defaults (override via flags/env) ------------------------------------------------
+REGION="${REGION:-us-east4}"
+NAME_PREFIX="${NAME_PREFIX:-console7}"
+POOL_ID="${POOL_ID:-console7-pool}"
+PROVIDER_ID="${PROVIDER_ID:-github}"
+PLAN_SA_ID="${PLAN_SA_ID:-console7-plan}"
+APPLY_SA_ID="${APPLY_SA_ID:-console7-apply}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+PROJECT_ID="${PROJECT_ID:-}"
+GITHUB_REPO="${GITHUB_REPO:-}"
+STATE_BUCKET="${STATE_BUCKET:-}"
+BILLING_ACCOUNT="${BILLING_ACCOUNT:-}"
+CREATE_PROJECT="false"
+
+usage() {
+  cat <<'USAGE'
+Usage: bootstrap.sh --project <ID> --github-repo <owner/repo> [options]
+
+Required:
+  --project        <ID>          target GCP project (must already exist unless --create-project)
+  --github-repo    <owner/repo>  the GitHub repo allowed to impersonate the CD identities (WIF)
+
+Options:
+  --region          <region>     default: us-east4
+  --state-bucket    <name>       default: <project>-tfstate
+  --name-prefix     <prefix>     default: console7
+  --default-branch  <branch>     branch the APPLY identity is locked to; default: main
+  --create-project               create the project first (requires --billing-account)
+  --billing-account <ID>         billing account to link when creating the project
+  -h, --help                     show this help
+
+All actions are idempotent. Run with your own gcloud auth (gcloud auth login).
+USAGE
+}
+
+# --- arg parsing ----------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project)         PROJECT_ID="$2"; shift 2 ;;
+    --github-repo)     GITHUB_REPO="$2"; shift 2 ;;
+    --region)          REGION="$2"; shift 2 ;;
+    --state-bucket)    STATE_BUCKET="$2"; shift 2 ;;
+    --name-prefix)     NAME_PREFIX="$2"; shift 2 ;;
+    --default-branch)  DEFAULT_BRANCH="$2"; shift 2 ;;
+    --create-project)  CREATE_PROJECT="true"; shift ;;
+    --billing-account) BILLING_ACCOUNT="$2"; shift 2 ;;
+    -h|--help)         usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+[[ -n "$PROJECT_ID"  ]] || { echo "error: --project is required" >&2; usage; exit 2; }
+[[ -n "$GITHUB_REPO" ]] || { echo "error: --github-repo is required" >&2; usage; exit 2; }
+# Validate inputs against their naming charsets — also closes any interpolation into
+# the gcloud command strings (GitHub/GCP names can't contain quotes, but assert it).
+[[ "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+  || { echo "error: --github-repo must be owner/repo (alphanumerics, '.', '_', '-')" >&2; exit 2; }
+[[ "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] \
+  || { echo "error: --project must be a valid GCP project ID" >&2; exit 2; }
+[[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9_./-]+$ ]] \
+  || { echo "error: --default-branch has invalid characters" >&2; exit 2; }
+STATE_BUCKET="${STATE_BUCKET:-${PROJECT_ID}-tfstate}"
+[[ "$STATE_BUCKET" =~ ^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$ ]] \
+  || { echo "error: --state-bucket is not a valid GCS bucket name" >&2; exit 2; }
+
+PLAN_SA_EMAIL="${PLAN_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+APPLY_SA_EMAIL="${APPLY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+command -v gcloud >/dev/null || { echo "error: gcloud not found on PATH" >&2; exit 1; }
+gcloud auth list --filter=status:ACTIVE --format='value(account)' | grep -q . \
+  || { echo "error: no active gcloud account — run 'gcloud auth login'" >&2; exit 1; }
+
+log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+# Idempotent project-IAM grant for a service account.
+grant_project_role() {
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$1" --role="$2" --condition=None >/dev/null
+}
+# Idempotent WIF impersonation grant (member = a principalSet).
+grant_impersonation() {
+  gcloud iam service-accounts add-iam-policy-binding "$1" \
+    --project="$PROJECT_ID" --role="roles/iam.workloadIdentityUser" \
+    --member="$2" --condition=None >/dev/null
+}
+
+# --- 1. project (optional) ------------------------------------------------------------
+if [[ "$CREATE_PROJECT" == "true" ]]; then
+  [[ -n "$BILLING_ACCOUNT" ]] || { echo "error: --create-project requires --billing-account" >&2; exit 2; }
+  if gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1; then
+    log "project $PROJECT_ID already exists — skipping create"
+  else
+    log "creating project $PROJECT_ID"
+    gcloud projects create "$PROJECT_ID"
+  fi
+  if [[ "$(gcloud billing projects describe "$PROJECT_ID" --format='value(billingEnabled)' 2>/dev/null)" == "True" ]]; then
+    log "billing already enabled — skipping link"
+  else
+    log "linking billing account $BILLING_ACCOUNT"
+    gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT"
+  fi
+else
+  gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1 \
+    || { echo "error: project $PROJECT_ID not found (use --create-project to create it)" >&2; exit 1; }
+fi
+
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+POOL_PRINCIPAL="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}"
+
+# --- 2. APIs --------------------------------------------------------------------------
+log "enabling required APIs"
+gcloud services enable \
+  cloudkms.googleapis.com \
+  iam.googleapis.com \
+  iamcredentials.googleapis.com \
+  sts.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  storage.googleapis.com \
+  --project="$PROJECT_ID"
+# secretmanager.googleapis.com is enabled with the providers/secrets-gcp PR.
+
+# --- 3. Terraform state bucket --------------------------------------------------------
+if gcloud storage buckets describe "gs://${STATE_BUCKET}" >/dev/null 2>&1; then
+  log "state bucket gs://${STATE_BUCKET} already exists — skipping create"
+else
+  log "creating state bucket gs://${STATE_BUCKET}"
+  gcloud storage buckets create "gs://${STATE_BUCKET}" \
+    --project="$PROJECT_ID" \
+    --location="$REGION" \
+    --uniform-bucket-level-access \
+    --public-access-prevention
+fi
+gcloud storage buckets update "gs://${STATE_BUCKET}" --versioning
+
+# --- 4. Workload Identity Federation (keyless CD) -------------------------------------
+if gcloud iam workload-identity-pools describe "$POOL_ID" \
+     --project="$PROJECT_ID" --location=global >/dev/null 2>&1; then
+  log "WIF pool $POOL_ID already exists — skipping create"
+else
+  log "creating WIF pool $POOL_ID"
+  gcloud iam workload-identity-pools create "$POOL_ID" \
+    --project="$PROJECT_ID" --location=global \
+    --display-name="Console7 CD"
+fi
+
+if gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
+     --project="$PROJECT_ID" --location=global \
+     --workload-identity-pool="$POOL_ID" >/dev/null 2>&1; then
+  log "WIF provider $PROVIDER_ID already exists — updating its repo restriction"
+  PROVIDER_VERB="update-oidc"
+else
+  log "creating WIF GitHub OIDC provider $PROVIDER_ID (restricted to $GITHUB_REPO)"
+  PROVIDER_VERB="create-oidc"
+fi
+# repository  -> used by the any-branch PLAN binding
+# repository_ref (repo@ref) -> used by the branch-locked APPLY binding
+gcloud iam workload-identity-pools providers "$PROVIDER_VERB" "$PROVIDER_ID" \
+  --project="$PROJECT_ID" --location=global \
+  --workload-identity-pool="$POOL_ID" \
+  --display-name="GitHub Actions" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_ref=assertion.repository + '@' + assertion.ref" \
+  --attribute-condition="assertion.repository == '${GITHUB_REPO}'"
+
+# --- 5. CD identities -----------------------------------------------------------------
+for sa in "$PLAN_SA_ID:Console7 keyless CD plan identity (read-only)" \
+          "$APPLY_SA_ID:Console7 keyless CD apply identity (default-branch only)"; do
+  sa_id="${sa%%:*}"; sa_desc="${sa#*:}"
+  sa_email="${sa_id}@${PROJECT_ID}.iam.gserviceaccount.com"
+  if gcloud iam service-accounts describe "$sa_email" --project="$PROJECT_ID" >/dev/null 2>&1; then
+    log "SA $sa_email already exists — skipping create"
+  else
+    log "creating SA $sa_email"
+    gcloud iam service-accounts create "$sa_id" --project="$PROJECT_ID" --display-name="$sa_desc"
+  fi
+done
+
+# --- 6. impersonation: PLAN = any branch; APPLY = default branch only -----------------
+log "binding PLAN identity to ${GITHUB_REPO} (any branch, read-only)"
+grant_impersonation "$PLAN_SA_EMAIL" \
+  "${POOL_PRINCIPAL}/attribute.repository/${GITHUB_REPO}"
+
+log "binding APPLY identity to ${GITHUB_REPO}@refs/heads/${DEFAULT_BRANCH} only"
+grant_impersonation "$APPLY_SA_EMAIL" \
+  "${POOL_PRINCIPAL}/attribute.repository_ref/${GITHUB_REPO}@refs/heads/${DEFAULT_BRANCH}"
+
+# --- 7. least-privilege roles ---------------------------------------------------------
+log "granting PLAN identity read-only roles"
+grant_project_role "$PLAN_SA_EMAIL" "roles/viewer"
+grant_project_role "$PLAN_SA_EMAIL" "roles/iam.securityReviewer" # read IAM policies (plan refresh)
+gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
+  --member="serviceAccount:${PLAN_SA_EMAIL}" --role="roles/storage.objectViewer"
+
+log "granting APPLY identity least-privilege roles for the current module"
+grant_project_role "$APPLY_SA_EMAIL" "roles/cloudkms.admin"
+grant_project_role "$APPLY_SA_EMAIL" "roles/iam.serviceAccountAdmin"
+# State read/write is scoped to the state bucket only, not project-wide storage admin.
+gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
+  --member="serviceAccount:${APPLY_SA_EMAIL}" --role="roles/storage.objectAdmin"
+
+# --- outputs --------------------------------------------------------------------------
+WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
+cat <<EOF
+
+==> bootstrap complete. Wire these into the adopter config repo (no secrets):
+
+  project_id              : ${PROJECT_ID}
+  region                  : ${REGION}
+  terraform state bucket  : ${STATE_BUCKET}
+  WIF provider (GH OIDC)  : ${WIF_PROVIDER}
+  PLAN  identity (PRs)    : ${PLAN_SA_EMAIL}    [read-only, any branch]
+  APPLY identity (merge)  : ${APPLY_SA_EMAIL}   [admin, refs/heads/${DEFAULT_BRANCH} only]
+
+  GitHub Actions (google-github-actions/auth, keyless):
+    - PR plan job  -> service_account: ${PLAN_SA_EMAIL}
+    - apply job (on ${DEFAULT_BRANCH}, ideally a protected environment):
+                      service_account: ${APPLY_SA_EMAIL}
+    workload_identity_provider (both): ${WIF_PROVIDER}
+
+  Terraform backend init:
+    terraform -chdir=deploy/gcp init -backend-config="bucket=${STATE_BUCKET}"
+
+Later module PRs (gke, networking, secrets-gcp) extend the APPLY identity's roles as
+their resources require — re-run this script after pulling those changes.
+EOF

@@ -1,0 +1,50 @@
+name: shellcheck (deploy)
+
+# CO-17 (code quality / lint) — lint the deploy shell scripts (bootstrap / scaffolding).
+# Scoped to deploy/ so
+# it activates with those scripts and does not entangle pre-existing shell elsewhere; a
+# repo-wide gate can broaden this later. Uses the runner's preinstalled shellcheck (no
+# third-party action), SHA-pinned checkout, least-privilege token.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: detect deploy shell
+    runs-on: ubuntu-latest
+    outputs:
+      has_sh: ${{ steps.detect.outputs.has_sh }}
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: detect
+        run: |
+          if find deploy -name '*.sh' -type f | grep -q .; then
+            echo "has_sh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_sh=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  shellcheck:
+    name: shellcheck
+    needs: detect
+    if: needs.detect.outputs.has_sh == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: shellcheck deploy/**/*.sh
+        run: |
+          shellcheck --version
+          find deploy -name '*.sh' -type f -print0 | xargs -0 shellcheck
