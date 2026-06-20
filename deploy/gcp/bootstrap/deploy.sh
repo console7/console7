@@ -72,7 +72,14 @@ log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 # --- create the adopter repo from the template ---------------------------------------
 if gh repo view "$ADOPTER_REPO" >/dev/null 2>&1; then
-  log "adopter repo $ADOPTER_REPO already exists — skipping create"
+  log "adopter repo $ADOPTER_REPO already exists — verifying it was made from the template"
+  if ! gh api "repos/${ADOPTER_REPO}/contents/.github/workflows/deploy.yml" >/dev/null 2>&1; then
+    echo "error: $ADOPTER_REPO exists but has no .github/workflows/deploy.yml — it was not" >&2
+    echo "       created from $TEMPLATE_REPO, so the keyless pipeline would not exist." >&2
+    echo "       Create it from the template (gh repo create <repo> --template $TEMPLATE_REPO)" >&2
+    echo "       or delete it, then re-run." >&2
+    exit 1
+  fi
 else
   log "creating $ADOPTER_REPO from template $TEMPLATE_REPO ($VISIBILITY)"
   gh repo create "$ADOPTER_REPO" --template "$TEMPLATE_REPO" --"$VISIBILITY"
