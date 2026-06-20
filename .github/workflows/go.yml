@@ -70,21 +70,19 @@ jobs:
         run: ./scripts/coverage-gate.sh coverage.out
 
   lint:
-    name: golangci-lint (clean-as-you-code)
+    name: golangci-lint (whole-tree)
     needs: detect
-    # Clean-as-you-code: the gate judges lines this PR changed, comparing against the
-    # base branch (--new-from-rev). The legacy baseline is grandfathered until the
-    # one-off remediation lands, after which this flips to whole-tree enforcement
-    # (Sprint 3 of the enforcement plan). It is therefore a PR-only gate — main is
-    # protected, so every change arrives through a PR check; a push-to-main re-run
-    # would have no diff base during the grandfather window.
-    if: needs.detect.outputs.has_gomod == 'true' && github.event_name == 'pull_request'
+    # Whole-tree enforcement: the entire tree must pass .golangci.yml, not just the
+    # lines a PR changed. The one-off remediation (enforcement plan Sprint 2) brought
+    # the legacy baseline to zero issues, which closed the grandfather window — so the
+    # clean-as-you-code (--new-from-merge-base) phase is retired and legacy debt can no
+    # longer creep back in under the diff filter. Runs on PR and on push (main is clean,
+    # so a push-to-main re-run is meaningful, not spuriously red).
+    if: needs.detect.outputs.has_gomod == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0 # full history so the base revision is reachable for the diff
 
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
@@ -97,18 +95,5 @@ jobs:
         # govulncheck job (dep-scan.yml). Pin the version; do not float to latest.
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
-      - name: Lint changed lines (vs merge-base)
-        # base_ref is the PR target branch; route it through env rather than inlining
-        # the ${{ }} expression into the shell (script-injection hygiene / actionlint).
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          git fetch --no-tags origin "$BASE_REF"
-          if ! git rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null; then
-            echo "::error::base ref origin/$BASE_REF not resolvable after fetch"
-            exit 1
-          fi
-          # --new-from-merge-base diffs against the common ancestor, so the gate judges
-          # exactly the lines this PR added — not unrelated churn that landed on the
-          # base branch after the PR was cut (which --new-from-rev would fold in).
-          golangci-lint run --new-from-merge-base="origin/$BASE_REF" ./...
+      - name: Lint (whole tree)
+        run: golangci-lint run ./...
