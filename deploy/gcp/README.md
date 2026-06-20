@@ -39,9 +39,9 @@ supply-chain pin).
 
 ## Notes
 
-- **IaC gate:** `terraform fmt`/`validate` + **tfsec** in CI (SHA-pinned actions,
-  pinned tool versions). Standalone tfsec is being folded into Trivy upstream; swap the
-  CI step to `trivy config` if a maintained engine is preferred — same rule set.
+- **IaC gate:** `terraform fmt`/`validate` + **Trivy config** misconfiguration scan in
+  CI (SHA-pinned actions, pinned tool versions). Trivy is the maintained successor to
+  tfsec (same Terraform check set).
 - **Secret-access scoping:** the workload SA is granted `secretmanager.secretAccessor`
   **scoped by IAM condition to Console7-managed secrets** (name prefix) and **no
   human/group** is granted any read path — the `SecretsProvider` "no operator read

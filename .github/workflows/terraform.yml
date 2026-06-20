@@ -1,11 +1,10 @@
-name: terraform (fmt · validate · tfsec)
+name: terraform (fmt · validate · trivy)
 
 # CO-05 / CO-12.7 — IaC quality + security gate for deploy/ Terraform. Per CLAUDE.md
 # and the SDLC standard: SHA-pinned actions, least privilege, pinned tool versions.
 # Guarded on the presence of deploy/gcp/*.tf so it activates when the module lands and
-# skips cleanly otherwise. Note: standalone tfsec is being folded into Trivy upstream;
-# swap the tfsec step to `trivy config` for a maintained engine (same rule set) — see
-# deploy/gcp/README.md.
+# skips cleanly otherwise. Misconfiguration scanning uses Trivy config — the maintained
+# successor to tfsec (same Terraform check set).
 
 on:
   pull_request:
@@ -36,7 +35,7 @@ jobs:
           fi
 
   terraform:
-    name: fmt · validate · tfsec
+    name: fmt · validate · trivy
     needs: detect
     if: needs.detect.outputs.has_tf == 'true'
     runs-on: ubuntu-latest
@@ -61,8 +60,11 @@ jobs:
       - name: validate
         run: terraform -chdir=deploy/gcp validate
 
-      - name: tfsec
-        uses: aquasecurity/tfsec-action@b466648d6e39e7c75324f25d83891162a721f2d6 # v1.0.3
+      - name: trivy config
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          working_directory: deploy/gcp
-          soft_fail: false
+          scan-type: config
+          scan-ref: deploy/gcp
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "1"
+          hide-progress: true
