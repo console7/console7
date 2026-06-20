@@ -238,9 +238,20 @@ func (s *Sink) sealLocked(ctx context.Context) (Checkpoint, error) {
 		CheckpointedAt: time.Now().UTC(),
 		PrevCkptHash:   prev,
 	}
-	sig, err := s.signer.SignCheckpoint(ctx, checkpointTBS(ckpt))
+	tbs := checkpointTBS(ckpt)
+	sig, err := s.signer.SignCheckpoint(ctx, tbs)
 	if err != nil {
 		return Checkpoint{}, err
+	}
+	// Fail closed if the external signer (an out-of-process seam) returned a signature this
+	// sink's own verifier would later reject — a miswired/compromised signer must NOT yield a
+	// checkpoint the orchestrator can report as a "successful" seal. The sink already holds the
+	// CA root and its expected identity, so it validates before committing.
+	if sig.SinkID != s.sinkID {
+		return Checkpoint{}, fmt.Errorf("evidence: checkpoint signer returned sink id %q, want %q", sig.SinkID, s.sinkID)
+	}
+	if err := signing.VerifySinkSignature(s.caRoot, tbs, sig); err != nil {
+		return Checkpoint{}, fmt.Errorf("evidence: checkpoint signature does not verify, refusing to commit it: %w", err)
 	}
 	ckpt.Sig = sig
 	s.checkpoints = append(s.checkpoints, ckpt)
