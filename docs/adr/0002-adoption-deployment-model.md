@@ -75,11 +75,14 @@ by reviewed version bump; deploy-time dependency only.** Concretely:
    Console7 development run *on* Console7 — is **not sanctioned by the mission as
    written**, even though it satisfies the deeper trust principle (tenet 1: the
    adopter's *tenancy* is the boundary, and a self-hosted box is the adopter's tenancy).
-   Admitting it is therefore a **scope decision requiring an explicit normative
-   amendment** (the mission and `ARCHITECTURE.md` §4), which belongs to the forthcoming
-   **ADR-0003**, not here. This ADR deliberately neither adopts nor blocks a cloudless
-   target; it only guarantees the consume/refresh mechanism will not need rework when
-   ADR-0003 decides. *(See Open Items.)*
+   *How* to admit it is therefore a **scope decision for the forthcoming ADR-0003** —
+   either an explicit normative amendment (the mission and `ARCHITECTURE.md` §4), or
+   admitting it as an **out-of-tree community extension** under the existing ecosystem
+   route (`ARCHITECTURE.md` §6.1, tenet 9 pluggability), which needs no mission change
+   since core would still ship only cloud targets. This ADR deliberately neither adopts
+   nor blocks a cloudless target, and does not prescribe which route ADR-0003 takes; it
+   only guarantees the consume/refresh mechanism will not need rework either way.
+   *(See Open Items.)*
 
 4. **Keyless cloud CD (cloud path only).** Cloud deploy pipelines authenticate to the
    adopter's cloud via **Workload Identity Federation** — the pipeline's OIDC token is
@@ -167,13 +170,16 @@ by reviewed version bump; deploy-time dependency only.** Concretely:
 - **Concurrent cloudless deployment workstream → ADR-0003.** A separate workstream is
   designing a local single-host (cloudless) target so Console7 development can run on a
   Console7 MVP without cloud compute cost. Admitting that target is **out of scope for
-  this ADR** and requires an **explicit normative amendment** — the mission's "entirely
-  inside the adopter's own cloud" and `ARCHITECTURE.md` §4 currently sanction cloud
-  targets only (a self-hosted target honours tenet 1's *tenancy* boundary but not the
-  mission text). That amendment, and the target's topology/provider-set/bootstrap,
-  belong to **ADR-0003** (the next free ADR number — two windows must not both author
-  `0002` or edit the same `deploy/` subtree). This ADR's mechanism is designed to
-  accommodate that outcome without rework; it does not presume it.
+  this ADR**; *how* to admit it is ADR-0003's to decide — either an explicit normative
+  amendment (the mission's "entirely inside the adopter's own cloud" and
+  `ARCHITECTURE.md` §4 sanction cloud targets only, though a self-hosted target honours
+  tenet 1's *tenancy* boundary), or treating it as an **out-of-tree community
+  extension** under the existing ecosystem route (`ARCHITECTURE.md` §6.1, tenet 9), in
+  which case core still ships only cloud targets and no mission change is needed. Either
+  way, the target's topology/provider-set/bootstrap belong to **ADR-0003** (the next
+  free ADR number — two windows must not both author `0002` or edit the same `deploy/`
+  subtree). This ADR's mechanism accommodates whichever route ADR-0003 picks, without
+  rework; it does not presume one.
 - **Refresh automation + signature verification** (Renovate bumps, `cosign verify`,
   SLSA provenance checks in the adopter pipeline) attach to the signed-release work
   (`ROADMAP.md` Phase 1 open-source milestones / Phase 4–5) once signed releases exist.
