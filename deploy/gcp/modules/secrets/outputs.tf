@@ -4,7 +4,7 @@ output "workload_service_account_email" {
 }
 
 output "kms_crypto_key_id" {
-  description = "Resource ID of the Secret Manager CMEK."
+  description = "Resource ID of the secrets KEK (the key-encryption key the provider wraps per-user DEKs with)."
   value       = google_kms_crypto_key.secrets.id
 }
 

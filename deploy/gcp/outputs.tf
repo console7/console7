@@ -4,6 +4,6 @@ output "secrets_workload_service_account_email" {
 }
 
 output "secrets_kms_crypto_key_id" {
-  description = "Resource ID of the Secret Manager CMEK."
+  description = "Resource ID of the secrets KEK (key-encryption key for provider-side per-user-DEK envelope encryption)."
   value       = module.secrets.kms_crypto_key_id
 }

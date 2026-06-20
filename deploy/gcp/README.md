@@ -16,14 +16,15 @@ module serves both new-project and existing-project adopters.
 
 | Path | Status | Provisions |
 |---|---|---|
-| `modules/secrets/` | **active** | KMS key ring + CMEK, least-privilege workload SA for `SecretsProvider` |
+| `modules/secrets/` | **active** | KMS key ring + KEK + least-privilege workload SA (`SecretsProvider` substrate) |
 | `modules/networking/` | stub | default-deny egress perimeter (boundary-first sandbox PR) |
 | `modules/gke/` | stub | gVisor node pool + Workload Identity (binds the secrets SA) |
 | `modules/evidence/` | stub | GCS bucket-lock WORM behind the evidence `Store` seam |
 
 ## Prerequisites (bootstrap, not this module)
 
-- The `cloudkms.googleapis.com` and `secretmanager.googleapis.com` APIs enabled.
+- The `cloudkms.googleapis.com` API enabled (`secretmanager.googleapis.com` is enabled
+  with the `providers/secrets-gcp` PR).
 - A GCS bucket for Terraform state, supplied at init via `-backend-config`.
 
 ## Use (until the adopter template repo lands)
@@ -42,12 +43,14 @@ supply-chain pin).
 - **IaC gate:** `terraform fmt`/`validate` + **Trivy config** misconfiguration scan in
   CI (SHA-pinned actions, pinned tool versions). Trivy is the maintained successor to
   tfsec (same Terraform check set).
-- **Secret-access scoping:** the workload SA is granted `secretmanager.secretAccessor`
-  **scoped by IAM condition to Console7-managed secrets** (name prefix) and **no
-  human/group** is granted any read path — the `SecretsProvider` "no operator read
-  path" property holds for humans/groups by construction. The IAM condition uses the
-  project number and is verified against the live project at first apply.
+- **KEK, not a Secret Manager CMEK:** the workload SA holds encrypt/decrypt on the KEK
+  and uses it for **provider-side** per-user-DEK envelope encryption — the SA, not the
+  Secret Manager service agent, is the key consumer. **No human/group** holds any secret
+  read path, so the `SecretsProvider` "no operator read path" property holds for
+  humans/groups by construction.
 - **Deferred by design (not dropped):** project/billing creation (human bootstrap), API
-  enablement (bootstrap), per-user keys/secrets (runtime provider code), and the GKE
-  Workload Identity binding of the secrets SA (the `gke` module — it needs the cluster
-  KSA, so the module only *outputs* the SA email to avoid a dangling reference).
+  enablement (bootstrap), per-user keys/secrets (runtime provider code), the GKE Workload
+  Identity binding of the secrets SA (the `gke` module — needs the cluster KSA, so the
+  module only *outputs* the SA email), and **the provider's Secret Manager role bindings**
+  (read + create/add-version/destroy) — those land **atomically with
+  `providers/secrets-gcp`**, not guessed here ahead of the provider.
