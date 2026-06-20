@@ -253,7 +253,7 @@ func TestAppend_FailsClosedOnStoreError(t *testing.T) {
 }
 
 // errSigner is a CheckpointSigner that always fails, to prove a seal failure does not
-// un-commit or corrupt an already-committed record.
+// un-commit or corrupt an already-committed record, and is surfaced at the authoritative Seal.
 type errSigner struct{}
 
 func (errSigner) SinkID() string { return "err-signer" }
@@ -261,17 +261,19 @@ func (errSigner) SignCheckpoint(context.Context, []byte) (signing.SinkSignature,
 	return signing.SinkSignature{}, errors.New("simulated signer fault")
 }
 
-func TestAppend_FailsClosedOnSignerError(t *testing.T) {
+func TestAppend_SignerFailureKeepsRecordAndSurfacesAtSeal(t *testing.T) {
 	ca := signing.NewDevCA()
-	// ckptEvery=1 forces an in-line seal on every append, so the failing signer is exercised on
-	// the Append path.
+	// ckptEvery=1 forces a due in-line seal on every append, so the failing signer is exercised
+	// on the Append path.
 	s := New(newMemStore(), errSigner{}, ca.Root(), 1)
 
 	ref, err := s.Append(context.Background(), rec("e", time.Unix(0, 0).UTC(), "p"))
-	if err == nil {
-		t.Fatal("expected Append to surface the checkpoint-seal failure")
+	// Append's error contract: a non-nil error means NOT committed. A post-commit seal failure
+	// must NOT be reported as an append error (callers would skip Stream for a committed record).
+	if err != nil {
+		t.Fatalf("Append must succeed once the record is committed, got: %v", err)
 	}
-	// The record itself must remain committed and chained — losing it would violate "never drop".
+	// The record is committed and chained — losing it would violate "never drop".
 	if s.count != 1 {
 		t.Errorf("record was dropped on a seal failure: count=%d, want 1", s.count)
 	}
@@ -283,6 +285,10 @@ func TestAppend_FailsClosedOnSignerError(t *testing.T) {
 	}
 	if len(s.checkpoints) != 0 {
 		t.Errorf("a failed seal must not append a partial checkpoint, got %d", len(s.checkpoints))
+	}
+	// The persistent signer failure surfaces at the authoritative Seal (e.g. session-end).
+	if err := s.Seal(context.Background()); err == nil {
+		t.Error("expected Seal to surface the persistent signer failure")
 	}
 }
 
@@ -343,5 +349,71 @@ func TestAppend_PeriodicCheckpointCadence(t *testing.T) {
 	}
 	if err := s.VerifyCheckpoints(caRoot, s.SinkID()); err != nil {
 		t.Errorf("periodic checkpoints do not verify: %v", err)
+	}
+}
+
+func TestVerify_RejectsUnsealedTail(t *testing.T) {
+	s, _ := newTestSink(t, 0)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if _, err := s.Append(ctx, rec("e", time.Unix(int64(i), 0).UTC(), "p")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Records appended but never sealed: the full Verify (unbroken AND sealed) must reject it,
+	// even though the prefix-only checks pass.
+	if err := s.Verify(); err == nil {
+		t.Error("Verify accepted a non-empty log with no checkpoint sealing the head")
+	}
+	if err := s.VerifyChain(); err != nil {
+		t.Errorf("VerifyChain (prefix-only) should still pass: %v", err)
+	}
+	if err := s.VerifyCheckpoints(s.caRoot, s.SinkID()); err != nil {
+		t.Errorf("VerifyCheckpoints (prefix-only) should still pass: %v", err)
+	}
+	// After sealing the head, the full Verify passes.
+	if err := s.Seal(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Verify(); err != nil {
+		t.Errorf("Verify after sealing the head: %v", err)
+	}
+	// A further append leaves an unsealed tail past the last checkpoint → Verify rejects again.
+	if _, err := s.Append(ctx, rec("more", time.Unix(9, 0).UTC(), "p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Verify(); err == nil {
+		t.Error("Verify accepted an unsealed tail appended after the last checkpoint")
+	}
+}
+
+func TestNew_HydratesFromNonEmptyStore(t *testing.T) {
+	ca := signing.NewDevCA()
+	signer, _ := signing.NewSinkSigner(ca, "resume-sink")
+	store := newMemStore()
+	ctx := context.Background()
+
+	s1 := New(store, signer, ca.Root(), 0)
+	for i := 0; i < 3; i++ {
+		if _, err := s1.Append(ctx, rec("e", time.Unix(int64(i), 0).UTC(), "p")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A fresh sink over the SAME populated store (a process restart). Without hydration its next
+	// Append would collide with the next-sequence-only store at sequence 0.
+	s2 := New(store, signer, ca.Root(), 0)
+	if s2.Len() != 3 {
+		t.Fatalf("resumed sink Len = %d, want 3", s2.Len())
+	}
+	ref, err := s2.Append(ctx, rec("resumed", time.Unix(3, 0).UTC(), "p"))
+	if err != nil {
+		t.Fatalf("resumed Append failed (head/count not hydrated): %v", err)
+	}
+	if ref.Sequence != 3 {
+		t.Errorf("resumed append at sequence %d, want 3", ref.Sequence)
+	}
+	// The hash chain continues unbroken across the construction boundary.
+	if err := s2.VerifyChain(); err != nil {
+		t.Errorf("chain broken across resume: %v", err)
 	}
 }

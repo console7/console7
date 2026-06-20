@@ -81,18 +81,37 @@ type Sink struct {
 // New returns a Sink committing through store and sealing checkpoints through signer. caRoot
 // is the trust anchor Verify pins. A nil store or signer is a construction error surfaced on
 // first Append/Seal. ckptEvery<=0 produces checkpoints only on Seal.
+//
+// If store already holds records (e.g. a durable Store after a process restart), New hydrates
+// the in-memory chain head/sequence/count from it, so the next Append continues the existing
+// log rather than colliding with the next-sequence-only store at sequence 0. NOTE: the
+// checkpoint log is NOT persisted in the Store this phase (checkpoints are an in-memory
+// parallel log), so a resumed sink starts a FRESH checkpoint chain over the hydrated head;
+// durable checkpoint persistence/resume is a providers/evidence-gcs concern (see doc.go). A
+// fallible durable Store should add a context-taking, erroring constructor there; New uses a
+// background context and best-effort hydration because the in-memory store cannot fault.
 func New(store Store, signer CheckpointSigner, caRoot ed25519.PublicKey, ckptEvery int) *Sink {
 	var sinkID string
 	if signer != nil {
 		sinkID = signer.SinkID()
 	}
-	return &Sink{
+	s := &Sink{
 		store:     store,
 		signer:    signer,
 		caRoot:    append(ed25519.PublicKey(nil), caRoot...),
 		sinkID:    sinkID,
 		ckptEvery: ckptEvery,
 	}
+	if store != nil {
+		if n, err := store.Len(context.Background()); err == nil && n > 0 {
+			if last, ok, err := store.At(context.Background(), n-1); err == nil && ok {
+				s.head = cloneBytes(last.Ref.Hash)
+				s.headSeq = last.Ref.Sequence
+				s.count = n
+			}
+		}
+	}
+	return s
 }
 
 // NewInMemory is the bench/conformance convenience: a Sink over an in-memory Store. The real
@@ -108,9 +127,13 @@ func NewInMemory(signer CheckpointSigner, caRoot ed25519.PublicKey, ckptEvery in
 // advancing any in-memory state (so a durability fault fails closed without a half-written
 // chain), and — if a periodic checkpoint is due — seals the new head.
 //
-// On a periodic-checkpoint SEAL failure, Append returns the committed RecordRef AND a non-nil
-// error: the record is ALREADY durably committed (it is never dropped), so a caller MUST NOT
-// re-Append the same event on this error — the next Append/Seal retries the seal.
+// Append's error contract is unambiguous, matching the EvidenceSink seam: a non-nil error
+// means the record was NOT durably committed. Once the store commit succeeds, Append returns
+// success even if a DUE periodic checkpoint then fails to sign — the record is committed (and
+// must be Streamed); the unsealed tail is hash-linked and will be covered by the next
+// checkpoint, and a PERSISTENT signer failure surfaces at the authoritative session-end Seal
+// (which does return its error). Conflating a post-commit seal failure with an append failure
+// would make callers like orchestrator.appendSigned skip Stream for a record that IS committed.
 func (s *Sink) Append(ctx context.Context, rec interfaces.EvidenceRecord) (interfaces.RecordRef, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,14 +170,14 @@ func (s *Sink) Append(ctx context.Context, rec interfaces.EvidenceRecord) (inter
 
 	out := interfaces.RecordRef{Sequence: seq, Hash: cloneBytes(h), AppendedAt: appendedAt}
 
-	// A periodic checkpoint due? The record is ALREADY committed, so a seal failure must NOT
-	// un-commit or drop it (that would violate "never drop"). Instead surface the seal failure
-	// while leaving sinceCkpt so the next Append/Seal retries; the chain stays valid because an
-	// unsealed-but-chained record is still hash-linked and the next checkpoint covers it.
+	// A periodic checkpoint due? The record is ALREADY committed, so a seal failure must neither
+	// un-commit it (that would violate "never drop") nor fail the Append (that would make callers
+	// skip Stream for a committed record). It is therefore best-effort: on failure leave sinceCkpt
+	// so the next Append/Seal retries, and let the chain stay valid (an unsealed-but-chained
+	// record is hash-linked and the next checkpoint covers it). A persistent signer failure is
+	// caught at the authoritative session-end Seal, which returns its error.
 	if s.ckptEvery > 0 && s.sinceCkpt >= s.ckptEvery {
-		if _, err := s.sealLocked(ctx); err != nil {
-			return out, fmt.Errorf("evidence: record committed at sequence %d but checkpoint seal failed: %w", seq, err)
-		}
+		_, _ = s.sealLocked(ctx)
 	}
 	return out, nil
 }
