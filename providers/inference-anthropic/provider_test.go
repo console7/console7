@@ -2,6 +2,7 @@ package inferenceanthropic
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/console7/console7/sdk/interfaces"
@@ -98,6 +99,7 @@ func TestConfigNormalize_OrgGateway(t *testing.T) {
 		"http://anthropic-proxy.corp.example.com", // cleartext
 		"anthropic-proxy.corp.example.com",        // scheme-less / relative
 		"https://",                                // no host
+		"https://:443",                            // hostless authority, port only (u.Host != "" but u.Hostname() == "")
 		"://nope",                                 // malformed
 		"https://user:pass@gw.example.com",        // userinfo (credential in config)
 		"https://gw.example.com?token=x",          // query on a base URL
@@ -107,6 +109,19 @@ func TestConfigNormalize_OrgGateway(t *testing.T) {
 		t.Run("reject "+in, func(t *testing.T) {
 			if _, err := New(Config{OrgAPIBaseURL: in}); err == nil {
 				t.Fatalf("expected New to reject OrgAPIBaseURL %q", in)
+			}
+		})
+	}
+
+	// A rejected URL's error MUST NOT leak an embedded credential into a message a caller logs.
+	for _, in := range []string{"http://user:s3cr3t@gw.example.com", "https://user:s3cr3t@gw.example.com?x=1"} {
+		t.Run("no credential leak: "+in, func(t *testing.T) {
+			_, err := New(Config{OrgAPIBaseURL: in})
+			if err == nil {
+				t.Fatalf("expected New to reject %q", in)
+			}
+			if strings.Contains(err.Error(), "s3cr3t") {
+				t.Fatalf("error leaked the embedded credential: %v", err)
 			}
 		})
 	}

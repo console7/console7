@@ -39,24 +39,27 @@ func (c Config) normalize() (Config, error) {
 	}
 	u, err := url.Parse(c.OrgAPIBaseURL)
 	if err != nil {
-		return Config{}, fmt.Errorf("inferenceanthropic: Config.OrgAPIBaseURL %q is not a valid URL: %w", c.OrgAPIBaseURL, err)
+		// Do NOT echo the raw value: a malformed value may still carry userinfo a caller logs.
+		return Config{}, errors.New("inferenceanthropic: Config.OrgAPIBaseURL is not a valid URL")
 	}
-	// Require an absolute https URL with a host, no userinfo, no query/fragment: an org-API
-	// gateway should not be fronted by a cleartext, relative, or credential-bearing endpoint,
-	// and a base URL carries no query/fragment. http://, scheme-less, userinfo-bearing, and
-	// query/fragment-bearing values fail closed.
-	if !strings.EqualFold(u.Scheme, "https") {
-		return Config{}, fmt.Errorf("inferenceanthropic: Config.OrgAPIBaseURL %q must use https", c.OrgAPIBaseURL)
-	}
-	if u.Host == "" {
-		return Config{}, errors.New("inferenceanthropic: Config.OrgAPIBaseURL must be an absolute URL with a host")
-	}
+	// Reject embedded credentials FIRST, before any error echoes the value — never bake a
+	// credential into config, and never leak one into a construction error a caller logs
+	// (DESIGN.md §2.1; the provider holds no key).
 	if u.User != nil {
-		// Never bake a credential into config — the provider holds no key (DESIGN.md §2.1).
 		return Config{}, errors.New("inferenceanthropic: Config.OrgAPIBaseURL must not embed userinfo")
 	}
+	// Require an absolute https URL with a host and no query/fragment: an org-API gateway should
+	// not be fronted by a cleartext, relative, or non-base endpoint. http://, scheme-less,
+	// hostless (incl. ":443"-style authorities), and query/fragment-bearing values fail closed.
+	// Errors below echo u.Redacted() (userinfo already rejected), never the raw config string.
+	if !strings.EqualFold(u.Scheme, "https") {
+		return Config{}, fmt.Errorf("inferenceanthropic: Config.OrgAPIBaseURL %q must use https", u.Redacted())
+	}
+	if u.Hostname() == "" {
+		return Config{}, fmt.Errorf("inferenceanthropic: Config.OrgAPIBaseURL %q must be an absolute https URL with a host", u.Redacted())
+	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return Config{}, errors.New("inferenceanthropic: Config.OrgAPIBaseURL must be a base URL with no query or fragment")
+		return Config{}, fmt.Errorf("inferenceanthropic: Config.OrgAPIBaseURL %q must be a base URL with no query or fragment", u.Redacted())
 	}
 	return c, nil
 }
