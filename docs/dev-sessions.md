@@ -46,7 +46,7 @@ All others are best-effort.
 | `cost_usd` | number\|null | From the `claude -p` `result` event; best-effort/omitted for interactive. **Deliberate public disclosure** — this repo is public, so per-run and aggregate dev spend become queryable; that is intended transparency. Omit it (null) when unknown — an absent value is not a bug. |
 | `files_changed` | number\|null | |
 | `tests_added` | number\|null | |
-| `review` | object\|null | `{ "pre_pr_review": "clean\|reconciled", "codex": "pending\|reconciled\|n/a" }`. |
+| `review` | object\|null | `{ "pre_pr_review": "clean\|reconciled", "codex": "pending\|clean\|reconciled\|n/a" }`. `codex`: `pending` = fired, verdict not in yet; `clean` = ran, no findings; `reconciled` = ran, findings fixed; `n/a` = did not run. (Codex auto-fires on PR open — `n/a` is rare.) |
 | `status` | string | `open` \| `merged` \| `closed`. |
 | `notes` | string\|null | One-line public prose (e.g. residuals tracked). **No secrets, no verbatim prompt/transcript text, no internal hostnames, no absolute local paths.** |
 
@@ -61,8 +61,13 @@ All others are best-effort.
 - **Append-only.** Prefer appending a superseding entry (same `session_id`, later
   `status`) over rewriting history, so the file reads as a log. Small in-place status
   edits on a not-yet-merged entry are fine before push.
+- **`cost_usd` lives on the terminal row only.** When you supersede a row to change
+  status, carry `cost_usd` on the latest row and leave it `null` on the superseded
+  one — so a per-session sum never double-counts. (The dedup query below is robust
+  either way.)
 - **One line per JSON object**, no pretty-printing — keeps `git diff` and
   `grep`/`jq` clean.
-- Query with `jq`, e.g. total logged cost (the trailing `// 0` keeps it `0`, not
-  `null`, on an empty ledger):
-  `jq -s 'map(.cost_usd // 0) | add // 0' docs/dev-sessions.jsonl`.
+- Query with `jq`. Because a session may have multiple rows (status changes), take the
+  **last row per `session_id`** before summing; the trailing `// 0` keeps an empty
+  ledger at `0`, not `null`. Total logged cost:
+  `jq -s 'group_by(.session_id) | map(last.cost_usd // 0) | add // 0' docs/dev-sessions.jsonl`.

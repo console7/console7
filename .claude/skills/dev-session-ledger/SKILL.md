@@ -19,6 +19,12 @@ transcript content** ever go in the ledger.
 - **On merge / close** — update that entry (or append a superseding line with the same
   `session_id` and a later `status`) to `merged` / `closed`, filling `cost_usd`,
   `files_changed`, `tests_added`, and the `review` verdicts now known.
+  - **PR-safe path (you cannot commit to `main`).** By merge time the branch is often
+    already merged/deleted, so the terminal-status update **rides a *subsequent* PR** —
+    piggyback it on the *next* dev-session entry, or batch a small ledger-sweep PR.
+    An entry legitimately sitting at `status:"open"` until the next PR sweeps it is
+    **expected, not a gap**. Never commit the update straight to `main` to "finalize"
+    it.
 - Most valuable for **`claude -p` sub-claude runs** — their final `result` event
   carries `cost_usd` cleanly. For interactive sessions, cost is best-effort; omit it
   rather than guess.
@@ -26,10 +32,16 @@ transcript content** ever go in the ledger.
 
 ## How to log
 
-1. **Find the `session_id`** (the join key back to the raw transcript). It is the
-   filename UUID of the current session's transcript under the harness project dir
-   (`~/.claude/projects/<project-slug>/<uuid>.jsonl`) — the most recently modified one
-   for an interactive run — or the sub-claude's own UUID for a `claude -p` run.
+1. **Find the `session_id`** (the join key back to the raw transcript) **with an
+   explicit identifier, not an mtime guess.** Picking "the most recently modified
+   `*.jsonl`" is unsafe — a parallel session, a second worktree, or a reviewer session
+   can be the newest writer, so you'd record the wrong run's UUID.
+   - **`claude -p` sub-claude:** use the UUID you **assigned** at spawn
+     (`--session-id "$SUB_UUID"`). Unambiguous.
+   - **Interactive run:** use the harness's reported current-session id. If you must
+     locate the transcript under `~/.claude/projects/<project-slug>/`, **confirm it by
+     a unique marker from this session** (e.g. `grep -l "<this branch name>" *.jsonl`),
+     never by mtime alone.
 2. **Append one line** to `docs/dev-sessions.jsonl` matching the schema in
    `docs/dev-sessions.md`. Required: `session_id`, `date`, `branch`, `status`. Record
    `model` to mirror the commit `Co-Authored-By` trailer. One compact JSON object per
