@@ -259,11 +259,20 @@ func (s *Sink) sealLocked(ctx context.Context) (Checkpoint, error) {
 	// this sink last wrote, sealing the old head would sign only a prefix and report success
 	// while the latest records stay unsealed. Fail (do not commit a checkpoint) if the head
 	// cannot be read.
+	if s.store == nil || s.signer == nil {
+		return Checkpoint{}, errors.New("evidence: cannot seal — sink is not fully constructed (nil store or signer)")
+	}
 	if err := s.refreshFromStoreLocked(ctx); err != nil {
 		return Checkpoint{}, err
 	}
 	if s.count == 0 {
 		return Checkpoint{}, nil
+	}
+	// Fail closed rather than commit an UNATTRIBUTED checkpoint: an external signer that reports
+	// an empty SinkID would otherwise produce a seal that "verifies" against a pinned "" identity
+	// but names no concrete sink. (NewSinkSigner already rejects empty IDs; this guards the seam.)
+	if s.sinkID == "" {
+		return Checkpoint{}, errors.New("evidence: refusing to seal a checkpoint with an empty sink identity")
 	}
 	var prev []byte
 	if n := len(s.checkpoints); n > 0 {
