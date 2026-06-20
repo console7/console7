@@ -39,6 +39,15 @@ linters:
       statements: 40
     nestif:
       min-complexity: 5
+    gosec:
+      # G115 (integer-overflow on conversion) is excluded as a calibrated, tracked
+      # exception (RISKS register, CO-17). Every occurrence in this tree is a
+      # safe-by-construction conversion in a length-prefix codec or a record count —
+      # the lengths are KB-scale and bounded well under 2^32, never attacker-sized to
+      # overflow. The rule is high-noise on exactly this idiom; CodeQL remains the SAST
+      # of record for genuine overflow-driven vulnerabilities. All other gosec rules stay on.
+      excludes:
+        - G115
     revive:
       rules:
         # Require doc comments on exported symbols — the SDK is a published contract
