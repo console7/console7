@@ -162,9 +162,16 @@ maintainer involvement**.
   over-disclosing on a public repo, not a broken reference):
   [console7-cloud-local `docs/ROADMAP.md`](https://github.com/console7/console7-cloud-local/blob/main/docs/ROADMAP.md).
   **Working this repo? Treat that as a live, gated workstream — consult it; don't take
-  this public roadmap as the whole plan.** Cross-gate worth knowing: the local CI/CD
-  adoption-loop dogfood unlocks with **signed release images (#11)** — landing #11
-  should trigger it.
+  this public roadmap as the whole plan.** Cross-gates worth knowing:
+  - The local **real-engine dev-loop** dogfood (run a genuine Claude Code session
+    locally, → "Console7 builds Console7") unlocks with the **core sandbox base-image +
+    `policyHelper`** — until that lands, the local target can only *model* the sandbox,
+    so building the dev-loop would be scaffolding around an artifact that doesn't exist.
+    **Posture (2026-06-20): stay the course on the Phase-1 provider track; landing the
+    sandbox base-image is the trigger to pivot the local target to the real-engine
+    dogfood.** Flag it then.
+  - The local **CI/CD adoption-loop** dogfood unlocks with **signed release images
+    (#11)** — landing #11 should trigger it.
 
 ## Control-objective onramp (summary)
 
