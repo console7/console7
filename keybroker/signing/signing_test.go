@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"context"
 	"crypto/ed25519"
 	"testing"
 
@@ -124,4 +125,112 @@ func TestVerify_RejectsMalformedKeyLengths(t *testing.T) {
 	if err := Verify(ca.Root(), payload, bad); err == nil {
 		t.Error("verified a signature with a malformed certificate public key")
 	}
+}
+
+func TestSinkSign_Verifies(t *testing.T) {
+	ca := NewDevCA()
+	signer, err := NewSinkSigner(ca, "evidence-sink")
+	if err != nil {
+		t.Fatalf("NewSinkSigner: %v", err)
+	}
+	tbs := []byte("checkpoint-head-bytes")
+	sig, err := signer.SignCheckpoint(context.Background(), tbs)
+	if err != nil {
+		t.Fatalf("SignCheckpoint: %v", err)
+	}
+	if sig.SinkID != "evidence-sink" {
+		t.Errorf("sink signature id = %q, want evidence-sink", sig.SinkID)
+	}
+	if err := VerifySinkSignature(ca.Root(), tbs, sig); err != nil {
+		t.Errorf("legitimate sink signature failed to verify: %v", err)
+	}
+}
+
+func TestNewSinkSigner_RejectsEmptyID(t *testing.T) {
+	if _, err := NewSinkSigner(NewDevCA(), ""); err == nil {
+		t.Error("minted a sink signer with an empty id")
+	}
+}
+
+func TestVerifySink_RejectsWrongPayload(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewSinkSigner(ca, "evidence-sink")
+	sig, _ := signer.SignCheckpoint(context.Background(), []byte("original"))
+	if err := VerifySinkSignature(ca.Root(), []byte("tampered"), sig); err == nil {
+		t.Error("verified a sink signature against a different payload")
+	}
+}
+
+func TestVerifySink_RejectsUntrustedCARoot(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewSinkSigner(ca, "evidence-sink")
+	tbs := []byte("checkpoint")
+	sig, _ := signer.SignCheckpoint(context.Background(), tbs)
+
+	otherRoot, _, _ := ed25519.GenerateKey(nil)
+	if err := VerifySinkSignature(otherRoot, tbs, sig); err == nil {
+		t.Error("verified a sink certificate against an untrusted CA root")
+	}
+}
+
+func TestVerifySink_RejectsForgedIdentity(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewSinkSigner(ca, "evidence-sink")
+	tbs := []byte("checkpoint")
+	sig, _ := signer.SignCheckpoint(context.Background(), tbs)
+
+	// Swapping the claimed SinkID without re-minting the CA-signed cert must be caught by the
+	// identity-consistency check (sig vs cert).
+	forged := sig
+	forged.SinkID = "rogue-sink"
+	if err := VerifySinkSignature(ca.Root(), tbs, forged); err == nil {
+		t.Error("verified a sink signature whose id differs from its certificate")
+	}
+}
+
+func TestVerifySink_RejectsMalformedKeyLengths(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewSinkSigner(ca, "evidence-sink")
+	tbs := []byte("checkpoint")
+	sig, _ := signer.SignCheckpoint(context.Background(), tbs)
+
+	if err := VerifySinkSignature(ed25519.PublicKey{1, 2, 3}, tbs, sig); err == nil {
+		t.Error("verified against a malformed CA root key")
+	}
+	bad := sig
+	bad.Cert.Pub = ed25519.PublicKey{1, 2, 3}
+	if err := VerifySinkSignature(ca.Root(), tbs, bad); err == nil {
+		t.Error("verified a sink signature with a malformed certificate public key")
+	}
+}
+
+func TestSinkCert_DistinctDomainFromLineageCert(t *testing.T) {
+	ca := NewDevCA()
+	// A lineage certificate the CA issued for a session NHI. Its CASig is over the lineage
+	// domain ("c7-cert-v1"); reusing it as a sink certificate's CASig must fail, because the
+	// sink verifier recomputes the bytes under the sink domain ("c7-sinkcert-v1").
+	lineage := signerForSinkDomainTest(t, ca)
+	crossed := SinkSignature{
+		SinkID: lineage.NHI,
+		Sig:    ed25519.Sign(lineage.priv, []byte("checkpoint")),
+		Cert: SinkCert{
+			SinkID: lineage.NHI,
+			Pub:    lineage.cert.Pub,
+			CASig:  lineage.cert.CASig, // a lineage-domain CA signature
+		},
+	}
+	if err := VerifySinkSignature(ca.Root(), []byte("checkpoint"), crossed); err == nil {
+		t.Error("a lineage certificate verified as a sink certificate (domain tags not separated)")
+	}
+}
+
+// signerForSinkDomainTest returns a bound lineage SessionSigner so the cross-domain test can
+// reach its CA-signed (lineage-domain) certificate and ephemeral key.
+func signerForSinkDomainTest(t *testing.T, ca *DevCA) *SessionSigner {
+	t.Helper()
+	signer, err := NewNHIBinder(ca).Bind("alice", "s1", interfaces.PersonaAuthor)
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	return signer
 }

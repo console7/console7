@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/console7/console7/control-plane/evidence"
 	"github.com/console7/console7/control-plane/orchestrator"
 	"github.com/console7/console7/keybroker/broker"
 	"github.com/console7/console7/keybroker/signing"
@@ -21,12 +22,13 @@ const (
 )
 
 // bench wires the in-memory seams the orchestration spine composes, mirroring the keybroker
-// broker bench (keybroker/broker/broker_test.go) plus the cloud/evidence/policy seams this
-// PR adds.
+// broker bench (keybroker/broker/broker_test.go) plus the cloud/policy seams and the REAL
+// control-plane evidence sink (the orchestrator's default sink; the devkit MemEvidence double
+// is exercised by the standalone tests below).
 type bench struct {
 	orch     *orchestrator.Orchestrator
 	cloud    *devkit.MemCloud
-	evidence *devkit.MemEvidence
+	evidence *evidence.Sink
 	scm      *devkit.MemSCM
 	caRoot   ed25519.PublicKey
 	idpPriv  ed25519.PrivateKey
@@ -61,10 +63,17 @@ func newBenchWithAllowlist(t *testing.T, allowlist []string) bench {
 
 	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
 	sor := devkit.NewFixedPolicySoR(repo)
-	evidence := devkit.NewMemEvidence()
+	// The real control-plane evidence sink, signing checkpoints through a keybroker-minted sink
+	// signer off the SAME DevCA the lineage binder uses (one trust root). ckptEvery=0 ⇒ the
+	// orchestrator seals one checkpoint per session at session-end/teardown.
+	sinkSigner, err := signing.NewSinkSigner(ca, "spike-evidence-sink")
+	if err != nil {
+		t.Fatalf("sink signer: %v", err)
+	}
+	sink := evidence.NewInMemory(sinkSigner, ca.Root(), 0)
 
-	orch := orchestrator.New(b, cloud, evidence, sor, allowlist, 30*time.Minute)
-	return bench{orch: orch, cloud: cloud, evidence: evidence, scm: scm, caRoot: ca.Root(), idpPriv: idpPriv, repo: repo}
+	orch := orchestrator.New(b, cloud, sink, sor, allowlist, 30*time.Minute)
+	return bench{orch: orch, cloud: cloud, evidence: sink, scm: scm, caRoot: ca.Root(), idpPriv: idpPriv, repo: repo}
 }
 
 func (b bench) authn(t *testing.T, subject interfaces.Subject) interfaces.AuthnToken {
@@ -139,6 +148,14 @@ func TestSpike_SessionLifecycle(t *testing.T) {
 	// lineage. Expected lifecycle events, in order.
 	if err := b.evidence.VerifyChain(); err != nil {
 		t.Errorf("evidence chain broken: %v", err)
+	}
+	// The sink sealed at least one checkpoint at session-end, and the checkpoints verify under
+	// the CA root — the WORM head is sink-signed, not merely hash-chained.
+	if len(b.evidence.Checkpoints()) == 0 {
+		t.Error("expected at least one sink-signed checkpoint sealing the session")
+	}
+	if err := b.evidence.VerifyCheckpoints(b.caRoot, b.evidence.SinkID()); err != nil {
+		t.Errorf("evidence checkpoints do not verify: %v", err)
 	}
 	wantEvents := []string{
 		"session-start", "sandbox-provisioned", "inference-resolved", "egress-narrowed",

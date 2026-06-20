@@ -198,11 +198,18 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		}
 		// Surface (never swallow) a failure to record the abort — e.g. SignSession refusing to
 		// sign past the session deadline on a session that overran. A dropped close-out record
-		// must be visible so an operator can escalate. (Residual for a real deployment: terminal
-		// teardown/abort evidence should use a teardown-scoped signer that outlives the work
-		// deadline, so close-out can always be recorded; tracked for the keybroker.)
+		// must be visible so an operator can escalate. (Residual, now PARTIALLY closed: the
+		// sink's own checkpoint seal below uses a long-lived signer that outlives the work
+		// deadline, so even when the per-record close-out lineage stamp fails the chain still
+		// gets a fresh sink-signed head. The per-record close-out lineage signature still needs a
+		// teardown-scoped session signer; tracked for the keybroker.)
 		if eerr := emit(cleanupCtx, "session-aborted", stage+": "+cause.Error()); eerr != nil {
 			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to record session-aborted: %w", eerr))
+		}
+		// Seal a sink-signed checkpoint over the chain head at teardown (no-op if the sink does
+		// not support it). This anchors the close-out even if the per-record stamp above failed.
+		if serr := o.sealCheckpoint(cleanupCtx); serr != nil {
+			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to seal evidence checkpoint on abort: %w", serr))
 		}
 		return Summary{}, outErr
 	}
@@ -313,6 +320,7 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		// Use the cleanup context (not the possibly-cancelled request ctx) so a sink that
 		// honours cancellation still records this teardown failure — the sandbox may be live.
 		_ = emit(cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
+		_ = o.sealCheckpoint(cleanupCtx)
 		return Summary{}, fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
 	}
 	// The terminal session-end record has the same cancellation-resilience requirement as the
@@ -322,6 +330,12 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		return Summary{}, err
 	}
 	records++
+
+	// Seal a sink-signed checkpoint over the final chain head so every completed session ends
+	// with a fresh, sink-attested close-out (no-op if the sink does not support sealing).
+	if err := o.sealCheckpoint(cleanupCtx); err != nil {
+		return Summary{}, fmt.Errorf("orchestrator: seal evidence checkpoint at session-end: %w", err)
+	}
 
 	return Summary{
 		Subject:      subject,
@@ -362,6 +376,28 @@ func onAllowlist(url string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// evidenceSealer is the optional capability an EvidenceSink may implement to seal a
+// sink-signed checkpoint over its chain head (control-plane/evidence implements it; the
+// devkit MemEvidence double does not). The orchestrator seals at terminal events so the
+// evidence chain always carries a fresh, sink-signed head at close-out. Crucially the sink's
+// checkpoint signer is long-lived — NOT session-deadline-bound like the per-record lineage
+// signer (broker.SignSession) — so a session that overran its work deadline can still seal
+// its close-out, partially closing the teardown residual noted in abort(). It is reached by
+// type assertion (not added to the EvidenceSink seam) so the spine still runs unchanged
+// against a sink that does not implement it.
+type evidenceSealer interface {
+	Seal(ctx context.Context) error
+}
+
+// sealCheckpoint seals a sink-signed checkpoint if the evidence sink supports it; a sink that
+// does not (the bench double) is a no-op. Errors are returned for the caller to surface.
+func (o *Orchestrator) sealCheckpoint(ctx context.Context) error {
+	if sealer, ok := o.Evidence.(evidenceSealer); ok {
+		return sealer.Seal(ctx)
+	}
+	return nil
 }
 
 // evidenceDomain separates the bytes signed for an evidence record from every other use of
