@@ -1,6 +1,8 @@
 # Plan — Code-quality enforcement (coverage + maintainability gates)
 
-**Status:** proposed (not yet scheduled)
+**Status:** delivered — Sprint 1 (#33) and Sprint 2 (#34) merged; Sprint 3 lands via
+this PR. On merge, CO-17 is **Adopt**: `golangci-lint run ./...` gates whole-tree,
+coverage floors ratchet, and `docs/RISKS.md` tracks exceptions.
 **Owner:** maintainers
 **Implements:** CO-17 (code quality, maintainability, tech debt), CO-7.1 (SAST),
 CO-15 (functional QA), CO-12.8 (`.claude/` skills are code)

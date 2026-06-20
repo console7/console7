@@ -5,9 +5,9 @@
 # docs/standards/console7-sdlc-standard.md, which requires golangci-lint wired as a
 # blocking gate the moment go.mod lands. See docs/dev/code-quality-enforcement-plan.md.
 #
-# Enforcement model: clean-as-you-code. CI runs with --new-from-merge-base=origin/main
-# so new/changed lines are held to the bar while the legacy baseline is remediated
-# (Sprint 2) before whole-tree enforcement turns on (Sprint 3).
+# Enforcement model: whole-tree. CI runs `golangci-lint run ./...` so the ENTIRE tree
+# must pass — the legacy baseline was remediated to zero issues (enforcement plan
+# Sprint 2), which retired the clean-as-you-code grandfather window (Sprint 3).
 #
 # Thresholds here are the Sprint-1 starting proposal; Sprint 2 calibrates them
 # against measured whole-tree worst-case so the targets are evidence-based.

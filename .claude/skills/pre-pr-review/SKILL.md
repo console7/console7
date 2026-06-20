@@ -28,6 +28,35 @@ catch — locally, in one pass — the issues that would otherwise cost a push +
 - **Skip** (proportionality, `GOAL.md` tenet 8) for pure docs, comments, typos,
   formatting, or trivial renames. State that you skipped and why.
 
+## Run the static gates first (Go/shell changes)
+
+Before the adversarial lenses, run the **same deterministic gates CI runs**, locally,
+against the **same config** — this is the defence-in-depth tier of the CO-17 code-quality
+gate (`docs/dev/code-quality-enforcement-plan.md`). They are fast and catch the mechanical
+issues so the lenses (and the authoritative CI/Codex rounds) spend their attention on
+judgement, not lint. Reconcile every finding before pushing.
+
+For a change touching Go:
+
+```bash
+gofmt -l .                                   # must be empty
+go vet ./...
+go build ./...
+./scripts/coverage-gate.sh                   # per-package coverage floors (CO-15)
+# Whole-tree lint with the pinned linter + the repo's .golangci.yml (the CI control of
+# record). Install once (pinned, checksum-verified source — matches the CI job):
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+GOTOOLCHAIN=go1.25.11 golangci-lint run ./...  # must report 0 issues
+```
+
+`GOTOOLCHAIN=go1.25.11` matches the module's pinned toolchain so a newer local Go does
+not mask or invent findings. The CI `lint` job (`.github/workflows/go.yml`) runs the
+identical `golangci-lint run ./...`; if it passes here it passes there. If you are
+**declining** a lint finding rather than fixing it, that requires a `//nolint` with a
+reason **and** a `docs/RISKS.md` entry (CO-17) — never a silent suppression.
+
+For a shell change, also run `shellcheck` on the touched scripts.
+
 ## How to run it — three independent adversarial lenses
 
 The method is fixed; the *mechanism* depends on what your harness exposes. Run all
