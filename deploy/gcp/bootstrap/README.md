@@ -61,10 +61,13 @@ human merge is the precondition for any change:
 > The apply identity is admin-grade by necessity (it creates KMS keys, service
 > accounts, IAM). Its safety rests on three layers: the provider is locked to your one
 > repo, impersonation is locked to the default branch, and a human merges before that
-> branch moves. A **protected GitHub environment** (required reviewers, branch policy)
-> adds a second approval gate — but GitHub only offers environment protection on a
-> **public repo or a paid plan**; on a free private repo the WIF-`main` lock plus the
-> reviewed merge is the actuation gate.
+> branch moves. **Branch protection** (required PR review) and a **protected
+> environment** (required reviewers) add *enforced* gates — but GitHub offers them only
+> on **public** repos (all plans) or **private** repos on a plan that includes them. A
+> **GitHub Free private repo has neither**, so there is no platform-enforced review: a
+> direct push to `main` would apply. Its real actuation gate is then **who can push to
+> `main`** — restrict write/admin access, or use a public repo / capable plan for an
+> enforced review gate.
 
 The APPLY identity is granted only the roles the current module provisions (KMS admin,
 SA admin, `objectAdmin` on the state bucket). Later module PRs (`gke`, `networking`,
@@ -88,8 +91,10 @@ wires the bootstrap outputs into it as GitHub Actions **variables** (not secrets
   --apply-sa console7-apply@my-console7.iam.gserviceaccount.com
 ```
 
-The **first deploy is deliberate** — instantiating the template does **not** auto-apply;
-trigger it from the repo's Actions tab (`console7 deploy` → Run workflow). After that,
+The **first deploy is deliberate** — instantiating the template does **not** auto-apply.
+**Review `.github/workflows/deploy.yml` (especially `CONSOLE7_REF`) and the Actions
+variables first** — the apply identity is admin-grade — then trigger it from the repo's
+Actions tab (`console7 deploy` → Run workflow). After that,
 refreshing Console7 is a **reviewed version bump** (ADR-0002): a bot raises the pinned
 `CONSOLE7_REF` in `.github/workflows/deploy.yml`, the PR runs `terraform plan` as the
 **plan** identity and posts the effect diff, a human merges, and the merge-to-`main` job
