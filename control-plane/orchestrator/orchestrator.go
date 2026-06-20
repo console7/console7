@@ -182,9 +182,16 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		MaxTTL: time.Until(deadline),
 	})
 	if err != nil {
-		// No sandbox to tear down; record the failure against the chain and surface it.
+		// No sandbox to tear down; record the failure against the chain and surface it. The
+		// session-start record is already committed, so seal a checkpoint here too (joined into
+		// the error) — this is a terminal path with committed evidence, so it must get a
+		// sink-signed head and surface any signer failure, like every other terminal path.
+		outErr := fmt.Errorf("orchestrator: provision-sandbox: %w", err)
 		_ = emit(cleanupCtx, "session-aborted", "provision-sandbox: "+err.Error())
-		return Summary{}, fmt.Errorf("orchestrator: provision-sandbox: %w", err)
+		if serr := o.sealCheckpoint(cleanupCtx); serr != nil {
+			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to seal evidence checkpoint on provision failure: %w", serr))
+		}
+		return Summary{}, outErr
 	}
 
 	// From here on, any failure must tear the sandbox down — never leave it live. Teardown
@@ -319,9 +326,14 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 	if err := o.Cloud.DestroySandbox(cleanupCtx, sandbox); err != nil {
 		// Use the cleanup context (not the possibly-cancelled request ctx) so a sink that
 		// honours cancellation still records this teardown failure — the sandbox may be live.
+		outErr := fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
 		_ = emit(cleanupCtx, "session-aborted", "destroy-sandbox: "+err.Error())
-		_ = o.sealCheckpoint(cleanupCtx)
-		return Summary{}, fmt.Errorf("orchestrator: destroy-sandbox: %w", err)
+		// Surface (don't swallow) a failed close-out seal here too, mirroring the abort path: an
+		// operator must be able to tell the chain has no sink-signed head at teardown.
+		if serr := o.sealCheckpoint(cleanupCtx); serr != nil {
+			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to seal evidence checkpoint on destroy failure: %w", serr))
+		}
+		return Summary{}, outErr
 	}
 	// The terminal session-end record has the same cancellation-resilience requirement as the
 	// abort record: teardown already succeeded on cleanupCtx, so a cancelled request must not

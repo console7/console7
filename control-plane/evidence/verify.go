@@ -4,20 +4,46 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 
 	"github.com/console7/console7/keybroker/signing"
 )
 
-// Verify is the full integrity check: the record hash chain is intact AND every checkpoint is
-// a valid signature by THIS sink over the head it pins, against the trust anchor the Sink was
-// constructed with. It is the single call an auditor uses to assert "this evidence log is
-// unbroken and sealed by this sink".
+// Verify is the full integrity check: the record hash chain is intact, every checkpoint is a
+// valid signature by THIS sink over the head it pins (against the trust anchor the Sink was
+// constructed with), AND the current record head is actually sealed (the latest checkpoint
+// covers the last committed record). It is the single call an auditor uses to assert "this
+// evidence log is unbroken AND fully sealed by this sink". A non-empty log with an unsealed
+// tail (records appended after the last checkpoint, or never sealed) is rejected — use
+// VerifyChain + VerifyCheckpoints directly for prefix-only verification.
 func (s *Sink) Verify() error {
 	if err := s.VerifyChain(); err != nil {
 		return err
 	}
-	return s.VerifyCheckpoints(s.caRoot, s.sinkID)
+	if err := s.VerifyCheckpoints(s.caRoot, s.sinkID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	count := s.count
+	var head Checkpoint
+	sealed := len(s.checkpoints) > 0
+	if sealed {
+		head = s.checkpoints[len(s.checkpoints)-1]
+	}
+	s.mu.Unlock()
+
+	if count == 0 {
+		return nil
+	}
+	if !sealed {
+		return errors.New("evidence: log has records but no checkpoint seals the head")
+	}
+	// The latest checkpoint must cover the current head: every committed record is sealed.
+	if head.Count != count || head.HeadSequence != count-1 {
+		return fmt.Errorf("evidence: head not sealed — latest checkpoint covers %d of %d records", head.Count, count)
+	}
+	return nil
 }
 
 // VerifyChain recomputes the record hash chain from genesis and reports the first break. It is
