@@ -15,19 +15,24 @@ Provisions:
 - a **least-privilege workload service account** the control plane impersonates, with
   encrypt/decrypt on **only** that KEK and **no human/group binding** — so the operator
   read path is closed for humans/groups by construction;
-- the **Secret Manager API** (`secretmanager.googleapis.com`) and a **custom
-  least-privilege role** bound to that workload SA, granting exactly the verbs the
-  provider calls — `secrets.create` / `secrets.delete` / `versions.add` /
-  `versions.access`. There is deliberately **no `*.get`/`*.list`** (no enumeration or
-  existence-probing) and **no `getIamPolicy`/`setIamPolicy`** (no self-grant);
-  `roles/secretmanager.admin` would be far too broad. This verb set **is** the
-  least-privilege boundary.
+- the **Secret Manager API** (`secretmanager.googleapis.com`) and **two custom
+  least-privilege roles** bound to that workload SA, split so the resource-scoped verbs
+  are **name-prefix-conditioned**:
+  - **create** (`secrets.create`) — project-wide, **unconditioned** (see note below);
+  - **add/access/delete** (`versions.add` / `versions.access` / `secrets.delete`) —
+    granted with an **IAM condition** restricting them to
+    `resource.name.startsWith(".../secrets/<prefix>-sub-")`, so a compromised workload
+    cannot read, re-version, or delete unrelated project secrets.
 
-> **Name-prefix IAM condition — deferred, by design.** A condition restricting the
-> binding to `resource.name.startsWith(".../secrets/<prefix>-sub-")` is *not* applied:
-> `secretmanager.secrets.create` is evaluated against the **project parent**, so such a
-> condition would deny every create. The narrow custom role is the boundary; conditioning
-> the non-create verbs is a possible future hardening once verified against live IAM.
+  There is deliberately **no `*.get`/`*.list`** (no enumeration) and **no
+  `getIamPolicy`/`setIamPolicy`** (no self-grant); `roles/secretmanager.admin` would be
+  far too broad.
+
+> **Why create is unconditioned.** `secretmanager.secrets.create` is evaluated against
+> the **project parent**, not the to-be-created secret, so a `resource.name` condition
+> would deny *every* create. Create is therefore project-scoped; the
+> blast-radius-limiting condition is applied to the resource-scoped verbs, which is where
+> read/modify/delete of existing secrets actually happens.
 
 Deliberately **not** here: project/billing (human bootstrap), `cloudkms` API enablement
 (bootstrap prerequisite), per-user secrets/keys (runtime provider code), the GKE Workload

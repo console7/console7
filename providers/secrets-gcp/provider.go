@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -115,13 +116,6 @@ func (p *Provider) MintEphemeral(ctx context.Context, req interfaces.EphemeralRe
 	if req.SessionDeadline.IsZero() || !req.SessionDeadline.After(now) {
 		return interfaces.CredentialRef{}, errors.New("secretsgcp: MintEphemeral requires a SessionDeadline in the future")
 	}
-	// Refuse to mint for a revoked subject: RevokeSubject is offboarding, after which no new
-	// identity should be issued. The in-memory reference does not check this; this provider
-	// strengthens it because the tombstone is the local offboarding signal (and matters once
-	// the real IAM-Credentials backing lands — an offboarded user must not get fresh creds).
-	if p.isRevoked(req.Subject) {
-		return interfaces.CredentialRef{}, errors.New("secretsgcp: refusing to mint an ephemeral credential for a revoked subject")
-	}
 	// Cap expiry to the earlier of now+TTL and the absolute session deadline.
 	expiry := now.Add(req.TTL)
 	if req.SessionDeadline.Before(expiry) {
@@ -133,6 +127,15 @@ func (p *Provider) MintEphemeral(ctx context.Context, req interfaces.EphemeralRe
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Refuse to mint for a revoked subject: RevokeSubject is offboarding, after which no new
+	// identity should be issued. The in-memory reference does not check this; this provider
+	// strengthens it because the tombstone is the local offboarding signal (and matters once
+	// the real IAM-Credentials backing lands — an offboarded user must not get fresh creds).
+	// The check is under the SAME lock as the insert (and as RevokeSubject's tombstone write),
+	// so a RevokeSubject racing this mint cannot interleave to record a lease post-revoke.
+	if p.revoked[req.Subject] {
+		return interfaces.CredentialRef{}, errors.New("secretsgcp: refusing to mint an ephemeral credential for a revoked subject")
+	}
 	ref := "lease-" + randHex(12) // opaque; carries no material and no scope.
 	p.leases[ref] = leaseRec{subject: req.Subject, session: req.SessionID, scopes: scopes, expiry: expiry}
 	return interfaces.CredentialRef{Ref: ref, Expiry: expiry}, nil
@@ -185,10 +188,15 @@ func (p *Provider) StoreSubscriptionToken(ctx context.Context, tok interfaces.Su
 	// the same lock as the tombstone check, so a RevokeSubject could commit between the
 	// re-check above and the Put. If the tombstone flipped while we were committing, delete
 	// what we just wrote so revocation wins the race. (InjectSubscriptionToken also refuses a
-	// revoked subject, so a failed compensating delete still cannot leak the token.) Durable
-	// cross-replica offboarding remains the upstream identity control.
+	// revoked subject, so this material cannot be injected on this replica even if the delete
+	// fails.) Durable cross-replica offboarding remains the upstream identity control.
 	if p.isRevoked(tok.Subject) {
-		_ = p.store.Destroy(ctx, sid)
+		if derr := p.store.Destroy(ctx, sid); derr != nil {
+			// Surface the failure rather than reporting a clean shred — the just-written material
+			// may still be at rest (and recoverable after a restart or by another replica that
+			// lacks this process-local tombstone), so the caller/ops must be able to act on it.
+			return fmt.Errorf("secretsgcp: subject revoked during store and the compensating delete FAILED; stored material may remain and must be purged: %w", derr)
+		}
 		return errors.New("secretsgcp: subject revoked during store; stored material shredded")
 	}
 	return nil
@@ -209,9 +217,9 @@ func (p *Provider) InjectSubscriptionToken(ctx context.Context, in interfaces.Su
 	if in.Beneficiaries != 1 {
 		return errors.New("secretsgcp: refusing subscription injection for a multi-beneficiary session")
 	}
-	// Revocation backstop: refuse injection for a revoked subject even if a store/revoke race
-	// left at-rest material the compensating shred did not reach. The tombstone is authoritative
-	// for injection on this replica regardless of the store's state.
+	// Revocation backstop (fast-fail before the KMS round-trip): refuse injection for a subject
+	// already revoked. This is re-checked ATOMICALLY with delivery below — the authoritative
+	// guarantee — so a RevokeSubject racing this injection cannot deliver a token post-revoke.
 	if p.isRevoked(in.Subject) {
 		return errors.New("secretsgcp: refusing subscription injection for a revoked subject")
 	}
@@ -247,10 +255,25 @@ func (p *Provider) InjectSubscriptionToken(ctx context.Context, in interfaces.Su
 	}
 	defer zero(token)
 
-	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with the
-	// delivery so a concurrent teardown cannot let the token land in a sandbox that is gone.
-	// The plaintext never leaves this call by any other path.
-	if !p.inject.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
+	// Deliver only into the verified owning sandbox, re-checking BOTH the revocation tombstone
+	// and ownership ATOMICALLY with the delivery — the revocation check and DeliverIfOwned run
+	// under p.mu, the same lock RevokeSubject sets the tombstone under. So a RevokeSubject that
+	// races this injection either (a) commits its tombstone before this block and the token is
+	// refused, or (b) loses the race, in which case delivery happened before revocation
+	// committed (a legitimate just-before-revoke injection). The ownership re-check inside
+	// DeliverIfOwned likewise closes the teardown race. The plaintext never leaves this call by
+	// any other path.
+	p.mu.Lock()
+	revoked := p.revoked[in.Subject]
+	delivered := false
+	if !revoked {
+		delivered = p.inject.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token)
+	}
+	p.mu.Unlock()
+	if revoked {
+		return errors.New("secretsgcp: subject revoked during injection")
+	}
+	if !delivered {
 		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
 	}
 	return nil

@@ -9,10 +9,11 @@
 #
 # Scope: this module provisions the KMS substrate, the workload identity, AND (added
 # atomically with providers/secrets-gcp) the Secret Manager API + the provider's own
-# least-privilege Secret Manager role for that workload SA. The role grants exactly the
-# verbs the provider calls (create / add-version / access / get / delete) and nothing
-# else — no list, no getIamPolicy/setIamPolicy, so there is no enumeration or
-# self-grant path.
+# least-privilege Secret Manager access for that workload SA — TWO custom roles granting
+# exactly the verbs the provider calls (create; add-version / access / delete) and nothing
+# else: no get, no list (no enumeration), no getIamPolicy/setIamPolicy (no self-grant). The
+# resource-scoped verbs are IAM-conditioned to the provider's "<prefix>-sub-*" secrets; see
+# the role/binding block below for why create is separate and unconditioned.
 #
 # Prerequisite (bootstrap, not this module): cloudkms.googleapis.com enabled on the
 # project; this module enables secretmanager.googleapis.com.
@@ -55,7 +56,7 @@ resource "google_kms_crypto_key_iam_member" "workload_encrypt_decrypt" {
   member        = "serviceAccount:${google_service_account.workload.email}"
 }
 
-# --- Secret Manager: API + the provider's least-privilege role (lands with secrets-gcp) ---
+# --- Secret Manager: API + the provider's least-privilege roles (lands with secrets-gcp) ---
 
 # The provider stores each user's sealed payload (KEK-wrapped DEK + GCM-sealed token) as one
 # per-subject Secret Manager secret. Enable the API here; cloudkms is a bootstrap prerequisite.
@@ -68,33 +69,65 @@ resource "google_project_service" "secretmanager" {
   disable_on_destroy = false
 }
 
-# A custom role with EXACTLY the verbs providers/secrets-gcp calls — CreateSecret,
-# AddSecretVersion, AccessSecretVersion, DeleteSecret — and nothing more. No
-# roles/secretmanager.admin (which bundles setIamPolicy and a broad surface), no *.get/*.list
-# (no enumeration or existence-probing beyond what the provider needs), no
-# getIamPolicy/setIamPolicy (no self-grant). This verb set IS the least-privilege boundary; the
-# predefined roles cannot express create+delete without admin, so a custom role is the only fit.
-resource "google_project_iam_custom_role" "secrets_workload" {
+# The workload SA's Secret Manager access is split into TWO least-privilege grants so the
+# blast radius of a compromise (or a name-construction bug) is bounded to the provider's own
+# `<prefix>-sub-*` secrets — not every secret in the project:
+#
+#   1. CREATE is granted project-wide and UNCONDITIONED, because secretmanager.secrets.create
+#      is evaluated against the project PARENT, not the to-be-created secret — an IAM condition
+#      on resource.name would deny every create.
+#   2. The resource-scoped verbs (versions.add / versions.access / secrets.delete) are granted
+#      with an IAM CONDITION restricting them to secret names under "<prefix>-sub-". These are
+#      evaluated against the secret/version resource, so the condition holds. A compromised
+#      workload therefore cannot read, re-version, or delete unrelated application secrets.
+#
+# Neither role includes *.get/*.list (no enumeration) or getIamPolicy/setIamPolicy (no
+# self-grant); roles/secretmanager.admin is far too broad. Predefined roles cannot express
+# create+delete without admin, so custom roles are the only least-privilege fit.
+
+# Project number is needed to build the fully-qualified resource.name the IAM condition matches.
+data "google_project" "this" {
+  project_id = var.project_id
+}
+
+resource "google_project_iam_custom_role" "secrets_create" {
   project     = var.project_id
-  role_id     = "${replace(var.name_prefix, "-", "_")}_secrets_workload"
-  title       = "Console7 secrets workload (least-privilege Secret Manager)"
-  description = "Create/add-version/access/delete on the provider's per-user subscription secrets only. No get, no list, no IAM-policy verbs."
+  role_id     = "${replace(var.name_prefix, "-", "_")}_secrets_create"
+  title       = "Console7 secrets workload — create"
+  description = "secretmanager.secrets.create only (parent-scoped; cannot be name-conditioned)."
+  stage       = "GA"
+  permissions = ["secretmanager.secrets.create"]
+}
+
+resource "google_project_iam_custom_role" "secrets_rw" {
+  project     = var.project_id
+  role_id     = "${replace(var.name_prefix, "-", "_")}_secrets_rw"
+  title       = "Console7 secrets workload — add/access/delete"
+  description = "versions.add / versions.access / secrets.delete on the provider's secrets only."
   stage       = "GA"
   permissions = [
-    "secretmanager.secrets.create",
-    "secretmanager.secrets.delete",
     "secretmanager.versions.add",
     "secretmanager.versions.access",
+    "secretmanager.secrets.delete",
   ]
 }
 
-# Bind the custom role to the workload SA at project scope. A name-prefix IAM condition
-# (resource.name.startsWith(".../secrets/<prefix>-sub-")) is deliberately NOT applied: the
-# create verb is evaluated against the project parent, so such a condition would deny every
-# secret create. The custom role's narrow verb set is the boundary; tightening to a condition on
-# the non-create verbs is a possible future hardening once verified against live IAM.
-resource "google_project_iam_member" "workload_secrets" {
+# CREATE: project-wide, unconditioned (parent-scoped verb).
+resource "google_project_iam_member" "workload_secrets_create" {
   project = var.project_id
-  role    = google_project_iam_custom_role.secrets_workload.id
+  role    = google_project_iam_custom_role.secrets_create.id
   member  = "serviceAccount:${google_service_account.workload.email}"
+}
+
+# ADD/ACCESS/DELETE: restricted to "<prefix>-sub-*" secrets only.
+resource "google_project_iam_member" "workload_secrets_rw" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.secrets_rw.id
+  member  = "serviceAccount:${google_service_account.workload.email}"
+
+  condition {
+    title       = "console7-managed-secrets-only"
+    description = "Restrict to the provider's per-subject secrets (<prefix>-sub-*)."
+    expression  = "resource.name.startsWith(\"projects/${data.google_project.this.number}/secrets/${var.name_prefix}-sub-\")"
+  }
 }
