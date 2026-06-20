@@ -31,6 +31,14 @@ type Cert struct {
 	CASig []byte
 }
 
+// clone returns a copy of the certificate whose byte slices are freshly allocated, so a
+// returned Signature never aliases the signer's internal certificate.
+func (c Cert) clone() Cert {
+	c.Pub = append(ed25519.PublicKey(nil), c.Pub...)
+	c.CASig = append([]byte(nil), c.CASig...)
+	return c
+}
+
 // NewDevCA generates a fresh CA root key. It panics on CSPRNG failure rather than
 // returning a CA with a predictable key.
 func NewDevCA() *DevCA {

@@ -75,11 +75,23 @@ func (s *SinkSigner) SinkID() string {
 // sink key and returns a verifiable SinkSignature. The context/error shape mirrors a real
 // out-of-process keybroker call, even though the in-process dev signer cannot fail here.
 func (s *SinkSigner) SignCheckpoint(ctx context.Context, tbs []byte) (SinkSignature, error) {
+	// Return a DEEP copy of the certificate: a shallow struct copy would alias this long-lived
+	// signer's own cert.Pub/cert.CASig backing arrays, so a caller mutating the returned
+	// signature's cert bytes would corrupt the signer and break every later signature's
+	// verification.
 	return SinkSignature{
 		SinkID: s.sinkID,
 		Sig:    ed25519.Sign(s.priv, tbs),
-		Cert:   s.cert,
+		Cert:   s.cert.clone(),
 	}, nil
+}
+
+// clone returns a copy of the certificate whose byte slices are freshly allocated, so a
+// returned SinkSignature never aliases the signer's internal certificate.
+func (c SinkCert) clone() SinkCert {
+	c.Pub = append(ed25519.PublicKey(nil), c.Pub...)
+	c.CASig = append([]byte(nil), c.CASig...)
+	return c
 }
 
 // VerifySinkSignature checks a SinkSignature against a trusted CA root and the original tbs.

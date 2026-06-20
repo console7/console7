@@ -32,6 +32,24 @@ func TestBindAndSign_LineageVerifies(t *testing.T) {
 	}
 }
 
+func TestSign_ReturnsIndependentCert(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewNHIBinder(ca).Bind("alice", "s1", interfaces.PersonaAuthor)
+	payload := []byte("commit")
+	// Mutating a returned signature's cert bytes must not corrupt the long-lived signer.
+	sig1 := signer.Sign(payload)
+	if len(sig1.Cert.Pub) > 0 {
+		sig1.Cert.Pub[0] ^= 0xff
+	}
+	if len(sig1.Cert.CASig) > 0 {
+		sig1.Cert.CASig[0] ^= 0xff
+	}
+	sig2 := signer.Sign(payload)
+	if err := Verify(ca.Root(), payload, sig2); err != nil {
+		t.Errorf("a later signature failed to verify — mutating a prior returned cert corrupted the signer: %v", err)
+	}
+}
+
 func TestVerify_RejectsWrongPayload(t *testing.T) {
 	ca := NewDevCA()
 	signer, _ := NewNHIBinder(ca).Bind("alice", "s1", interfaces.PersonaAuthor)
@@ -201,6 +219,25 @@ func TestVerifySink_RejectsMalformedKeyLengths(t *testing.T) {
 	bad.Cert.Pub = ed25519.PublicKey{1, 2, 3}
 	if err := VerifySinkSignature(ca.Root(), tbs, bad); err == nil {
 		t.Error("verified a sink signature with a malformed certificate public key")
+	}
+}
+
+func TestSignCheckpoint_ReturnsIndependentCert(t *testing.T) {
+	ca := NewDevCA()
+	signer, _ := NewSinkSigner(ca, "sink")
+	tbs := []byte("checkpoint")
+	// Mutate the cert byte slices of a returned signature; the long-lived signer's own cert must
+	// be unaffected, so a later signature still verifies.
+	sig1, _ := signer.SignCheckpoint(context.Background(), tbs)
+	if len(sig1.Cert.Pub) > 0 {
+		sig1.Cert.Pub[0] ^= 0xff
+	}
+	if len(sig1.Cert.CASig) > 0 {
+		sig1.Cert.CASig[0] ^= 0xff
+	}
+	sig2, _ := signer.SignCheckpoint(context.Background(), tbs)
+	if err := VerifySinkSignature(ca.Root(), tbs, sig2); err != nil {
+		t.Errorf("a later signature failed to verify — mutating a prior returned cert corrupted the signer: %v", err)
 	}
 }
 

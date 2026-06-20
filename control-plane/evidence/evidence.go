@@ -71,11 +71,14 @@ type Sink struct {
 	// natural per-session assurance unit.
 	ckptEvery int
 
-	head        []byte
-	headSeq     uint64
-	count       uint64
-	sinceCkpt   int
-	checkpoints []Checkpoint
+	head    []byte
+	headSeq uint64
+	count   uint64
+	// lastAppendedAt is the previous record's stamped AppendedAt, used to keep the authoritative
+	// timeline monotonic even if the host wall clock steps backward (NTP) between appends.
+	lastAppendedAt time.Time
+	sinceCkpt      int
+	checkpoints    []Checkpoint
 }
 
 // New returns a Sink committing through store and sealing checkpoints through signer. caRoot
@@ -103,15 +106,39 @@ func New(store Store, signer CheckpointSigner, caRoot ed25519.PublicKey, ckptEve
 		ckptEvery: ckptEvery,
 	}
 	if store != nil {
-		if n, err := store.Len(context.Background()); err == nil && n > 0 {
-			if last, ok, err := store.At(context.Background(), n-1); err == nil && ok {
-				s.head = cloneBytes(last.Ref.Hash)
-				s.headSeq = last.Ref.Sequence
-				s.count = n
-			}
-		}
+		// Best-effort hydration: the in-memory store cannot fault, and a fallible durable store
+		// gets a context-taking, erroring constructor in providers/evidence-gcs.
+		_ = s.refreshFromStoreLocked(context.Background())
 	}
 	return s
+}
+
+// refreshFromStoreLocked syncs the in-memory chain head/sequence/count and the
+// monotonic-time watermark from the Store, which is the source of truth. The caller holds
+// s.mu (New calls it pre-publication, where there is no contention). It lets Seal cover the
+// Store's CURRENT head — not a stale cached prefix — when a durable Store has grown since this
+// sink last wrote, and lets New resume an existing log.
+func (s *Sink) refreshFromStoreLocked(ctx context.Context) error {
+	n, err := s.store.Len(ctx)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		s.head, s.headSeq, s.count, s.lastAppendedAt = nil, 0, 0, time.Time{}
+		return nil
+	}
+	last, ok, err := s.store.At(ctx, n-1)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("evidence: store reports %d records but head %d is missing", n, n-1)
+	}
+	s.head = cloneBytes(last.Ref.Hash)
+	s.headSeq = last.Ref.Sequence
+	s.count = n
+	s.lastAppendedAt = last.Ref.AppendedAt
+	return nil
 }
 
 // NewInMemory is the bench/conformance convenience: a Sink over an in-memory Store. The real
@@ -146,8 +173,13 @@ func (s *Sink) Append(ctx context.Context, rec interfaces.EvidenceRecord) (inter
 	seq := s.count
 	// The sink's authoritative time. rec.ObservedAt is caller-supplied and untrusted, so it is
 	// hashed as content (a back-dated value is therefore covered by the chain) but is NEVER the
-	// timeline — AppendedAt is.
+	// timeline — AppendedAt is. Clamp it to be monotonic non-decreasing against the previous
+	// append: the Go monotonic clock reading is stripped once stored, so a backward wall-clock
+	// step (NTP) must not let a later sequence carry an earlier authoritative timestamp.
 	appendedAt := time.Now().UTC()
+	if appendedAt.Before(s.lastAppendedAt) {
+		appendedAt = s.lastAppendedAt
+	}
 	// A WORM record the caller can still mutate via a retained slice is not append-only, so copy
 	// the payload before committing it.
 	stored := rec
@@ -167,6 +199,7 @@ func (s *Sink) Append(ctx context.Context, rec interfaces.EvidenceRecord) (inter
 	s.headSeq = seq
 	s.count++
 	s.sinceCkpt++
+	s.lastAppendedAt = appendedAt
 
 	out := interfaces.RecordRef{Sequence: seq, Hash: cloneBytes(h), AppendedAt: appendedAt}
 
@@ -222,6 +255,13 @@ func (s *Sink) Seal(ctx context.Context) error {
 // pins a real committed head. A signer failure leaves the checkpoint log untouched (no
 // partial checkpoint).
 func (s *Sink) sealLocked(ctx context.Context) (Checkpoint, error) {
+	// Cover the Store's CURRENT head, not a stale cached prefix: if a durable Store grew since
+	// this sink last wrote, sealing the old head would sign only a prefix and report success
+	// while the latest records stay unsealed. Fail (do not commit a checkpoint) if the head
+	// cannot be read.
+	if err := s.refreshFromStoreLocked(ctx); err != nil {
+		return Checkpoint{}, err
+	}
 	if s.count == 0 {
 		return Checkpoint{}, nil
 	}
