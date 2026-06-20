@@ -13,15 +13,23 @@
 //   - a SHORT-LIVED installation token (GitHub caps it at ~1h; the provider caps it further to the
 //     earliest of a configured TTL, the GitHub expiry, and the session deadline, so it dies with
 //     the session — DESIGN.md §2.1; GOAL.md tenet 4);
-//   - REPO-SCOPED minting (the mint REQUESTS scoping to the single requested repository — GitHub
-//     enforces the Repositories narrowing server-side; the provider does not re-verify the result);
-//   - LEAST-PRIVILEGE permissions (contents:write + pull_requests:write only — DefaultPermissions;
-//     OpenPullRequest narrows further to pull_requests:write. The adapter rejects any permission
-//     key outside its allowlist AND any level beyond read/write, so a Config.Permissions override
-//     can narrow or re-shape but never widen past least privilege);
+//   - HOST + REPO scoping (a RepoRef on a host the provider does not serve is refused; the mint
+//     ALWAYS resolves the installation per-repo by owner+name, so a fixed Config.InstallationID
+//     cannot mint a name-only token for a homonymous repo under another account — it is treated as
+//     an assertion and a mismatch fails closed. The mint REQUESTS GitHub's Repositories narrowing;
+//     GitHub enforces it server-side);
+//   - PER-OPERATION LEAST-PRIVILEGE permissions. DefaultPermissions is the GRANTED ceiling (what
+//     the App is installed with). Each operation requests only the subset it needs, INTERSECTED
+//     with that ceiling: a working credential gets contents:write ONLY (it must not be able to
+//     open/merge PRs); OpenPullRequest mints a separate pull_requests:write-only token. The adapter
+//     rejects any permission key outside its allowlist AND any level beyond read/write, so a
+//     Config.Permissions override only ever tightens — never widens — every operation;
 //   - PR-ONLY exit (OpenPullRequest opens a pull request and never merges, approves, or actuates —
 //     author/approve/actuate stay separated, GOAL.md tenet 6);
-//   - refusal to scope a credential to, or open a PR from, a protected/default branch.
+//   - refusal to scope a credential to, or open a PR from, a protected/default branch (main/master
+//     plus Config.ProtectedBranches). NOTE: this in-band set is best-effort — a repo whose
+//     default/protected branch is named otherwise (e.g. trunk) must be listed in
+//     Config.ProtectedBranches; the AUTHORITATIVE branch protection is the repo ruleset (below).
 //
 // What this provider CANNOT authoritatively control is the wire. A GitHub installation token
 // cannot be branch-scoped at the token level: once the sandbox holds a contents:write token it can
@@ -48,8 +56,10 @@
 // a caller — the sandbox git client must never see long-lived credential material (DESIGN.md
 // §2.3). The provider is a key-handling component (it runs in the key broker, not the control
 // plane). The lease book is BOUNDED: every mint first evicts expired leases (zeroing their token
-// bytes), and the (non-interface) RevokeRef shreds a lease eagerly at session end, so a stale
-// token does not linger in process memory past its usefulness (GOAL.md tenet 4).
+// bytes), so the in-process copies cannot accumulate past their (session-capped) expiry. The
+// (non-interface) RevokeRef shreds a lease eagerly — but see the lifecycle residual below: it is
+// not yet wired into the broker's session-release path, and it clears only Console7's in-memory
+// copy, not the GitHub-side token.
 //
 // # Real vs deferred in this PR
 //
@@ -65,4 +75,8 @@
 //     mints to open the PR cannot be bound to the session — the human->NHI lineage stamped at
 //     MintWorkingCredential does not extend to the PR-open call. The token is minimised
 //     (pull_requests:write only) to limit the blast radius of that unavoidable gap.
+//   - RESIDUAL (lifecycle): RevokeRef is not yet called by the broker's session-release path, so
+//     early session end relies on the expiry sweep to reap the in-process copy; and revoking the
+//     GitHub-side installation token before its ~1h expiry (Apps.RevokeInstallationToken) is part
+//     of the deferred data-plane teardown. Both land with the sandbox/teardown wiring.
 package scmgithub

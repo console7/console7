@@ -31,7 +31,9 @@ type Config struct {
 	// metadata); anything else is rejected rather than silently granted.
 	Permissions map[string]string
 	// ProtectedBranches names branches — beyond the always-protected main/master — a working
-	// credential must never be scoped to.
+	// credential must never be scoped to. List any repo whose default/protected branch is named
+	// otherwise (e.g. "trunk", "develop"): this in-band set is best-effort defence-in-depth, and the
+	// authoritative branch protection is the repo's own ruleset (see README).
 	ProtectedBranches []string
 	// TTL bounds working-credential lifetime; the effective expiry is capped further by the GitHub
 	// token expiry and the session deadline. Defaults to DefaultTTL.

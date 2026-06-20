@@ -17,12 +17,16 @@ in-band guards are defence-in-depth). GitHub-side, this provider **does** enforc
 
 - **Short-lived.** The installation token (GitHub caps it ~1h) is capped further to the earliest
   of a configured TTL, the GitHub expiry, and the **session deadline** — it dies with the session.
-- **Repo-scoped.** The mint *requests* scoping to the single requested repository; GitHub enforces
-  the `Repositories` narrowing server-side.
-- **Least-privilege.** Only `contents: write` + `pull_requests: write` (`DefaultPermissions`), and
-  `OpenPullRequest` narrows further to `pull_requests: write`. The adapter rejects any permission
-  key outside its allowlist **and** any level beyond `read`/`write`, so a `Config.Permissions`
-  override can narrow but never widen past least privilege.
+- **Host + repo scoped.** A `RepoRef` on a host the provider doesn't serve is refused. The mint
+  always resolves the installation per-repo by owner+name (a fixed `Config.InstallationID` is an
+  assertion — a mismatch fails closed), then *requests* GitHub's `Repositories` narrowing, which
+  GitHub enforces server-side.
+- **Per-operation least-privilege.** `DefaultPermissions` is the *granted ceiling* (what the App is
+  installed with). Each operation requests only the subset it needs, **intersected** with that
+  ceiling: a working credential gets `contents: write` **only** (it can't open/merge PRs);
+  `OpenPullRequest` mints a separate `pull_requests: write`-only token. The adapter rejects any key
+  outside its allowlist **and** any level beyond `read`/`write`, so a `Config.Permissions` override
+  only ever tightens — never widens.
 - **No durable token leaves the provider.** `MintWorkingCredential` returns only an opaque,
   expiring `CredentialRef`; the token is held behind that ref and never returned to a caller.
 - **PR-only exit.** `OpenPullRequest` opens a PR and never merges, approves, or actuates; it

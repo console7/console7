@@ -27,7 +27,9 @@ func (g *ghApp) CreatePullRequest(ctx context.Context, pr interfaces.PullRequest
 	if err != nil {
 		return "", 0, err
 	}
-	perms, err := toInstallationPermissions(pullRequestPermissions)
+	// pull_requests:write only, intersected with the granted ceiling so a narrowed
+	// Config.Permissions tightens (or fails closed) PR opening rather than being overridden.
+	perms, err := toInstallationPermissions(intersectPermissions(pullRequestPermissions, g.perms))
 	if err != nil {
 		return "", 0, err
 	}

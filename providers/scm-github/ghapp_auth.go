@@ -59,17 +59,21 @@ func (g *ghApp) MintInstallationToken(ctx context.Context, req InstallationToken
 	return token, tok.GetExpiresAt().Time, nil
 }
 
-// installationID resolves the App installation that owns the repo, using the fixed installation
-// when configured, otherwise looking it up so one App can serve several repos.
+// installationID resolves the App installation that owns repo.Owner/repo.Name. It ALWAYS resolves
+// per-repo (GetRepositoryInstallation is owner+name specific), so a fixed Config.InstallationID
+// cannot mint a token scoped by name-only to a homonymous repo under a different account in a
+// multi-org installation. When Config.InstallationID is set it is treated as an assertion: if it
+// does not match the installation that actually owns the repo, the mint fails closed.
 func (g *ghApp) installationID(ctx context.Context, repo interfaces.RepoRef) (int64, error) {
-	if g.fixedInstall != 0 {
-		return g.fixedInstall, nil
-	}
 	inst, _, err := g.appClient.Apps.GetRepositoryInstallation(ctx, repo.Owner, repo.Name)
 	if err != nil {
 		return 0, fmt.Errorf("scmgithub: resolving App installation on %s/%s: %w", repo.Owner, repo.Name, err)
 	}
-	return inst.GetID(), nil
+	id := inst.GetID()
+	if g.fixedInstall != 0 && g.fixedInstall != id {
+		return 0, fmt.Errorf("scmgithub: configured InstallationID %d does not own %s/%s (resolved %d); refusing", g.fixedInstall, repo.Owner, repo.Name, id)
+	}
+	return id, nil
 }
 
 // toInstallationPermissions translates the provider's least-privilege permission map into the

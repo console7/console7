@@ -37,16 +37,102 @@ func TestMintWorkingCredential_ShortLivedRepoScoped(t *testing.T) {
 	if !ref.Expiry.After(now) {
 		t.Fatalf("expected a future expiry, got %v", ref.Expiry)
 	}
-	// The adapter must have been asked for a single-repo, least-privilege scope.
+	// The adapter must have been asked for a single-repo, least-privilege scope. The working
+	// credential needs contents:write ONLY — never pull_requests (the sandbox token must not be
+	// able to open/merge PRs; OpenPullRequest mints its own narrower token).
 	got := auth.LastRequest()
 	if got.Repo != testRepo {
 		t.Fatalf("mint request repo = %+v, want %+v", got.Repo, testRepo)
 	}
-	if got.Permissions["contents"] != "write" || got.Permissions["pull_requests"] != "write" {
-		t.Fatalf("mint request did not request least-privilege contents+pull_requests: %v", got.Permissions)
+	if got.Permissions["contents"] != "write" {
+		t.Fatalf("working credential did not request contents:write: %v", got.Permissions)
 	}
-	if len(got.Permissions) != 2 {
-		t.Fatalf("mint requested more than the two least-privilege permissions: %v", got.Permissions)
+	if _, hasPR := got.Permissions["pull_requests"]; hasPR {
+		t.Fatalf("working credential must NOT request pull_requests: %v", got.Permissions)
+	}
+	if len(got.Permissions) != 1 {
+		t.Fatalf("working credential requested more than contents: %v", got.Permissions)
+	}
+}
+
+func TestMintWorkingCredential_RefusesForeignHost(t *testing.T) {
+	p, auth, _ := newTestProvider() // expectedHost defaults to github.com
+	_, err := p.MintWorkingCredential(context.Background(), interfaces.WorkingCredentialRequest{
+		Subject:         "sso|alice",
+		SessionID:       "s1",
+		Repo:            interfaces.RepoRef{Host: "ghe.example.com", Owner: "acme", Name: "app"},
+		Branch:          "feature/x",
+		SessionDeadline: time.Now().Add(30 * time.Minute),
+	})
+	if err == nil {
+		t.Fatal("expected refusal for a repo on a host the provider does not serve")
+	}
+	if (auth.LastRequest().Repo != interfaces.RepoRef{}) {
+		t.Fatal("a token was minted for a foreign-host repo")
+	}
+}
+
+func TestOpenPullRequest_RefusesForeignHost(t *testing.T) {
+	p, _, prOpener := newTestProvider()
+	_, err := p.OpenPullRequest(context.Background(), interfaces.PullRequest{
+		Repo: interfaces.RepoRef{Host: "ghe.example.com", Owner: "acme", Name: "app"},
+		Head: "feature/x",
+		Base: "main",
+	})
+	if err == nil {
+		t.Fatal("expected refusal for a PR on a host the provider does not serve")
+	}
+	if prOpener.Count() != 0 {
+		t.Fatal("a PR was opened for a foreign-host repo")
+	}
+}
+
+// If the session deadline passes while the (remote) mint is in flight, the provider must re-read
+// the clock after the mint and fail closed rather than record an already-expired credential.
+func TestMintWorkingCredential_RechecksDeadlineAfterMint(t *testing.T) {
+	p, _, _ := newTestProvider()
+	base := time.Now()
+	deadline := base.Add(5 * time.Minute)
+	// First p.now() (pre-mint) sees base (deadline still ahead); second (post-mint) sees a time
+	// past the deadline, as if the mint took long enough for the session to end.
+	times := []time.Time{base, base.Add(10 * time.Minute)}
+	i := 0
+	p.now = func() time.Time {
+		t := times[i]
+		if i < len(times)-1 {
+			i++
+		}
+		return t
+	}
+	if _, err := p.MintWorkingCredential(context.Background(), interfaces.WorkingCredentialRequest{
+		Subject:         "sso|alice",
+		SessionID:       "s1",
+		Repo:            testRepo,
+		Branch:          "feature/x",
+		SessionDeadline: deadline,
+	}); err == nil {
+		t.Fatal("expected fail-closed when the deadline passes during the mint")
+	}
+	p.mu.Lock()
+	n := len(p.leases)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected no lease recorded when the deadline passed during mint, got %d", n)
+	}
+}
+
+func TestIntersectPermissions(t *testing.T) {
+	ceiling := map[string]string{"contents": "write", "pull_requests": "write"}
+	if got := intersectPermissions(map[string]string{"contents": "write"}, ceiling); got["contents"] != "write" || len(got) != 1 {
+		t.Fatalf("contents:write ∩ full ceiling = %v, want {contents:write}", got)
+	}
+	// A request is capped DOWN to a narrower ceiling.
+	if got := intersectPermissions(map[string]string{"pull_requests": "write"}, map[string]string{"pull_requests": "read"}); got["pull_requests"] != "read" {
+		t.Fatalf("write ∩ read ceiling = %v, want read", got)
+	}
+	// A permission the ceiling does not grant is dropped (downstream fails closed).
+	if got := intersectPermissions(map[string]string{"pull_requests": "write"}, map[string]string{"contents": "write"}); len(got) != 0 {
+		t.Fatalf("ungranted permission should be dropped, got %v", got)
 	}
 }
 

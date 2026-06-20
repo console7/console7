@@ -3,6 +3,7 @@ package scmgithub
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
@@ -43,9 +44,29 @@ func New(cfg Config) (*Provider, error) {
 		baseURL:       cfg.BaseURL,
 	}
 	p := NewWithPorts(adapter, adapter, cfg.TTL, cfg.ProtectedBranches...)
-	// Use the configured (validated) least-privilege permission set for minting.
+	// Use the configured (validated) granted-permission ceiling for minting.
 	p.perms = cfg.Permissions
+	// Scope the provider to the SCM host it actually talks to, so a RepoRef for a different host
+	// fails closed rather than minting a homonym on this endpoint.
+	host, err := expectedHostFromBaseURL(cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	p.expectedHost = host
 	return p, nil
+}
+
+// expectedHostFromBaseURL returns the SCM host the provider serves: github.com when BaseURL is
+// unset, otherwise the host of the GitHub Enterprise Server API base.
+func expectedHostFromBaseURL(baseURL string) (string, error) {
+	if baseURL == "" {
+		return DefaultExpectedHost, nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("scmgithub: Config.BaseURL %q is not a valid URL with a host", baseURL)
+	}
+	return u.Host, nil
 }
 
 // newGitHubClient builds a go-github client over the given RoundTripper (an App-JWT or

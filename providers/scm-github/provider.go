@@ -25,20 +25,52 @@ var defaultProtected = map[string]bool{"main": true, "master": true}
 // the earliest of now+TTL, the GitHub token expiry (~1h), and the session deadline.
 const DefaultTTL = 15 * time.Minute
 
-// DefaultPermissions is the least-privilege GitHub App permission set a working credential is
-// narrowed to: write access to repository contents (to push the working branch) and to pull
-// requests (to open the proposal). Nothing else — no admin, no workflow, no secrets. This is the
-// real least-privilege lever the GitHub side offers (the analogue of secrets-gcp's prefix-scoped
-// IAM); the adapter rejects any permission key outside its allowlist and any level beyond
-// read/write. A Config.Permissions override may narrow or re-shape within those bounds, never
-// beyond them.
+// DefaultExpectedHost is the SCM host a Provider scopes to when Config.BaseURL is unset.
+const DefaultExpectedHost = "github.com"
+
+// DefaultPermissions is the GitHub App's GRANTED permission CEILING — what the adopter's App is
+// installed with (contents + pull_requests, write). It is NOT the per-operation grant: each
+// operation requests the still-narrower subset it actually needs, intersected with this ceiling
+// (so narrowing Config.Permissions tightens every operation, never widens it). The adapter rejects
+// any permission key outside its allowlist and any level beyond read/write.
 var DefaultPermissions = map[string]string{"contents": "write", "pull_requests": "write"}
 
-// pullRequestPermissions is the still-narrower set used when OpenPullRequest mints its own token:
-// opening a PR needs only pull_requests:write, NOT contents:write (the working-credential path
-// already did the push). Keeping the PR-open token minimal limits what an actuation-adjacent token
+// workingCredentialPermissions is the per-operation subset a working credential needs: contents
+// write to push the branch — NOT pull_requests (the sandbox token must not be able to open/merge
+// PRs; OpenPullRequest mints its own narrower token). Intersected with the granted ceiling.
+var workingCredentialPermissions = map[string]string{"contents": "write"}
+
+// pullRequestPermissions is the per-operation subset OpenPullRequest needs: pull_requests write
+// only, NOT contents (the push already happened). Intersected with the granted ceiling, so an
+// adopter who narrows pull_requests below write tightens (or fails closed) PR opening rather than
+// being silently overridden. Keeping this token minimal limits what an actuation-adjacent token
 // can do (GOAL.md tenets 4, 6).
 var pullRequestPermissions = map[string]string{"pull_requests": "write"}
+
+// permLevels ranks GitHub App access levels so a per-operation request can be intersected DOWN to
+// the granted ceiling (never up).
+var permLevels = map[string]int{"read": 1, "write": 2}
+
+// intersectPermissions returns, for each requested permission, the LOWER of the requested and the
+// granted level, dropping any permission the ceiling does not grant at all. The result is never
+// broader than either input — so a per-operation request stays least-privilege and an adopter's
+// narrowed Config.Permissions tightens every operation (a dropped/insufficient permission makes
+// the downstream GitHub call fail closed rather than act over-privileged).
+func intersectPermissions(requested, granted map[string]string) map[string]string {
+	out := make(map[string]string, len(requested))
+	for k, want := range requested {
+		have, ok := granted[k]
+		if !ok {
+			continue // not in the ceiling — drop it (fail closed downstream)
+		}
+		if permLevels[have] < permLevels[want] {
+			out[k] = have
+		} else {
+			out[k] = want
+		}
+	}
+	return out
+}
 
 // Provider is the GitHub reference SCMProvider. Its logic depends only on the AppAuth and
 // PullRequestOpener ports; New wires the real ghinstallation + go-github adapter, while
@@ -52,15 +84,16 @@ var pullRequestPermissions = map[string]string{"pull_requests": "write"}
 // yet (see doc.go); until the sandbox PR lands, the lease book is the seam that path will redeem
 // against.
 //
-// auth, pr, protected, perms, ttl, and now are write-once at construction and read without the
-// lock; only leases is mutated after construction and is guarded by mu.
+// auth, pr, protected, perms, expectedHost, ttl, and now are write-once at construction and read
+// without the lock; only leases is mutated after construction and is guarded by mu.
 type Provider struct {
-	auth      AppAuth
-	pr        PullRequestOpener
-	protected map[string]bool
-	perms     map[string]string
-	ttl       time.Duration
-	now       func() time.Time
+	auth         AppAuth
+	pr           PullRequestOpener
+	protected    map[string]bool
+	perms        map[string]string
+	expectedHost string
+	ttl          time.Duration
+	now          func() time.Time
 
 	mu     sync.Mutex
 	leases map[string]scmLease
@@ -99,13 +132,14 @@ func NewWithPorts(auth AppAuth, pr PullRequestOpener, ttl time.Duration, extraPr
 		ttl = DefaultTTL
 	}
 	return &Provider{
-		auth:      auth,
-		pr:        pr,
-		protected: prot,
-		perms:     DefaultPermissions,
-		ttl:       ttl,
-		now:       time.Now,
-		leases:    make(map[string]scmLease),
+		auth:         auth,
+		pr:           pr,
+		protected:    prot,
+		perms:        DefaultPermissions,
+		expectedHost: DefaultExpectedHost,
+		ttl:          ttl,
+		now:          time.Now,
+		leases:       make(map[string]scmLease),
 	}
 }
 
@@ -131,6 +165,12 @@ func (p *Provider) MintWorkingCredential(ctx context.Context, req interfaces.Wor
 	if req.Repo.Host == "" || req.Repo.Owner == "" || req.Repo.Name == "" {
 		return interfaces.CredentialRef{}, errors.New("scmgithub: MintWorkingCredential requires a fully-specified repo")
 	}
+	// Refuse a repo on a different SCM host than this provider serves: the adapter scopes the token
+	// by owner/name against ITS configured endpoint, so a homonymous repo on another host
+	// (github.com vs a GHES instance) would otherwise be minted instead of failing closed.
+	if req.Repo.Host != p.expectedHost {
+		return interfaces.CredentialRef{}, fmt.Errorf("scmgithub: repo host %q is not the host this provider serves (%q)", req.Repo.Host, p.expectedHost)
+	}
 	now := p.now()
 	// Like every minted credential, the SCM token must die with the session: refuse an
 	// absent/past deadline rather than mint one that could outlive the session (DESIGN.md §2.1).
@@ -144,11 +184,13 @@ func (p *Provider) MintWorkingCredential(ctx context.Context, req interfaces.Wor
 		return interfaces.CredentialRef{}, errors.New("scmgithub: refusing to scope a working credential to a protected branch")
 	}
 
-	// Mint the real, repo-scoped, least-privilege installation token. Fail closed: a mint error
-	// yields NO credential, so no partial/over-broad token can leak to the caller.
+	// Mint the real, repo-scoped, least-privilege installation token. The working credential needs
+	// only contents:write (to push the branch) — NOT pull_requests; that is intersected with the
+	// granted ceiling so a narrowed Config.Permissions tightens it. Fail closed: a mint error yields
+	// NO credential, so no partial/over-broad token can leak to the caller.
 	token, ghExpiry, err := p.auth.MintInstallationToken(ctx, InstallationTokenRequest{
 		Repo:        req.Repo,
-		Permissions: p.perms,
+		Permissions: intersectPermissions(workingCredentialPermissions, p.perms),
 	})
 	if err != nil {
 		return interfaces.CredentialRef{}, fmt.Errorf("scmgithub: minting installation token: %w", err)
@@ -157,6 +199,12 @@ func (p *Provider) MintWorkingCredential(ctx context.Context, req interfaces.Wor
 		return interfaces.CredentialRef{}, errors.New("scmgithub: App auth returned an empty installation token")
 	}
 
+	// Re-read the clock AFTER the (remote) mint: if the session deadline passed while the mint was
+	// in flight, fail closed rather than record a token whose lease already outlived the session.
+	now = p.now()
+	if !req.SessionDeadline.After(now) {
+		return interfaces.CredentialRef{}, errors.New("scmgithub: session deadline passed during token mint; refusing to record an expired credential")
+	}
 	// Cap expiry to the earliest of now+ttl, the GitHub token expiry, and the absolute session
 	// deadline.
 	expiry := now.Add(p.ttl)
@@ -189,10 +237,17 @@ func (p *Provider) MintWorkingCredential(ctx context.Context, req interfaces.Wor
 	return interfaces.CredentialRef{Ref: ref, Expiry: expiry}, nil
 }
 
-// RevokeRef eagerly shreds the held token for a credential ref — zeroing the token bytes and
-// removing the lease — and reports whether a lease was found. It is NOT part of the SCMProvider
-// interface; the session-lifecycle owner calls it at session end to honor "revoked when the
-// session ends" (sdk/interfaces/scm.go) rather than waiting for the lazy expiry sweep.
+// RevokeRef eagerly shreds the IN-PROCESS held token for a credential ref — zeroing the token
+// bytes and removing the lease — and reports whether a lease was found. It is NOT part of the
+// SCMProvider interface; it is the hook the session-lifecycle owner SHOULD call at session end to
+// honor "revoked when the session ends" (sdk/interfaces/scm.go) rather than waiting for the lazy
+// expiry sweep.
+//
+// NOT YET WIRED: the broker's session-release path does not call this today, so until it does, the
+// in-process copy is reaped by the expiry sweep (bounded — the lease expiry is capped to the
+// session deadline). And note the SCOPE: this clears only Console7's in-memory copy. Revoking the
+// GitHub-side installation token itself before its ~1h expiry (Apps.RevokeInstallationToken) is
+// part of the deferred data-plane teardown, alongside the sandbox redemption path (doc.go).
 func (p *Provider) RevokeRef(ref string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -233,6 +288,9 @@ func (p *Provider) OpenPullRequest(ctx context.Context, pr interfaces.PullReques
 	if pr.Repo.Host == "" || pr.Repo.Owner == "" || pr.Repo.Name == "" {
 		// Mirror MintWorkingCredential: refuse a malformed repo before any remote call.
 		return interfaces.PRRef{}, errors.New("scmgithub: OpenPullRequest requires a fully-specified repo")
+	}
+	if pr.Repo.Host != p.expectedHost {
+		return interfaces.PRRef{}, fmt.Errorf("scmgithub: repo host %q is not the host this provider serves (%q)", pr.Repo.Host, p.expectedHost)
 	}
 	if pr.Head == "" || pr.Base == "" {
 		return interfaces.PRRef{}, errors.New("scmgithub: OpenPullRequest requires head and base branches")
