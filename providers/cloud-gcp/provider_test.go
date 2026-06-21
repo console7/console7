@@ -1,0 +1,249 @@
+package cloudgcp
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/console7/console7/sdk/interfaces"
+)
+
+// newTestProvider builds a Provider over fresh fakes with a deterministic, monotonic handle
+// generator (so a test can name the handle it provisioned) and an injectable clock.
+func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *InMemorySandboxRuntime, *InMemoryEgressController) {
+	t.Helper()
+	rt := NewInMemorySandboxRuntime()
+	eg := NewInMemoryEgressController()
+	p, err := NewWithPorts(rt, eg, "test", now)
+	if err != nil {
+		t.Fatalf("NewWithPorts: %v", err)
+	}
+	var n int
+	p.newID = func() (string, error) { n++; return "test-sb-" + strconv.Itoa(n), nil }
+	return p, rt, eg
+}
+
+func baseSpec() interfaces.SandboxSpec {
+	return interfaces.SandboxSpec{
+		SessionID: "sess",
+		Subject:   "alice@example.test",
+		Persona:   interfaces.PersonaAuthor,
+		Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}},
+		MaxTTL:    time.Minute,
+	}
+}
+
+func TestNewWithPorts_RejectsNilPorts(t *testing.T) {
+	if _, err := NewWithPorts(nil, NewInMemoryEgressController(), "p", nil); err == nil {
+		t.Fatal("expected error for nil runtime")
+	}
+	if _, err := NewWithPorts(NewInMemorySandboxRuntime(), nil, "p", nil); err == nil {
+		t.Fatal("expected error for nil egress controller")
+	}
+}
+
+func TestProvision_RejectsNonPositiveTTL(t *testing.T) {
+	p, rt, _ := newTestProvider(t, nil)
+	spec := baseSpec()
+	spec.MaxTTL = 0
+	if _, err := p.ProvisionSandbox(context.Background(), spec); err == nil {
+		t.Fatal("expected error for zero MaxTTL")
+	}
+	if rt.Provisioned(interfaces.SandboxHandle{ID: "test-sb-1"}) {
+		t.Fatal("a sandbox was provisioned despite a rejected TTL")
+	}
+}
+
+func TestProvision_SetsPerimeterThenWorkload(t *testing.T) {
+	p, rt, eg := newTestProvider(t, nil)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if !rt.Provisioned(h) {
+		t.Fatal("runtime did not record the provisioned sandbox")
+	}
+	got, ok := eg.PolicyOf(h)
+	if !ok || len(got) != 1 || got[0] != "https://a.internal" {
+		t.Fatalf("perimeter not set to the spec allowlist: %v ok=%v", got, ok)
+	}
+	if !p.Live(h) {
+		t.Fatal("sandbox not live after provision")
+	}
+}
+
+func TestProvision_FailsClosedIfPerimeterCannotBeSet(t *testing.T) {
+	p, rt, eg := newTestProvider(t, nil)
+	eg.SetFailSet(true)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err == nil {
+		t.Fatal("expected provision to fail when the perimeter cannot be set")
+	}
+	if h.ID != "" {
+		t.Fatalf("returned a non-empty handle on failure: %q", h.ID)
+	}
+	// Perimeter-before-workload: the workload must NOT have been provisioned.
+	if rt.Provisioned(interfaces.SandboxHandle{ID: "test-sb-1"}) {
+		t.Fatal("workload was provisioned even though the perimeter could not be set")
+	}
+}
+
+func TestProvision_RollsBackPerimeterIfWorkloadFails(t *testing.T) {
+	p, rt, eg := newTestProvider(t, nil)
+	rt.SetFailProvision(true)
+	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err == nil {
+		t.Fatal("expected provision to fail when the workload cannot start")
+	}
+	// The perimeter set before the failed workload must have been cleared (no orphan).
+	if _, ok := eg.PolicyOf(interfaces.SandboxHandle{ID: "test-sb-1"}); ok {
+		t.Fatal("perimeter was left configured after a failed workload provision")
+	}
+}
+
+func TestProvision_FreshHandlePerCall(t *testing.T) {
+	p, _, _ := newTestProvider(t, nil)
+	h1, _ := p.ProvisionSandbox(context.Background(), baseSpec())
+	h2, _ := p.ProvisionSandbox(context.Background(), baseSpec())
+	if h1.ID == "" || h2.ID == "" || h1.ID == h2.ID {
+		t.Fatalf("expected two distinct non-empty handles, got %q and %q", h1.ID, h2.ID)
+	}
+}
+
+func TestApplyEgress_NarrowsButNeverWidens(t *testing.T) {
+	p, _, eg := newTestProvider(t, nil)
+	spec := baseSpec()
+	spec.Egress.Allowlist = []string{"https://a.internal", "https://b.internal"}
+	h, err := p.ProvisionSandbox(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Narrowing to a subset succeeds and is pushed to the perimeter.
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}}); err != nil {
+		t.Fatalf("narrow should succeed: %v", err)
+	}
+	if got, _ := eg.PolicyOf(h); len(got) != 1 || got[0] != "https://a.internal" {
+		t.Fatalf("perimeter not narrowed: %v", got)
+	}
+	// Widening (a destination not in the provisioned set) must fail closed to deny-all.
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal", "https://evil.internal"}}); err == nil {
+		t.Fatal("expected a widening policy to be refused")
+	}
+	if got, _ := eg.PolicyOf(h); len(got) != 0 {
+		t.Fatalf("perimeter not failed closed to deny-all after a widen attempt: %v", got)
+	}
+	if got, ok := p.EgressOf(h); !ok || len(got) != 0 {
+		t.Fatalf("provider state not deny-all after widen: %v ok=%v", got, ok)
+	}
+}
+
+func TestApplyEgress_FailsClosedOnUnknownHandle(t *testing.T) {
+	p, _, _ := newTestProvider(t, nil)
+	if err := p.ApplyEgressPolicy(context.Background(), interfaces.SandboxHandle{ID: "nope"}, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}}); err == nil {
+		t.Fatal("expected fail-closed on an unknown handle")
+	}
+}
+
+func TestApplyEgress_FailsClosedIfPerimeterSetFails(t *testing.T) {
+	p, _, eg := newTestProvider(t, nil)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	eg.SetFailSet(true)
+	// A valid narrow (subset) but the perimeter Set fails → fail closed, error.
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Fatal("expected an error when the perimeter cannot be applied")
+	}
+	if got, ok := p.EgressOf(h); !ok || len(got) != 0 {
+		t.Fatalf("expected deny-all after a failed apply, got %v ok=%v", got, ok)
+	}
+}
+
+func TestDestroy_IsIrreversible(t *testing.T) {
+	p, rt, _ := newTestProvider(t, nil)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := p.DestroySandbox(context.Background(), h); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if rt.Provisioned(h) {
+		t.Fatal("runtime still reports the sandbox as live after destroy")
+	}
+	if p.Live(h) {
+		t.Fatal("provider still reports the sandbox as live after destroy")
+	}
+	// A second destroy, or an egress change, must fail closed — never resurrect it.
+	if err := p.DestroySandbox(context.Background(), h); err == nil {
+		t.Fatal("expected a second destroy to fail closed")
+	}
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Fatal("expected an egress change on a destroyed sandbox to fail closed")
+	}
+}
+
+func TestDestroy_RuntimeFailureLeavesSandboxLive(t *testing.T) {
+	p, rt, _ := newTestProvider(t, nil)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	rt.SetFailDestroy(true)
+	if err := p.DestroySandbox(context.Background(), h); err == nil {
+		t.Fatal("expected destroy to surface the runtime failure")
+	}
+	// The sandbox may still be live, so the provider must NOT mark it dead — a retry must work.
+	if !p.Live(h) {
+		t.Fatal("a failed destroy wrongly marked the sandbox dead (it may still be live)")
+	}
+	rt.SetFailDestroy(false)
+	if err := p.DestroySandbox(context.Background(), h); err != nil {
+		t.Fatalf("retry destroy should succeed: %v", err)
+	}
+	if p.Live(h) {
+		t.Fatal("sandbox still live after a successful retry destroy")
+	}
+}
+
+func TestDestroy_FailsClosedOnUnknownHandle(t *testing.T) {
+	p, _, _ := newTestProvider(t, nil)
+	if err := p.DestroySandbox(context.Background(), interfaces.SandboxHandle{ID: "nope"}); err == nil {
+		t.Fatal("expected fail-closed on destroying an unknown handle")
+	}
+}
+
+func TestExpiry_FailsClosedAfterTTL(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	p, _, _ := newTestProvider(t, func() time.Time { return clock })
+	spec := baseSpec()
+	spec.MaxTTL = time.Minute
+	h, err := p.ProvisionSandbox(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if !p.Live(h) {
+		t.Fatal("sandbox should be live immediately after provision")
+	}
+	// Advance the clock past the TTL.
+	clock = clock.Add(2 * time.Minute)
+	if p.Live(h) {
+		t.Fatal("sandbox should be reaped (not live) past its MaxTTL")
+	}
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Fatal("expected egress change on an expired sandbox to fail closed")
+	}
+	if err := p.DestroySandbox(context.Background(), h); err == nil {
+		t.Fatal("expected destroy of an expired sandbox to fail closed")
+	}
+}
+
+func TestProvision_PropagatesIDGeneratorError(t *testing.T) {
+	p, _, _ := newTestProvider(t, nil)
+	p.newID = func() (string, error) { return "", errors.New("boom") }
+	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err == nil {
+		t.Fatal("expected provision to surface a handle-generation error")
+	}
+}
