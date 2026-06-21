@@ -33,7 +33,7 @@ flowchart TB
           KBP["broker · signing"]
         end
         subgraph NPSB["node pool: sandboxes — gVisor RuntimeClass runsc"]
-          SBP["ephemeral sandbox pods<br/>NetworkPolicy: egress &rarr; proxy ONLY<br/>genuine Claude Code engine"]
+          SBP["ephemeral sandbox pods<br/>NetworkPolicy: egress &rarr; proxy ONLY<br/>genuine Claude Code engine<br/>+ git + ca-certificates (#48)"]
         end
       end
     end
