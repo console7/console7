@@ -47,9 +47,13 @@ handle IDs.
   allowlist ConfigMap.
 - **DEFERRED to `deploy/gcp/modules/gke` (PR-2b):** the gVisor sandbox node pool (carrying the
   networking module's sandbox tag), Workload Identity, Cloud Router + NAT for the sanctioned
-  egress path, and the **NODE-layer metadata block** (no Workload Identity on the sandbox node
-  pool + GKE metadata concealment) — the authoritative metadata control a VPC firewall cannot
-  provide (see `deploy/gcp/modules/networking`).
+  egress path, the **NODE-layer metadata block** (no Workload Identity on the sandbox node pool +
+  GKE metadata concealment) — the authoritative metadata control a VPC firewall cannot provide —
+  **GKE Dataplane V2** (so the egress NetworkPolicy actually enforces; `New` preflights this and
+  fails closed otherwise), and the **absolute-deadline reaper** (a namespace-TTL CronJob keyed on
+  the `console7.dev/expires-at` annotation this provider stamps). `activeDeadlineSeconds` is a
+  pod-relative backstop; the annotation + reaper enforce the absolute session deadline regardless
+  of scheduling/image-pull latency.
 - **DEFERRED to the egress proxy + base image (PR-3):** the out-of-band forward proxy that does
   the FQDN allowlisting the `EgressController`'s allowlist feeds (a NetworkPolicy is IP-based and
   cannot match FQDNs); and the signed engine image the sandbox pod runs (this provider does not

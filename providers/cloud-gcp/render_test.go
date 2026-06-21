@@ -89,6 +89,25 @@ func TestRenderSandboxPod_TTLFloor(t *testing.T) {
 	}
 }
 
+func TestNetworkPolicyEnforced(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		want bool
+	}{
+		{"\tADVANCED_DATAPATH", true},     // Dataplane V2 enforces inherently
+		{"True\t", true},                  // legacy network-policy addon enabled
+		{"True\tADVANCED_DATAPATH", true}, // both
+		{"\tLEGACY_DATAPATH", false},      // Standard, no addon, Dataplane V1 → inert
+		{"False\tLEGACY_DATAPATH", false}, // addon explicitly off
+		{"", false},                       // empty/unrecognised → fail closed
+		{"something unexpected", false},   // garbage → fail closed
+	} {
+		if got := networkPolicyEnforced(tc.out); got != tc.want {
+			t.Errorf("networkPolicyEnforced(%q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}
+
 func TestRenderNamespaceAndEgress(t *testing.T) {
 	m := string(renderNamespaceAndEgress("sb", []string{"https://a.internal", "https://b.internal"}))
 	for _, want := range []string{

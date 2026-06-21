@@ -3,7 +3,9 @@ package cloudgcp
 import (
 	"context"
 	"errors"
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,57 @@ func baseSpec() interfaces.SandboxSpec {
 		Persona:   interfaces.PersonaAuthor,
 		Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}},
 		MaxTTL:    time.Minute,
+	}
+}
+
+func TestRandomID_FormatAndDistinct(t *testing.T) {
+	gen := randomID("console7")
+	seen := make(map[string]bool)
+	for range 100 {
+		id, err := gen()
+		if err != nil {
+			t.Fatalf("randomID: %v", err)
+		}
+		// "<prefix>-sb-<32 hex>" — DNS-1123-label-safe and bounded under 63 chars.
+		if !strings.HasPrefix(id, "console7-sb-") || len(id) != len("console7-sb-")+32 {
+			t.Fatalf("unexpected id shape: %q (len %d)", id, len(id))
+		}
+		if len(id) > 63 {
+			t.Fatalf("id exceeds the DNS-1123 label limit: %q", id)
+		}
+		if seen[id] {
+			t.Fatalf("randomID returned a duplicate: %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestClose(t *testing.T) {
+	// A provider built by NewWithPorts holds no kubeconfig: Close is a no-op and idempotent.
+	p, err := NewWithPorts(NewInMemorySandboxRuntime(), NewInMemoryEgressController(), "p", nil)
+	if err != nil {
+		t.Fatalf("NewWithPorts: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close on a portless provider should be a no-op: %v", err)
+	}
+
+	// With a kubeconfig path set, Close removes the file and is idempotent (tolerates a missing file).
+	f, err := os.CreateTemp(t.TempDir(), "kubeconfig-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	path := f.Name()
+	_ = f.Close()
+	p.kubeconfigPath = path
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close removing the kubeconfig: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("kubeconfig not removed by Close: stat err=%v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close should be a no-op: %v", err)
 	}
 }
 
@@ -282,5 +335,39 @@ func TestProvision_PropagatesIDGeneratorError(t *testing.T) {
 	p.newID = func() (string, error) { return "", errors.New("boom") }
 	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err == nil {
 		t.Fatal("expected provision to surface a handle-generation error")
+	}
+}
+
+func TestProvision_FreshIDRetriesPastACollision(t *testing.T) {
+	p, _, _ := newTestProvider(t, nil)
+	// First provision takes "dup"; the next generator run returns "dup" again (collision) then a
+	// fresh id — freshID must skip the in-use id and yield the fresh one.
+	ids := []string{"dup", "dup", "fresh"}
+	var i int
+	p.newID = func() (string, error) { id := ids[i]; i++; return id, nil }
+	h1, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil || h1.ID != "dup" {
+		t.Fatalf("first provision: handle=%q err=%v", h1.ID, err)
+	}
+	h2, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("second provision: %v", err)
+	}
+	if h2.ID != "fresh" {
+		t.Fatalf("freshID did not skip the in-use id: got %q, want fresh", h2.ID)
+	}
+}
+
+func TestProvision_FreshIDExhaustionErrors(t *testing.T) {
+	p, _, _ := newTestProvider(t, nil)
+	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err != nil {
+		t.Fatalf("seed provision: %v", err)
+	}
+	// The generator now always returns the already-used id; freshID must give up (not loop forever)
+	// and surface an error rather than collide.
+	p.newID = func() (string, error) { return "test-sb-1", nil }
+	// Seed used "test-sb-1" (the deterministic first id), so every retry collides.
+	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err == nil {
+		t.Fatal("expected freshID exhaustion to error after repeated collisions")
 	}
 }

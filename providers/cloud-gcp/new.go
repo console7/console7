@@ -41,6 +41,13 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		_ = os.Remove(kubeconfigPath)
 		return nil, err
 	}
+	// Fail closed at construction if the cluster would not actually ENFORCE the egress
+	// NetworkPolicy (no GKE Dataplane V2 / network-policy addon) — otherwise the perimeter would be
+	// silently inert and ProvisionSandbox would run a workload it believes is isolated.
+	if err := rc.preflightNetworkPolicyEnforced(ctx, cfg.Cluster, cfg.Location); err != nil {
+		_ = os.Remove(kubeconfigPath)
+		return nil, err
+	}
 
 	p, err := NewWithPorts(
 		&kubeRuntime{run: rc, cfg: cfg},

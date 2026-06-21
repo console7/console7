@@ -12,6 +12,10 @@ import (
 	"github.com/console7/console7/sdk/interfaces"
 )
 
+// rollbackTimeout bounds the detached perimeter-rollback when a provision fails — long enough for
+// a namespace delete to be accepted, short enough not to wedge teardown on an unresponsive API.
+const rollbackTimeout = 30 * time.Second
+
 // errWidenRefused is the sentinel an ApplyEgressPolicy returns when a policy would widen the
 // allowlist beyond what was provisioned (narrow-only; GOAL.md tenet 4 — a permissive origin must
 // not confer a stricter target's reach).
@@ -137,7 +141,13 @@ func (p *Provider) ProvisionSandbox(ctx context.Context, spec interfaces.Sandbox
 	// Now provision the isolated compute. If it fails, tear the perimeter back down so we do not
 	// leak a configured-but-unused perimeter, and surface the error.
 	if err := p.runtime.Provision(ctx, h, spec); err != nil {
-		if cerr := p.egress.Clear(ctx, h); cerr != nil {
+		// Roll back on a DETACHED, bounded context. If Provision failed because the caller's ctx
+		// was cancelled/expired, reusing it would make Clear fail immediately and orphan the
+		// namespace (and any pod the API server accepted before kubectl was killed) — and the
+		// handle is never returned, so this rollback is the only chance to reclaim it.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		if cerr := p.egress.Clear(cleanupCtx, h); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("cloudgcp: clear perimeter after failed provision: %w", cerr))
 		}
 		return interfaces.SandboxHandle{}, fmt.Errorf("cloudgcp: provision sandbox: %w", err)

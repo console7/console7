@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
@@ -88,6 +89,40 @@ func (r *kubeRunner) kubectlDeleteNamespace(ctx context.Context, ns string) erro
 	return err
 }
 
+func (r *kubeRunner) kubectlAnnotate(ctx context.Context, kind, name, kv string) error {
+	_, err := r.run(ctx, "kubectl", nil, "annotate", "--overwrite", kind, name, kv)
+	return err
+}
+
+// preflightNetworkPolicyEnforced refuses to build the provider against a cluster where a
+// NetworkPolicy would be INERT. On GKE Standard without GKE Dataplane V2 (ADVANCED_DATAPATH) or
+// the legacy network-policy addon, `kubectl apply` of a NetworkPolicy succeeds but enforces
+// nothing (Kubernetes: a NetworkPolicy with no implementing controller "will have no effect"), so
+// ProvisionSandbox would start a pod believing default-deny/isolation is active when it is not —
+// the perimeter must fail CLOSED at construction instead.
+func (r *kubeRunner) preflightNetworkPolicyEnforced(ctx context.Context, cluster, location string) error {
+	out, err := r.run(ctx, "gcloud", nil,
+		"container", "clusters", "describe", cluster,
+		"--location", location, "--project", r.project,
+		"--format=value(networkPolicy.enabled,networkConfig.datapathProvider)")
+	if err != nil {
+		return err
+	}
+	if !networkPolicyEnforced(string(out)) {
+		return fmt.Errorf("cloudgcp: cluster %q has no NetworkPolicy enforcement (need GKE Dataplane V2 or the network-policy addon) — refusing to provision sandboxes whose egress perimeter would be inert; got %q", cluster, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// networkPolicyEnforced reports whether a `gcloud container clusters describe` value(...) output
+// indicates a cluster that ENFORCES NetworkPolicy: GKE Dataplane V2 (datapathProvider
+// ADVANCED_DATAPATH) enforces inherently; otherwise the legacy network-policy addon must be on
+// (networkPolicy.enabled = True). Fail-closed: any other/unrecognised output is "not enforced".
+func networkPolicyEnforced(describeOutput string) bool {
+	s := strings.ToUpper(strings.TrimSpace(describeOutput))
+	return strings.Contains(s, "ADVANCED_DATAPATH") || strings.Contains(s, "TRUE")
+}
+
 func (r *kubeRunner) kubectlDeletePod(ctx context.Context, ns, pod string) error {
 	// WAIT for the pod to actually be gone (kubectl --wait defaults true), with a short SIGTERM
 	// grace then SIGKILL, bounded by --timeout. DestroySandbox must not return — letting the
@@ -110,9 +145,17 @@ type kubeRuntime struct {
 
 // Provision creates the gVisor pod (in the namespace the EgressController already created), pinned
 // to the sandbox node pool, with no automounted service-account token and a hard
-// activeDeadlineSeconds from spec.MaxTTL.
+// activeDeadlineSeconds from spec.MaxTTL. It then stamps the ABSOLUTE session deadline onto the
+// namespace so the modules/gke reaper (PR-2b) can hard-delete the sandbox no later than that
+// deadline: activeDeadlineSeconds is RELATIVE to the pod's StartTime (scheduling/image-pull latency
+// pushes it out past the absolute deadline) and only a backstop, so the annotation is the
+// authoritative absolute-deadline signal.
 func (k *kubeRuntime) Provision(ctx context.Context, h interfaces.SandboxHandle, spec interfaces.SandboxSpec) error {
-	return k.run.kubectlApply(ctx, renderSandboxPod(h.ID, k.cfg, spec))
+	if err := k.run.kubectlApply(ctx, renderSandboxPod(h.ID, k.cfg, spec)); err != nil {
+		return err
+	}
+	expiresAt := nowUTC().Add(spec.MaxTTL).Format(time.RFC3339)
+	return k.run.kubectlAnnotate(ctx, "namespace", h.ID, "console7.dev/expires-at="+expiresAt)
 }
 
 // Destroy deletes the sandbox pod (the workload). The namespace and its NetworkPolicy are reaped
@@ -204,6 +247,10 @@ spec:
 		jsonScalar(sandboxImagePlaceholder),
 	)
 }
+
+// nowUTC is the wall clock the adapter stamps absolute-deadline annotations from. A package var so
+// it is unambiguous (and stubbable) though the adapter is exercised only by the integration test.
+var nowUTC = func() time.Time { return time.Now().UTC() }
 
 // sandboxImagePlaceholder is a stand-in until sandbox/base-image (PR-3) publishes the signed
 // engine image; the integration test asserts lifecycle, not engine behaviour, so the pod runs the
