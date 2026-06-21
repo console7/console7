@@ -35,6 +35,8 @@ target/
 bin/
 *.log
 coverage/
+coverage.out
+*.out
 .pytest_cache/
 __pycache__/
 *.py[cod]
