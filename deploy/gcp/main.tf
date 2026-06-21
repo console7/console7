@@ -26,6 +26,29 @@ module "inference_vertex" {
   workload_service_account_email = module.secrets.workload_service_account_email
 }
 
+# Sandbox network perimeter: the static, always-on default-deny egress floor the ephemeral
+# sandboxes run inside — the AUTHORITATIVE network control of record (DESIGN.md §5.2; tenet 3),
+# landed boundary-first (ROADMAP.md sequencing #2) ahead of the sandbox node pool (modules/gke)
+# and the per-session egress proxy. Owns ONLY the DENY floor: enables the Compute API, and creates
+# the VPC + sandbox subnet + a single IPv4 default-deny egress firewall rule scoped to the sandbox
+# node tag. The sanctioned egress path (Cloud Router + NAT, narrow ALLOW rules), the per-session
+# allowlist, and the node-layer metadata/IPv6 controls are deferred to PR-2 — they land with the
+# proxy/cluster that can enforce them, never as a static grant ahead of it. The APPLY identity
+# needs roles/compute.networkAdmin (network/subnet) AND roles/compute.securityAdmin (firewall
+# rules — networkAdmin excludes them); this PR adds both to bootstrap.sh atomically (per-module
+# deploy-identity convention).
+module "networking" {
+  source = "./modules/networking"
+
+  project_id         = var.project_id
+  region             = var.region
+  name_prefix        = var.name_prefix
+  sandbox_node_tag   = var.sandbox_node_tag
+  subnet_cidr_range  = var.sandbox_subnet_cidr
+  pod_cidr_range     = var.sandbox_pod_cidr
+  service_cidr_range = var.sandbox_service_cidr
+}
+
 # Durable WORM evidence backing (GCS): the bucket the EvidenceSink commits records through, plus
 # an append-only (create/get/list, no delete) grant to the same workload SA via an AUTHORITATIVE
 # bucket policy — omitting delete blocks both delete AND overwrite on the append identity (GCS
