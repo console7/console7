@@ -105,7 +105,10 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
    + the backends; whether it becomes a distinct process is undetermined.
 5. **Checkpoint durability + SIEM webhook** — signed checkpoints are in-memory in the Sink;
    the SIEM `Stream` is a ref-integrity check, not a wired, authenticated webhook.
-6. **Image build/sign/SBOM/provenance pipeline** — no release workflow or Dockerfiles yet.
+6. **Image build/sign/SBOM/provenance pipeline** — the sandbox base-image Dockerfile (#45) and
+   its publish destination (`modules/artifact-registry`, `immutable_tags`) now exist, but the
+   **release workflow** that signs/SBOMs/provenances the image, and the consumer-side **digest
+   pin** (`Config.SandboxImage` `@sha256`), are not in tree yet.
 7. **Break-glass actuation mechanism** and **closed-loop remediation bounds** — design-level
    only.
 

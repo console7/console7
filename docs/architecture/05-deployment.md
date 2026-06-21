@@ -44,6 +44,7 @@ flowchart TB
       SM[("Secret Manager<br/>sealed subscription tokens")]
       GCSE[("GCS evidence bucket<br/>bucket-lock WORM + retention")]
       VTX[("Vertex AI endpoint")]
+      AR[("Artifact Registry<br/>sandbox base-image repo<br/>immutable tags")]
     end
 
     WIF["Workload Identity Federation pool<br/>+ GitHub OIDC provider (keyless)"]
@@ -65,6 +66,9 @@ flowchart TB
   KBP -->|"Authenticate"| IDP
   KBP -->|"GitHub App tokens"| GH
 
+  %% sandbox image pull (kubelet, node SA, repo-scoped reader)
+  NPSB -->|"repo-scoped pull (node SA)"| AR
+
   %% sandbox egress path (the only way out)
   SBP --> PROXY --> FW
   FW ==>|"allowlisted only"| VTX
@@ -80,7 +84,7 @@ flowchart TB
   class CPP tier1;
   class KBP broker;
   class SBP dp;
-  class KMS,SM,GCSE,VTX,TFS store;
+  class KMS,SM,GCSE,VTX,AR,TFS store;
   class FW,WIF net;
   class PROXY netPlan;
 ```
@@ -126,6 +130,12 @@ flowchart TB
 - **inference-vertex module** (✅ real): one custom role with **only**
   `aiplatform.endpoints.predict` bound to the existing workload SA — no enumeration, no
   deploy, no self-grant.
+- **artifact-registry module** (✅ real): one **DOCKER** repository (`name_prefix`, regional,
+  `immutable_tags`) for the sandbox base-image + a **repo-scoped** `roles/artifactregistry.reader`
+  on the GKE node SA — replacing the project-wide reader the `gke` module used to grant against no
+  repository (least privilege; the node pulls *this* image and no other repo's). Mints no identity;
+  grants no push/delete/admin. The bootstrap APPLY SA gains `roles/artifactregistry.admin` (the
+  least over-grant covering repo-create + repo-IAM).
 - **networking module** (✅ real, PR #39): the static default-deny egress **floor** — custom-mode
   VPC + sandbox subnet (flow logs, private Google access) + one **default-DENY egress** firewall
   rule scoped to the sandbox node tag (logged). Boundary-first; the tagged node pool that activates
@@ -152,8 +162,11 @@ repo federate to GCP via WIF and assume one of two split service accounts (see v
 Per `ARCHITECTURE.md` §6.4 / `DESIGN.md` §8, four artifacts ship with **distinct signing
 identities**: control-plane image, **key-broker image**, **sandbox base image** (runs
 untrusted code — must not share a build identity with the key holder), and the SDK packages.
-The Dockerfiles/build pipelines for these images are **(assumed/planned)** — not in tree at
-this commit (see view [08](08-dependency-supply-chain.md)).
+The **registry** the sandbox base-image is published to is now in tree (`modules/artifact-registry`,
+✅ — `immutable_tags` repository + repo-scoped node-SA pull). The **signing/SBOM/provenance build
+pipeline** that populates it (`.github/workflows/sandbox-image-release.yml`) and the consumer-side
+**digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`) remain **(planned)** — not
+in tree at this commit (see view [08](08-dependency-supply-chain.md)).
 
 ## Local / cloudless target (`console7-cloud-local`)
 A dogfood topology with **no cloud**: a Docker/Podman-backed `CloudProvider` runs each

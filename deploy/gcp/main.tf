@@ -80,6 +80,21 @@ module "gke" {
   deletion_protection                    = var.gke_deletion_protection
 }
 
+# Sandbox-image registry (Artifact Registry): the one Docker repository the signed sandbox
+# base-image (untrusted-agent runtime, distinct signing identity) is published to, plus a
+# repo-SCOPED pull grant to the gke module's node SA. Consumes module.gke.node_service_account_email
+# and narrows the node's image read to this repo — replacing the project-wide artifactregistry.reader
+# the gke module used to grant against no repository (least privilege; GOAL.md tenet 5). The APPLY
+# identity needs roles/artifactregistry.admin (repo create + repo IAM; bootstrap.sh).
+module "artifact_registry" {
+  source = "./modules/artifact-registry"
+
+  project_id                 = var.project_id
+  region                     = var.region
+  name_prefix                = var.name_prefix
+  node_service_account_email = module.gke.node_service_account_email
+}
+
 # Durable WORM evidence backing (GCS): the bucket the EvidenceSink commits records through, plus
 # an append-only (create/get/list, no delete) grant to the same workload SA via an AUTHORITATIVE
 # bucket policy — omitting delete blocks both delete AND overwrite on the append identity (GCS

@@ -19,6 +19,7 @@ module serves both new-project and existing-project adopters.
 | `modules/secrets/` | **active** | KMS key ring + KEK + least-privilege workload SA (`SecretsProvider` substrate) |
 | `modules/networking/` | stub | default-deny egress perimeter (boundary-first sandbox PR) |
 | `modules/gke/` | stub | gVisor node pool + Workload Identity (binds the secrets SA) |
+| `modules/artifact-registry/` | **active** | Docker repository for the signed sandbox base-image + repo-scoped pull grant to the GKE node SA |
 | `modules/evidence/` | stub | GCS bucket-lock WORM behind the evidence `Store` seam |
 
 ## Prerequisites (bootstrap, not this module)
