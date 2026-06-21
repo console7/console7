@@ -69,9 +69,11 @@ variable "master_ipv4_cidr" {
   description = "RFC-1918 /28 for the private cluster's hosted control-plane endpoint. Must not overlap the subnet or its secondary ranges."
   default     = "172.16.0.0/28"
 
+  # /28 AND network-address form (host bits zero) — GCP rejects a host-bit-set master CIDR at
+  # apply, so reject it at plan, matching every other CIDR var in this deploy.
   validation {
-    condition     = can(cidrhost(var.master_ipv4_cidr, 0)) && tonumber(split("/", var.master_ipv4_cidr)[1]) == 28
-    error_message = "master_ipv4_cidr must be a /28 CIDR, e.g. \"172.16.0.0/28\"."
+    condition     = can(cidrhost(var.master_ipv4_cidr, 0)) && tonumber(split("/", var.master_ipv4_cidr)[1]) == 28 && var.master_ipv4_cidr == format("%s/%s", try(cidrhost(var.master_ipv4_cidr, 0), ""), try(split("/", var.master_ipv4_cidr)[1], ""))
+    error_message = "master_ipv4_cidr must be a /28 CIDR in network-address form (host bits zero), e.g. \"172.16.0.0/28\"."
   }
 }
 

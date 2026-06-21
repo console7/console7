@@ -74,9 +74,19 @@ spec:
           restartPolicy: Never
           automountServiceAccountToken: true
           securityContext:
+            # runAsNonRoot ALONE is not enough: the cloud-sdk image has no USER directive (runs as
+            # UID 0), so the kubelet would refuse the container ("image will run as root") and the
+            # reaper would never fire. Pin a concrete non-root UID/GID so it actually starts.
             runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             seccompProfile:
               type: RuntimeDefault
+          # readOnlyRootFilesystem is kept; kubectl needs a writable HOME for its discovery cache, so
+          # give it an in-memory /tmp (the only writable path) and point HOME at it.
+          volumes:
+            - name: tmp
+              emptyDir: {}
           containers:
             - name: reaper
               # Google Cloud SDK image (bundles kubectl + bash + GNU date) from the trusted gcr.io
@@ -87,6 +97,12 @@ spec:
                 readOnlyRootFilesystem: true
                 capabilities:
                   drop: ["ALL"]
+              env:
+                - name: HOME
+                  value: /tmp
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
               resources:
                 requests:
                   cpu: 50m

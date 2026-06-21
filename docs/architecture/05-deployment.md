@@ -123,12 +123,16 @@ flowchart TB
   deploy, no self-grant.
 - **networking module** (✅ real, PR #39): the static default-deny egress **floor** — custom-mode
   VPC + sandbox subnet (flow logs, private Google access) + one **default-DENY egress** firewall
-  rule scoped to the sandbox node tag (logged). Boundary-first, but **inert until `modules/gke`
-  creates the tagged node pool**; it deliberately **defers** the sanctioned egress path (Cloud
-  Router + NAT, narrow ALLOW rules), the per-session allowlist + per-pod NetworkPolicy, the
-  metadata/IMDS block (a node/pod control, *not* a VPC rule), and IPv6 denial.
-- **gke** module remains **(planned/stub)** — gVisor node pool (sandbox tag) + Workload Identity
-  + Cloud Router/NAT + the node-layer metadata block (with `providers/cloud-gcp`, PR #41 / PR-2b).
+  rule scoped to the sandbox node tag (logged). Boundary-first; the tagged node pool that activates
+  it is landed in `modules/gke` (below).
+- **gke** module (✅ landed, PR-2b): hardened regional GKE cluster (Dataplane V2 NetworkPolicy
+  enforcement; cluster Workload Identity; private nodes; master-authorized-networks; shielded
+  nodes) + gVisor sandbox node pool (`sandbox_config gvisor`; sandbox node tag; `GKE_METADATA`
+  node-SA concealment; structural gVisor taint) + control-plane pool + least-privilege node SA +
+  WI binding (control KSA → secrets SA) + Cloud Router/NAT for the sanctioned egress path +
+  namespace-TTL reaper. The per-session NetworkPolicy is programmed at runtime by
+  `providers/cloud-gcp` (PR #41). Only the **out-of-band egress proxy** + composed FQDN allowlist
+  remain pending (PR-3).
 
 ## Deploy-time topology (provisioning identities)
 Provisioning is **keyless**: GitHub Actions in the adopter's `console7-deploy[-template]`
@@ -172,10 +176,11 @@ flowchart LR
 ```
 
 ## Notes & confidence
-- The managed-service IAM/topology (KMS/SM/GCS/Vertex) and the **VPC + sandbox subnet + the
-  default-DENY egress floor** (PR #39) are grounded in real Terraform; the **GKE cluster, node
-  pools, Cloud NAT, egress proxy, and NetworkPolicy** are drawn per `ARCHITECTURE.md` §4 and
-  `DESIGN.md` §5 but their Terraform is still **(planned/stub)** — so treat the in-cluster
-  topology (and the diagram's NAT/proxy) as the specified target, not yet-provisioned code.
+- The managed-service IAM/topology (KMS/SM/GCS/Vertex), the **VPC + sandbox subnet + default-DENY
+  egress floor** (PR #39), and the **GKE cluster, node pools, Cloud NAT, WI binding, and reaper**
+  (PR-2b) are grounded in real Terraform; the per-session **NetworkPolicy** is programmed at
+  runtime by `providers/cloud-gcp` (PR #41). Only the **out-of-band egress proxy** (and its
+  composed FQDN allowlist) remains **(planned/stub)** (PR-3) — treat the diagram's proxy as the
+  specified target, not yet-provisioned code.
 - HA posture (single-region / multi-region active-active / break-glass) is an **adopter
   configuration choice**, not a fixed feature (`ARCHITECTURE.md` §4) — **(assumed)** here.
