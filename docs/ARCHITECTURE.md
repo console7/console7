@@ -122,7 +122,12 @@ The model-inference crossing is the **only** one, and its destination is an adop
 choice: **Vertex or Bedrock keep inference inside the adopter's own cloud
 account/region**; **direct Anthropic** leaves to the Anthropic API under commercial
 terms. Console7 documents this boundary precisely so the adopter can self-classify
-against their obligations; it does not make that determination for them.
+against their obligations; it does not make that determination for them. The
+inference-backend cloud is an axis **orthogonal** to the control-plane cloud, and
+"in-tenancy" is a property of the **egress allowlist and network zone**, not of the
+backend's cloud identity — so a multicloud topology (e.g. a GCP control plane reaching
+Bedrock over a private interconnect) is supported configuration, not a new seam
+([`docs/adr/0004`](adr/0004-inference-backend-is-pure-routing.md)).
 
 ## 4. Deployment topology
 
@@ -151,7 +156,7 @@ keeps the maintainer out of the adopter's tenancy.
 | `SecretsProvider` | secret storage, envelope encryption, KMS | GCP Secret Manager + Cloud KMS |
 | `IdentityProvider` | user SSO/OIDC, group/role mapping | OIDC (Okta / Entra) |
 | `SCMProvider` | clone, branch, PR, short-lived tokens | GitHub App |
-| `InferenceBackend` | subscription / Vertex / Bedrock / direct | Vertex |
+| `InferenceBackend` | subscription / Vertex / Bedrock / direct (pure routing — [ADR-0004](adr/0004-inference-backend-is-pure-routing.md)) | Vertex |
 | `PolicyEngine` | rule evaluation | OPA (or Cedar) |
 | `PolicySoR` | authoritative tier × stratum lookup | pluggable adapter |
 | `EvidenceSink` | WORM store + SIEM stream | GCS bucket-lock + SIEM webhook |
