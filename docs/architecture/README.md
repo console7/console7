@@ -9,10 +9,14 @@ Mermaid C4 dialect) for reliable GitHub rendering; the C4 *levels* are noted in 
 
 > **Status of the system.** Console7 is pre-alpha. The credential/identity/evidence **core
 > is implemented** (orchestrator, PDP, key broker + signing, evidence WORM, and the
-> GCP/GitHub/Vertex/Anthropic/GCS reference providers); the **authoritative boundary
-> controls** (gVisor sandbox, default-deny egress proxy, DLP, Observe Gateway, MCP
-> allowlist) and the **release/signing pipeline** are still scaffolds or tracked targets.
-> The views mark this explicitly. See [Reviewer observations](#c-reviewer-observations).
+> GCP/GitHub/Vertex/Anthropic/GCS reference providers), and the **authoritative sandbox
+> boundary is now largely landed** — gVisor isolation, per-session default-deny egress
+> (NetworkPolicy on Dataplane V2), Cloud NAT, and node-SA metadata concealment
+> (`providers/cloud-gcp` #41, `modules/gke` #43). Still **target state**: the out-of-band
+> FQDN-allowlist egress **proxy** (PR-3), the **base-image/engine wrap**, **DLP**, the
+> **Observe Gateway**, the **MCP allowlist**, and the **release/signing pipeline**. The views
+> mark this explicitly — **faded + dashed = target state**. See
+> [Reviewer observations](#c-reviewer-observations).
 
 ## The views
 
@@ -31,6 +35,11 @@ Mermaid C4 dialect) for reliable GitHub rendering; the C4 *levels* are noted in 
 - **Status markers:** ✅ implemented (read in source) · ◻ scaffold/placeholder or tracked
   target · ⬡ pluggable seam · **(assumed)** inferred from the normative docs, not confirmed
   in code.
+- **Target-state rendering (visual):** elements **not yet coded & landed** are drawn **faded
+  with a dashed border** (flowcharts — a lighter `*Plan` class variant) or inside a **shaded
+  `rect`** (sequence diagrams), in addition to the ◻/(planned) text marker. Solid = implemented
+  & landed. *(Cross-view nuance: a box can be solid in one view and faded in another when the
+  question differs — e.g. a component's code exists but its deployment infra isn't provisioned.)*
 - **Trust tiers / colours:** Tier-1 control plane (blue), key broker (purple, *separate*
   artifact), data-plane sandbox (red, untrusted), SDK seams (green), reference providers /
   OSS (amber), stores (grey).
@@ -100,16 +109,15 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
 ## (c) Reviewer observations
 What a second-line (2LoD) reviewer should flag, roughly in priority order:
 
-1. **The controls of record lag the defence-in-depth layers (now partially closing).** Tenet 2
-   makes least-privilege IAM + **default-deny egress** the authoritative controls. The
-   *implemented* protections are still mostly the in-band/cryptographic layers (signing,
-   evidence chain, seam refusals); on the boundary side, PR #39 has landed the **static
-   default-deny egress floor** (VPC + DENY firewall rule), but the rest of the perimeter —
-   **gVisor node pool, Cloud NAT, egress proxy, per-session allowlist, NetworkPolicy, and the
-   node-layer metadata/IMDS block** — plus **DLP, MCP allowlist, and Observe Gateway** remain
-   scaffold or in-flight (`providers/cloud-gcp` #41, `modules/gke`). Until those land, the live
-   security posture still rests largely on layers the design itself classifies as
-   non-authoritative — the single most important gap to track against the roadmap.
+1. **The controls of record have now substantially landed.** Tenet 2 makes least-privilege
+   IAM + **default-deny egress** the authoritative controls. As of #39/#41/#43 these are real:
+   **gVisor syscall isolation**, **per-session default-deny egress** (NetworkPolicy on Dataplane
+   V2), **Cloud NAT**, and **node-SA metadata concealment** (`providers/cloud-gcp`, `modules/gke`)
+   — on top of the already-implemented cryptographic layers (signing, evidence chain, seam
+   refusals). What **remains target state**: the **out-of-band FQDN-allowlist egress proxy**
+   (PR-3), the **base-image/engine wrap**, **DLP**, the **Observe Gateway**, the **MCP allowlist**,
+   and the **release/signing pipeline**. The residual gap is now the *content-aware* egress
+   controls (FQDN allowlist + DLP) and the operate lane — not the coarse boundary, which is in place.
 2. **Evidence integrity vs the privileged provisioning identity (SoD gap).** The GCS evidence
    bucket is only **tamper-evident** until `is_locked=true` (off by default, `RISKS.md` R-2),
    and the **APPLY SA holds `roles/storage.admin`** — so the very identity that provisions
