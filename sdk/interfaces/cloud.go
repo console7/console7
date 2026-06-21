@@ -72,6 +72,6 @@ type CloudProvider interface {
 	// SECURITY: destruction MUST be irreversible and MUST wipe the ephemeral
 	// workspace and any injected credential material; it MUST NOT snapshot, archive,
 	// or otherwise persist sandbox contents anywhere the maintainer or another
-	// session could read them (GOAL.md tenet 1, tenet 4).
+	// session could read them (GOAL.md tenet 1, tenet 5).
 	DestroySandbox(ctx context.Context, h SandboxHandle) error
 }
