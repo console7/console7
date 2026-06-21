@@ -56,7 +56,7 @@ flowchart TB
     %% ---------- Data plane (untrusted, ephemeral) ----------
     subgraph DP["Data plane &mdash; per-session, ephemeral, UNTRUSTED (distinct base image)"]
       direction TB
-      SB["◻ sandbox base-image<br/>wraps genuine Claude Code engine<br/>policyHelper: locked settings + PreToolUse hooks"]
+      SB["✅ sandbox base-image<br/>wraps genuine Claude Code engine<br/>policyHelper: locked settings + tripwire hook"]
       PX["◻ egress-proxy<br/>default-deny perimeter (authoritative)"]
       OG["◻ observe-gateway<br/>redacting, audited telemetry façade"]
     end
@@ -167,7 +167,7 @@ flowchart TB
 ### Data plane (`sandbox/`) — untrusted, ephemeral, distinct base image
 | Container | Status | Responsibility |
 |---|---|---|
-| `base-image` | ◻ README | Wraps the **genuine** Claude Code engine; `policyHelper` renders locked managed-settings + PreToolUse hooks per persona × tier. |
+| `base-image` | ✅ Dockerfile + `policyhelper` | Wraps the **genuine**, pinned Claude Code engine (distinct build identity, non-root, fail-closed); `policyHelper` renders the locked managed-settings + the operate mutating-command tripwire binary per persona × tier (PR-3). Signing/SBOM + engine-wiring deferred. |
 | `egress-proxy` | ◻ README | Control-side helper for the **authoritative** default-deny perimeter (cloud firewall + NAT), incl. IMDS block — *not* an in-process proxy. |
 | `observe-gateway` | ◻ README | Operate-lane redacting, query-audited, rate-limited façade over production telemetry. |
 

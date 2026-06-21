@@ -1,0 +1,51 @@
+name: hadolint (sandbox base image)
+
+# CO-17 (code quality) / CO-05 (supply chain) — lint the sandbox base-image Dockerfile. Guarded on
+# its presence so it activates when the image lands and skips cleanly otherwise. hadolint runs from
+# its DIGEST-pinned image (not a floating tag), SHA-pinned checkout, least-privilege token, per the
+# SDLC standard. The full build + sign + SBOM + provenance pipeline (the signed-release milestone)
+# is separate; this is the static-lint gate.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: detect dockerfile
+    runs-on: ubuntu-latest
+    outputs:
+      has_dockerfile: ${{ steps.detect.outputs.has_dockerfile }}
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: detect
+        run: |
+          if [ -f sandbox/base-image/Dockerfile ]; then
+            echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  hadolint:
+    name: hadolint
+    needs: detect
+    if: needs.detect.outputs.has_dockerfile == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: hadolint (digest-pinned)
+        run: |
+          docker run --rm -i \
+            hadolint/hadolint@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e \
+            hadolint - < sandbox/base-image/Dockerfile
