@@ -36,6 +36,52 @@ variable "kms_rotation_period" {
   }
 }
 
+variable "sandbox_node_tag" {
+  type        = string
+  description = "Network tag the sandbox node pool (modules/gke, deferred) carries. The default-deny egress + metadata-deny firewall rules target this tag, so ONLY sandbox-tagged workloads are walled; the control-plane / egress-proxy nodes carry a different tag and keep their sanctioned NAT egress."
+  default     = "console7-sandbox"
+
+  validation {
+    condition     = can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.sandbox_node_tag))
+    error_message = "sandbox_node_tag must be a valid GCE network tag: 1-63 chars, lowercase letter first, lowercase letters/digits/hyphens, not ending in a hyphen."
+  }
+}
+
+variable "sandbox_subnet_cidr" {
+  type        = string
+  description = "Primary CIDR for the sandbox subnet (node IPs)."
+  default     = "10.0.0.0/20"
+
+  # Network-address form (host bits zero): the subnetwork resource rejects host-bit-set CIDRs at
+  # apply, so reject them at plan.
+  validation {
+    condition     = can(cidrhost(var.sandbox_subnet_cidr, 0)) && var.sandbox_subnet_cidr == format("%s/%s", try(cidrhost(var.sandbox_subnet_cidr, 0), ""), try(split("/", var.sandbox_subnet_cidr)[1], ""))
+    error_message = "sandbox_subnet_cidr must be a valid CIDR in network-address form (host bits zero), e.g. \"10.0.0.0/20\"."
+  }
+}
+
+variable "sandbox_pod_cidr" {
+  type        = string
+  description = "Secondary CIDR for GKE pod IPs in the sandbox subnet (modules/gke aliases this range)."
+  default     = "10.4.0.0/14"
+
+  validation {
+    condition     = can(cidrhost(var.sandbox_pod_cidr, 0)) && var.sandbox_pod_cidr == format("%s/%s", try(cidrhost(var.sandbox_pod_cidr, 0), ""), try(split("/", var.sandbox_pod_cidr)[1], ""))
+    error_message = "sandbox_pod_cidr must be a valid CIDR in network-address form (host bits zero), e.g. \"10.4.0.0/14\"."
+  }
+}
+
+variable "sandbox_service_cidr" {
+  type        = string
+  description = "Secondary CIDR for GKE service (ClusterIP) addresses in the sandbox subnet."
+  default     = "10.8.0.0/20"
+
+  validation {
+    condition     = can(cidrhost(var.sandbox_service_cidr, 0)) && var.sandbox_service_cidr == format("%s/%s", try(cidrhost(var.sandbox_service_cidr, 0), ""), try(split("/", var.sandbox_service_cidr)[1], ""))
+    error_message = "sandbox_service_cidr must be a valid CIDR in network-address form (host bits zero), e.g. \"10.8.0.0/20\"."
+  }
+}
+
 variable "evidence_retention_seconds" {
   type        = number
   description = "Evidence-bucket object retention period in seconds (the WORM window). Default 7 years."

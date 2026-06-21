@@ -271,6 +271,14 @@ gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
 # (buckets.create/get/update/setRetentionPolicy/lockRetentionPolicy + bucket setIamPolicy,
 # excluding objects.*) is a tracked future tightening (GOAL.md tenet 5).
 grant_project_role "$APPLY_SA_EMAIL" "roles/storage.admin"
+# deploy/gcp/modules/networking's delta (the boundary-first egress wall) adds compute resources
+# the APPLY identity must manage: the sandbox VPC + subnet, and the default-deny egress +
+# metadata-deny firewall rules. roles/compute.networkAdmin is the project-level grant for
+# networks.create / subnetworks.create / firewalls.create (and the matching update/delete on
+# `terraform destroy`). It confers no instance create/start (that is compute.instanceAdmin, added
+# with modules/gke when the sandbox node pool lands), so it does not let the deploy identity run
+# workloads — only shape the perimeter they will run inside.
+grant_project_role "$APPLY_SA_EMAIL" "roles/compute.networkAdmin"
 
 # --- outputs --------------------------------------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
