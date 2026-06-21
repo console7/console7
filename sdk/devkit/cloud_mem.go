@@ -2,6 +2,9 @@ package devkit
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -149,6 +152,48 @@ func (c *MemCloud) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 	sb.egress = nil
 	c.reg.Destroy(h)
 	return nil
+}
+
+// RunTask is the bench stand-in for the genuine engine run. It does NOT launch claude (the
+// bench has no engine, no credential, and must stay offline and reproducible): it derives a
+// DETERMINISTIC digest over the task coordinates so the orchestration spine signs a real-shaped
+// digest end to end, exactly the role the orchestrator's old synthetic commitDigest played before
+// the seam existed. A real CloudProvider (providers/cloud-gcp, console7-cloud-local) runs the
+// engine and returns the genuine commit; MemCloud models only the lifecycle and the seam shape.
+//
+// It fails closed on an unknown, destroyed, or expired sandbox — a task must never "run" outside a
+// live sandbox, the same gate ApplyEgressPolicy/DestroySandbox enforce — so the conformance
+// no-run-after-destroy invariant holds against the double too.
+func (c *MemCloud) RunTask(ctx context.Context, h interfaces.SandboxHandle, task interfaces.EngineTask) (interfaces.EngineResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sb, ok := c.lookup(h)
+	if !ok || !sb.live {
+		return interfaces.EngineResult{}, errors.New("devkit: MemCloud cannot run a task in an unknown, destroyed, or expired sandbox")
+	}
+	digest := benchCommitDigest(task)
+	return interfaces.EngineResult{
+		CommitDigest: digest,
+		HeadSHA:      hex.EncodeToString(digest)[:40],
+		FilesChanged: []string{"(devkit MemCloud stand-in: no genuine engine run, deterministic digest over task coordinates)"},
+		Changed:      true,
+	}, nil
+}
+
+// benchCommitDigest derives the deterministic digest MemCloud.RunTask "produces". It is the
+// relocated body of the orchestrator's former synthetic commitDigest: a SHA-256 over the work's
+// coordinates, domain-tagged "c7-commit-v1" so a commit signature can never be confused with an
+// evidence-record signature minted by the same NHI key (cf. the orchestrator's evidenceDomain).
+func benchCommitDigest(task interfaces.EngineTask) []byte {
+	h := sha256.New()
+	h.Write([]byte("c7-commit-v1"))
+	for _, s := range []string{task.Repo.Host, task.Repo.Owner, task.Repo.Name, task.Branch, string(task.SessionID)} {
+		var u8 [8]byte
+		binary.BigEndian.PutUint64(u8[:], uint64(len(s)))
+		h.Write(u8[:])
+		h.Write([]byte(s))
+	}
+	return h.Sum(nil)
 }
 
 // Live reports whether h is a known, not-yet-destroyed, not-yet-expired sandbox. Test-only

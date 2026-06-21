@@ -97,7 +97,7 @@ flowchart TB
     ST1["stamp 'session-start' (lineage anchor)"]
     PROV["Cloud.ProvisionSandbox(SandboxSpec, default-deny egress)"]
     RINF["resolveInference()<br/>Resolve &rarr; onAllowlist() &rarr; ApplyEgressPolicy(narrow) &rarr; InjectSubscription?"]
-    PROP["propose()<br/>SignSession(commitDigest) &rarr; stamp 'pr-opening' &rarr; OpenPullRequest &rarr; stamp 'pr-opened'"]
+    PROP["propose()<br/>Cloud.RunTask(EngineTask) &rarr; SignSession(commitTBS(EngineResult.CommitDigest)) &rarr; stamp 'pr-opening' &rarr; OpenPullRequest &rarr; stamp 'pr-opened'<br/>(no-op run &rarr; stamp 'no-change', no PR)"]
     TDN["teardown (cleanupCtx = WithoutCancel)<br/>DestroySandbox &rarr; stamp 'session-end'/'aborted' &rarr; sealCheckpoint"]
     APP["appendSigned()/stamp(): wrap each record's payload with NHI signature<br/>payloadTBS domain 'c7-evidence-v1'"]
     VRP["VerifyRecordPayload(caRoot, rec)<br/>checks lineage sig + persona&harr;NHI cert binding"]

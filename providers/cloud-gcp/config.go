@@ -13,6 +13,10 @@ const DefaultNamePrefix = "console7"
 // DefaultRuntimeClass is the Kubernetes RuntimeClass GKE Sandbox (gVisor) registers.
 const DefaultRuntimeClass = "gvisor"
 
+// DefaultWorkdir is the in-pod repository checkout the engine works and commits in — the
+// sandbox base image's workspace (sandbox/base-image/Dockerfile: home/WORKDIR /workspace).
+const DefaultWorkdir = "/workspace"
+
 // Config configures the production provider (New), which dials the cluster via the adopter's
 // pinned kubectl + gcloud. The cluster, the gVisor node pool, and the sandbox network tag are
 // provisioned by deploy/gcp/modules/gke (PR-2b); these fields are that module's outputs.
@@ -36,6 +40,10 @@ type Config struct {
 	NodePool string
 	// RuntimeClass is the gVisor RuntimeClass name. Defaults to DefaultRuntimeClass.
 	RuntimeClass string
+	// Workdir is the checked-out repository path inside the sandbox pod the engine works and commits
+	// in (the base image's workspace). RunTask reads the produced commit from here. Defaults to
+	// DefaultWorkdir.
+	Workdir string
 }
 
 // namePrefixRe bounds the prefix so derived Kubernetes object names ("<prefix>-sb-<32 hex>")
@@ -53,6 +61,9 @@ func (c Config) normalize() (Config, error) {
 	}
 	if c.NodePool == "" {
 		c.NodePool = c.NamePrefix + "-sandbox"
+	}
+	if c.Workdir == "" {
+		c.Workdir = DefaultWorkdir
 	}
 	if c.ProjectID == "" {
 		return Config{}, errors.New("cloudgcp: Config.ProjectID is required")

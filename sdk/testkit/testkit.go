@@ -104,6 +104,7 @@ func registry() []check {
 		{Contract{"CloudProvider", "ProvisionSandbox", "reuse a sandbox across sessions, users, or personas"}, hasCloud, checkCloudProvisionSandbox},
 		{Contract{"CloudProvider", "ApplyEgressPolicy", "widen egress beyond the provisioned allowlist, or fail open when a policy cannot be applied"}, hasCloud, checkCloudApplyEgressPolicy},
 		{Contract{"CloudProvider", "DestroySandbox", "leave a destroyed sandbox operable, or otherwise make destruction reversible"}, hasCloud, checkCloudDestroySandbox},
+		{Contract{"CloudProvider", "RunTask", "run a task outside a live, perimeter-intact sandbox, or sign off on a changed run with no commit digest"}, hasCloud, checkCloudRunTask},
 		{Contract{"SecretsProvider", "MintEphemeral", "return long-lived or plaintext credential material to the control plane, or grant wider scope/TTL than requested"}, hasSecrets, checkSecretsMintEphemeral},
 		{Contract{"SecretsProvider", "StoreSubscriptionToken", "store under a shared key, leave a standing operator read path, or pool the token"}, hasSecrets, checkSecretsStoreSubscriptionToken},
 		{Contract{"SecretsProvider", "InjectSubscriptionToken", "return plaintext to the caller, inject into a non-owner sandbox, or back an unattended session"}, hasSecrets, checkSecretsInjectSubscriptionToken},
@@ -212,6 +213,60 @@ func checkCloudDestroySandbox(ctx context.Context, p ProviderUnderTest) error {
 	}
 	if err := p.Cloud.ApplyEgressPolicy(ctx, h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
 		return errors.New("operated on a destroyed sandbox")
+	}
+	return nil
+}
+
+// checkCloudRunTask asserts the interface-observable half of the RunTask contract: a task runs
+// ONLY inside a live, perimeter-intact sandbox, never after destruction, and a run reported as
+// changed carries a non-empty commit digest the orchestrator can sign.
+//
+// SCOPE: the guarantees that are NOT observable through the interface — that the engine ran under
+// the LOCKED managed-settings, that egress was not widened, that no transcript/secret leaked back —
+// are asserted by providers/cloud-gcp's own white-box tests (it renders managed-settings before the
+// exec and passes the prompt over stdin), not here, exactly like the SecretsProvider no-read-path
+// guarantees (see the check-struct SCOPE note).
+func checkCloudRunTask(ctx context.Context, p ProviderUnderTest) error {
+	task := interfaces.EngineTask{
+		SessionID: interfaces.SessionID("conf-run"),
+		Profile:   interfaces.SessionProfile{Persona: interfaces.PersonaAuthor},
+		Repo:      confRepo,
+		Branch:    "feature/conf",
+		Prompt:    "do the work described in the task",
+		Timeout:   time.Minute,
+	}
+	// Fail closed: running a task in an unknown sandbox must error, not run against nothing.
+	if _, err := p.Cloud.RunTask(ctx, interfaces.SandboxHandle{ID: "no-such-sandbox"}, task); err == nil {
+		return errors.New("ran a task in an unknown sandbox instead of failing closed")
+	}
+	h, err := p.Cloud.ProvisionSandbox(ctx, interfaces.SandboxSpec{
+		SessionID: task.SessionID,
+		Subject:   confSubject,
+		Persona:   interfaces.PersonaAuthor,
+		Egress:    interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}},
+		MaxTTL:    time.Minute,
+	})
+	if err != nil {
+		return fmt.Errorf("provision failed: %w", err)
+	}
+	// A live sandbox runs the task, and a changed run must carry a non-empty digest to sign — a
+	// provider cannot claim a change while returning a zero digest the orchestrator would sign blind.
+	res, err := p.Cloud.RunTask(ctx, h, task)
+	if err != nil {
+		_ = p.Cloud.DestroySandbox(ctx, h)
+		return fmt.Errorf("RunTask in a live sandbox errored: %w", err)
+	}
+	if res.Changed && len(res.CommitDigest) == 0 {
+		_ = p.Cloud.DestroySandbox(ctx, h)
+		return errors.New("reported a changed run with an empty commit digest")
+	}
+	// No run after destroy: the load-bearing invariant — a task must never execute in a torn-down
+	// (perimeter-gone) sandbox.
+	if err := p.Cloud.DestroySandbox(ctx, h); err != nil {
+		return fmt.Errorf("destroy failed: %w", err)
+	}
+	if _, err := p.Cloud.RunTask(ctx, h, task); err == nil {
+		return errors.New("ran a task in a destroyed sandbox instead of failing closed")
 	}
 	return nil
 }

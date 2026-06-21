@@ -20,6 +20,7 @@ func cloudGCPUnderTest(t *testing.T) testkit.ProviderUnderTest {
 	p, err := cloudgcp.NewWithPorts(
 		cloudgcp.NewInMemorySandboxRuntime(),
 		cloudgcp.NewInMemoryEgressController(),
+		cloudgcp.NewInMemoryEngineRunner(),
 		"conf",
 		nil,
 	)

@@ -138,3 +138,51 @@ func (e *InMemoryEgressController) SetFailNonEmptySet(b bool) {
 	e.failNonEmpty = b
 	e.mu.Unlock()
 }
+
+// InMemoryEngineRunner records the last task it was asked to run and returns a deterministic
+// EngineResult, so the provider's liveness/taint gate around RunTask is exercised over a
+// successful runner. Like the other fakes it is a thin EFFECT RECORDER — it does NOT launch the
+// engine (conformance is credential-free and offline); the real adapter (kubeEngineRunner) does.
+type InMemoryEngineRunner struct {
+	mu       sync.Mutex
+	lastTask interfaces.EngineTask
+	ran      bool
+	failRun  bool
+}
+
+// NewInMemoryEngineRunner returns a ready InMemoryEngineRunner.
+func NewInMemoryEngineRunner() *InMemoryEngineRunner { return &InMemoryEngineRunner{} }
+
+// Run records task and returns a deterministic, non-empty changed result (or fails if
+// SetFailRun(true)). The provider has already guaranteed the sandbox is live when this is called.
+func (r *InMemoryEngineRunner) Run(_ context.Context, _ interfaces.SandboxHandle, task interfaces.EngineTask) (interfaces.EngineResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failRun {
+		return interfaces.EngineResult{}, errors.New("cloudgcp/fake: forced Run failure")
+	}
+	r.lastTask = task
+	r.ran = true
+	// A fixed 32-byte digest stands in for the engine's commit; the provider/orchestrator treat it
+	// opaquely, so a constant suffices to exercise the seam (non-empty digest, Changed=true).
+	digest := make([]byte, 32)
+	for i := range digest {
+		digest[i] = byte(i + 1)
+	}
+	return interfaces.EngineResult{
+		CommitDigest: digest,
+		HeadSHA:      "0000000000000000000000000000000000000001",
+		FilesChanged: []string{"(cloudgcp fake: no genuine engine run)"},
+		Changed:      true,
+	}, nil
+}
+
+// LastTask returns the task most recently passed to Run, for white-box assertions. Test-only.
+func (r *InMemoryEngineRunner) LastTask() (interfaces.EngineTask, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastTask, r.ran
+}
+
+// SetFailRun toggles forced Run failure, to drive the provider's RunTask error path. Test-only.
+func (r *InMemoryEngineRunner) SetFailRun(b bool) { r.mu.Lock(); r.failRun = b; r.mu.Unlock() }

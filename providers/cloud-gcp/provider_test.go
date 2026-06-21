@@ -18,7 +18,7 @@ func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *InMemorySa
 	t.Helper()
 	rt := NewInMemorySandboxRuntime()
 	eg := NewInMemoryEgressController()
-	p, err := NewWithPorts(rt, eg, "test", now)
+	p, err := NewWithPorts(rt, eg, NewInMemoryEngineRunner(), "test", now)
 	if err != nil {
 		t.Fatalf("NewWithPorts: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestRandomID_FormatAndDistinct(t *testing.T) {
 
 func TestClose(t *testing.T) {
 	// A provider built by NewWithPorts holds no kubeconfig: Close is a no-op and idempotent.
-	p, err := NewWithPorts(NewInMemorySandboxRuntime(), NewInMemoryEgressController(), "p", nil)
+	p, err := NewWithPorts(NewInMemorySandboxRuntime(), NewInMemoryEgressController(), NewInMemoryEngineRunner(), "p", nil)
 	if err != nil {
 		t.Fatalf("NewWithPorts: %v", err)
 	}
@@ -89,11 +89,14 @@ func TestClose(t *testing.T) {
 }
 
 func TestNewWithPorts_RejectsNilPorts(t *testing.T) {
-	if _, err := NewWithPorts(nil, NewInMemoryEgressController(), "p", nil); err == nil {
+	if _, err := NewWithPorts(nil, NewInMemoryEgressController(), NewInMemoryEngineRunner(), "p", nil); err == nil {
 		t.Fatal("expected error for nil runtime")
 	}
-	if _, err := NewWithPorts(NewInMemorySandboxRuntime(), nil, "p", nil); err == nil {
+	if _, err := NewWithPorts(NewInMemorySandboxRuntime(), nil, NewInMemoryEngineRunner(), "p", nil); err == nil {
 		t.Fatal("expected error for nil egress controller")
+	}
+	if _, err := NewWithPorts(NewInMemorySandboxRuntime(), NewInMemoryEgressController(), nil, "p", nil); err == nil {
+		t.Fatal("expected error for nil engine runner")
 	}
 }
 
@@ -394,5 +397,101 @@ func TestProvision_FreshIDExhaustionErrors(t *testing.T) {
 	// Seed used "test-sb-1" (the deterministic first id), so every retry collides.
 	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err == nil {
 		t.Fatal("expected freshID exhaustion to error after repeated collisions")
+	}
+}
+
+// engineTestProvider builds a provider over fresh fakes including a held EngineRunner, so a test
+// can assert what (if anything) RunTask handed to the runner.
+func engineTestProvider(t *testing.T) (*Provider, *InMemoryEgressController, *InMemoryEngineRunner) {
+	t.Helper()
+	rt := NewInMemorySandboxRuntime()
+	eg := NewInMemoryEgressController()
+	runner := NewInMemoryEngineRunner()
+	p, err := NewWithPorts(rt, eg, runner, "test", nil)
+	if err != nil {
+		t.Fatalf("NewWithPorts: %v", err)
+	}
+	return p, eg, runner
+}
+
+func engineTask() interfaces.EngineTask {
+	return interfaces.EngineTask{
+		SessionID: "sess",
+		Profile:   interfaces.SessionProfile{Persona: interfaces.PersonaAuthor},
+		Repo:      interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:    "feature/x",
+		Prompt:    "do the work",
+		Timeout:   time.Minute,
+	}
+}
+
+func TestRunTask_GatesOnLiveSandbox(t *testing.T) {
+	p, _, runner := engineTestProvider(t)
+	task := engineTask()
+
+	// Unknown handle → fail closed, and the runner is never invoked.
+	if _, err := p.RunTask(context.Background(), interfaces.SandboxHandle{ID: "nope"}, task); err == nil {
+		t.Fatal("expected fail-closed running a task in an unknown sandbox")
+	}
+	if _, ran := runner.LastTask(); ran {
+		t.Fatal("runner was invoked for an unknown sandbox")
+	}
+
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Live sandbox → the task reaches the runner and a changed result with a digest comes back.
+	res, err := p.RunTask(context.Background(), h, task)
+	if err != nil {
+		t.Fatalf("RunTask in a live sandbox: %v", err)
+	}
+	if !res.Changed || len(res.CommitDigest) == 0 {
+		t.Fatalf("expected a changed result with a non-empty digest, got %+v", res)
+	}
+	got, ran := runner.LastTask()
+	if !ran || got.Branch != "feature/x" || got.SessionID != "sess" {
+		t.Fatalf("runner did not receive the task: ran=%v task=%+v", ran, got)
+	}
+
+	// No run after destroy: a task must never execute in a torn-down (perimeter-gone) sandbox.
+	if err := p.DestroySandbox(context.Background(), h); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if _, err := p.RunTask(context.Background(), h, task); err == nil {
+		t.Fatal("expected fail-closed running a task in a destroyed sandbox")
+	}
+}
+
+func TestRunTask_RefusesTaintedSandbox(t *testing.T) {
+	p, eg, runner := engineTestProvider(t)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Force a taint: a deny-all fallback that cannot apply leaves the perimeter unknown.
+	eg.SetFailSet(true)
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Fatal("expected the unenforceable perimeter to error")
+	}
+	eg.SetFailSet(false)
+	// A tainted sandbox must refuse RunTask (its perimeter is not guaranteed) without invoking the engine.
+	if _, err := p.RunTask(context.Background(), h, engineTask()); err == nil {
+		t.Fatal("expected a tainted sandbox to refuse RunTask")
+	}
+	if _, ran := runner.LastTask(); ran {
+		t.Fatal("runner was invoked for a tainted sandbox")
+	}
+}
+
+func TestRunTask_SurfacesRunnerFailure(t *testing.T) {
+	p, _, runner := engineTestProvider(t)
+	runner.SetFailRun(true)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if _, err := p.RunTask(context.Background(), h, engineTask()); err == nil {
+		t.Fatal("expected RunTask to surface the runner failure")
 	}
 }

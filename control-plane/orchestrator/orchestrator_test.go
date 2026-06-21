@@ -418,6 +418,88 @@ func TestRun_AbortSurfacesTeardownFailure(t *testing.T) {
 	}
 }
 
+// stubEngineCloud wraps a MemCloud but overrides RunTask to return a fixed EngineResult, so a test
+// can drive the no-change path and assert the signed digest/head/files flow from the engine's
+// result rather than a synthesised stand-in. Provision/egress/destroy still go through MemCloud.
+type stubEngineCloud struct {
+	*devkit.MemCloud
+	result interfaces.EngineResult
+}
+
+func (c stubEngineCloud) RunTask(context.Context, interfaces.SandboxHandle, interfaces.EngineTask) (interfaces.EngineResult, error) {
+	return c.result, nil
+}
+
+// TestRun_NoChangeProducesNoPR: when the engine proposes no change (EngineResult.Changed=false), the
+// session records a no-change event and ends cleanly — it signs no digest and opens no PR.
+func TestRun_NoChangeProducesNoPR(t *testing.T) {
+	b := newBench(t)
+	b.orch.Cloud = stubEngineCloud{MemCloud: b.cloud, result: interfaces.EngineResult{Changed: false}}
+	sum, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: b.authn(t, "alice"), SessionID: "sess-nochange", Persona: interfaces.PersonaAuthor,
+		Repo: b.repo, Branch: "feature/x", Attended: false,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if b.scm.OpenPRCount() != 0 {
+		t.Error("a no-change session opened a PR")
+	}
+	if len(sum.CommitDigest) != 0 || sum.HeadSHA != "" {
+		t.Errorf("a no-change session signed/recorded a commit: digest=%x head=%q", sum.CommitDigest, sum.HeadSHA)
+	}
+	var sawNoChange, sawCommit bool
+	for i := 0; i < b.evidence.Len(); i++ {
+		rec, _, _ := b.evidence.At(i)
+		switch rec.Type {
+		case "no-change":
+			sawNoChange = true
+		case "commit-signed", "pr-opened":
+			sawCommit = true
+		}
+	}
+	if !sawNoChange {
+		t.Error("expected a no-change evidence record")
+	}
+	if sawCommit {
+		t.Error("a no-change session emitted a commit/PR evidence record")
+	}
+}
+
+// TestRun_SignsEngineProducedCommit: the signed commit attests the engine's REAL output — the head
+// SHA and file summary flow from the EngineResult, and the signature verifies over the digest the
+// orchestrator derived from it (not a coordinate hash).
+func TestRun_SignsEngineProducedCommit(t *testing.T) {
+	b := newBench(t)
+	want := interfaces.EngineResult{
+		CommitDigest: []byte("engine-produced-commit-digest"),
+		HeadSHA:      "abc123def456",
+		FilesChanged: []string{"main.go", "README.md"},
+		Changed:      true,
+	}
+	b.orch.Cloud = stubEngineCloud{MemCloud: b.cloud, result: want}
+	sum, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: b.authn(t, "alice"), SessionID: "sess-engine", Persona: interfaces.PersonaAuthor,
+		Repo: b.repo, Branch: "feature/x", Attended: false,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.HeadSHA != want.HeadSHA {
+		t.Errorf("HeadSHA = %q, want %q (must flow from the engine result)", sum.HeadSHA, want.HeadSHA)
+	}
+	if len(sum.FilesChanged) != 2 || sum.FilesChanged[0] != "main.go" {
+		t.Errorf("FilesChanged = %v, want it to flow from the engine result", sum.FilesChanged)
+	}
+	// The signature verifies over the digest the orchestrator signed (derived from the engine digest).
+	if err := signing.Verify(b.caRoot, sum.CommitDigest, sum.CommitSig); err != nil {
+		t.Errorf("commit signature does not verify: %v", err)
+	}
+	if len(sum.CommitDigest) == 0 {
+		t.Error("expected a non-empty signed commit digest for a changed run")
+	}
+}
+
 // TestRun_StreamsEachEvidenceRecord: every WORM record is also forwarded to the SIEM hook.
 func TestRun_StreamsEachEvidenceRecord(t *testing.T) {
 	b := newBench(t)

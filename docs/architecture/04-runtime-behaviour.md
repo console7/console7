@@ -55,10 +55,12 @@ sequenceDiagram
     B->>SEC: InjectSubscriptionToken (attended + 1 beneficiary + ownership)
     SEC->>CL: deliver plaintext into owning sandbox ONLY
   end
-  Note over CL,INF: agentic loop — engine runs; egress default-deny;<br/>only allowlisted endpoint reachable (live engine: planned)
   Note over O: propose()
-  O->>B: SignSession(commitDigest)
-  B-->>O: Signature (NHI-signed commit)
+  O->>CL: RunTask(EngineTask{Profile, Prompt, repo, branch})
+  Note over CL,INF: engine runs IN sandbox under locked managed-settings;<br/>egress default-deny, only allowlisted endpoint reachable<br/>(seam ✅; live in-pod engine: integration / Tier-2)
+  CL-->>O: EngineResult{CommitDigest, HeadSHA, FilesChanged, Changed}
+  O->>B: SignSession(commitTBS(EngineResult.CommitDigest))
+  B-->>O: Signature (NHI-signed REAL commit)
   O->>E: Append("pr-opening")
   O->>B: OpenPullRequest(PR)
   B->>SCM: OpenPullRequest (head≠base, not protected)
