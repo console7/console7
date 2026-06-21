@@ -29,12 +29,14 @@ module "inference_vertex" {
 # Sandbox network perimeter: the static, always-on default-deny egress floor the ephemeral
 # sandboxes run inside — the AUTHORITATIVE network control of record (DESIGN.md §5.2; tenet 3),
 # landed boundary-first (ROADMAP.md sequencing #2) ahead of the sandbox node pool (modules/gke)
-# and the per-session egress proxy. Owns ONLY the DENY floor: the VPC + sandbox subnet, and the
-# default-deny egress + metadata-deny firewall rules scoped to the sandbox node tag. The sanctioned
-# egress path (Cloud Router + NAT, narrow ALLOW rules) and the per-session allowlist are deferred
-# to PR-2 — they land with the proxy/cluster they serve, never as a static grant ahead of it. The
-# APPLY identity needs roles/compute.networkAdmin for the network/subnet/firewall resources; this
-# PR adds that grant to bootstrap.sh atomically (per-module deploy-identity convention).
+# and the per-session egress proxy. Owns ONLY the DENY floor: enables the Compute API, and creates
+# the VPC + sandbox subnet + a single IPv4 default-deny egress firewall rule scoped to the sandbox
+# node tag. The sanctioned egress path (Cloud Router + NAT, narrow ALLOW rules), the per-session
+# allowlist, and the node-layer metadata/IPv6 controls are deferred to PR-2 — they land with the
+# proxy/cluster that can enforce them, never as a static grant ahead of it. The APPLY identity
+# needs roles/compute.networkAdmin (network/subnet) AND roles/compute.securityAdmin (firewall
+# rules — networkAdmin excludes them); this PR adds both to bootstrap.sh atomically (per-module
+# deploy-identity convention).
 module "networking" {
   source = "./modules/networking"
 

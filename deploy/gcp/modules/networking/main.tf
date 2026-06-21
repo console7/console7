@@ -6,36 +6,54 @@
 # proxy, so a sandbox is default-deny from the moment it can run.
 #
 # WHAT THIS MODULE OWNS (the static DENY floor):
+#   - enabling the Compute Engine API (the resources below need it on a fresh project);
 #   - a custom-mode VPC + a sandbox subnet (primary + pod/service secondary ranges, flow logs);
-#   - an EGRESS default-DENY firewall rule scoped to the sandbox node tag — the deny floor;
-#   - an explicit metadata/IMDS deny for the routed IP endpoints (defence-in-depth + a distinct,
-#     logged signal).
+#   - a single, effective EGRESS default-DENY firewall rule (IPv4) scoped to the sandbox node tag.
 #
 # WHAT IT DELIBERATELY DOES NOT OWN (deferred to modules/gke + providers/cloud-gcp, PR-2 —
-# every item here is an ALLOW/escape path or needs the cluster, so it lands with the thing it
-# serves, never as a static grant ahead of it):
+# every item here is an ALLOW/escape path, needs the cluster, or cannot be enforced at the VPC
+# layer at all, so it lands with the thing that can actually enforce it):
 #   - the SANCTIONED egress path (Cloud Router + NAT, and the narrow ALLOW rules to the egress
 #     proxy / Google APIs for node image pulls). NAT is SNAT for *permitted* flows; landing it
-#     here — where the only routable range is the sandbox's own, which is denied — would point
-#     translation at the very ranges the floor denies and rest the whole guarantee on tag
-#     fidelity. It lands in PR-2 alongside the non-sandbox subnet/proxy that legitimately needs it.
+#     here, where the only routable range is the sandbox's own (denied) range, would point
+#     translation at the ranges the floor denies and rest the guarantee on tag fidelity.
 #   - the per-session egress ALLOWLIST (dynamic; programmed at the out-of-band proxy by the
 #     orchestrator's ApplyEgressPolicy narrow step — orchestrator.go narrow-egress);
-#   - the per-pod NetworkPolicy routing sandbox pods to the proxy only, and the AUTHORITATIVE
-#     node-level metadata block: on GKE the node-local metadata server is intercepted ON the VM
-#     (incl. the legacy 127.0.0.1:988/987 Workload-Identity path, which a VPC firewall structurally
-#     cannot match) and never reaches the VPC, so the real sandbox metadata block is "no Workload
-#     Identity on the sandbox node pool" (modules/gke). The IP-deny below is the VPC-dataplane
-#     LAYER of that defence-in-depth, not the whole of it;
-#   - in-sandbox DNS denial ("no arbitrary resolver" — sandbox/egress-proxy/README.md) and the
-#     metadata DNS NAMES metadata.google.internal / metadata.goog: a VPC firewall is IP-based and
-#     cannot match names. Here those names are covered only transitively (they resolve to the
-#     IPs the deny below drops); shipping the sandbox no general resolver is the base-image leg (PR-3).
+#   - the per-pod NetworkPolicy routing sandbox pods to the proxy only;
+#   - THE METADATA / IMDS BLOCK. Crucially this is NOT a VPC firewall control: GCP documents
+#     VM-to-metadata-server traffic (169.254.169.254 and the link-local GKE metadata server) as
+#     ALWAYS allowed and NOT subject to VPC firewall rules, so a firewall "deny" to those ranges
+#     neither blocks the traffic nor produces a deny log — it is null at this layer. The
+#     authoritative sandbox metadata block is therefore a NODE/POD-config control: no Workload
+#     Identity on the sandbox node pool + GKE metadata concealment (modules/gke), plus the legacy
+#     127.0.0.1:988/987 path and the metadata DNS names (metadata.google.internal / metadata.goog),
+#     which a VPC firewall cannot match either. All of it lands in PR-2/PR-3 (see those READMEs);
+#     PR-1 does not pretend to enforce it at the VPC.
+#   - IPv6 egress denial. This subnet is single-stack IPv4, and a VPC firewall rule cannot mix IP
+#     families; the IPv6 catch-all (::/0) lands as its own rule when modules/gke makes the node
+#     pool dual-stack (PR-2). On an IPv4-only subnet there is no IPv6 egress path to deny.
+#   - in-sandbox DNS denial ("no arbitrary resolver" — sandbox/egress-proxy/README.md): the base
+#     image ships the sandbox no general resolver (PR-3).
 #
-# The firewall rules TARGET var.sandbox_node_tag, which no instance carries until modules/gke
+# The firewall rule TARGETS var.sandbox_node_tag, which no instance carries until modules/gke
 # creates the sandbox node pool with that tag. That is intentional: this is the reserved floor,
 # applied the instant the tagged nodes appear. Nothing here grants egress, so there is no path
 # for a future sandbox to inherit reach it was not given.
+
+# --- Compute Engine API ---
+
+# The google_compute_* resources below require compute.googleapis.com. Enable it in-module (the
+# pattern modules/secrets + modules/evidence use for their own APIs) so a fresh-project adopter
+# does not hit a "first VPC call fails" apply. The custom-mode network depends_on this so the
+# enable lands first.
+resource "google_project_service" "compute" {
+  project = var.project_id
+  service = "compute.googleapis.com"
+
+  # Don't disable the API on `terraform destroy` — other resources/users in the project may
+  # depend on it, and re-enabling is slow.
+  disable_on_destroy = false
+}
 
 # --- VPC + sandbox subnet ---
 
@@ -47,6 +65,8 @@ resource "google_compute_network" "sandbox" {
   name                    = "${var.name_prefix}-sandbox-net"
   auto_create_subnetworks = false
   routing_mode            = "REGIONAL"
+
+  depends_on = [google_project_service.compute]
 }
 
 # The sandbox subnet. private_ip_google_access lets in-tenancy nodes reach Google APIs over
@@ -82,59 +102,27 @@ resource "google_compute_subnetwork" "sandbox" {
 
 # --- Firewall: the default-deny egress floor (scoped to the sandbox node tag) ---
 
-# Explicit metadata/IMDS deny FIRST (priority 900, ahead of the catch-all deny) so a credential-
-# theft / SSRF attempt against the ROUTED metadata surface is dropped AND surfaces as its own
-# logged signal. Covers the IP endpoints a VPC firewall can match: IPv4 169.254.169.254, the GKE
-# node-local metadata server 169.254.169.252 (ports 988/987 are included via protocol "all"), and
-# the IPv6 metadata ULA fd20:ce::254. It does NOT — and a VPC firewall structurally cannot — cover
-# the legacy 127.0.0.1:988/987 loopback path or the metadata DNS names; those are the node-level
-# leg (no Workload Identity on the sandbox node pool) + base-image leg (no resolver), deferred to
-# PR-2/PR-3 (see the header). This rule is one LAYER of that defence-in-depth (sandbox/egress-proxy/
-# README.md; docs/THREAT-MODEL.md prior-art), not the whole metadata block. Denying the sandbox the
-# routed metadata surface is part of what stops it minting a standing cloud credential of its own
-# (cloud.go SECURITY: "MUST NOT grant the sandbox any standing credential of its own").
+# The single effective floor rule: drop ALL IPv4 egress from a sandbox-tagged workload (priority
+# 1000, overriding GCP's implied allow-egress at 65535). The per-session ALLOW paths (the resolved
+# inference endpoint, approved registries/MCP) are NARROWER, higher-priority rules the orchestrator
+# programs at the out-of-band proxy per session (never a static wide grant here), so "forgot to
+# deny" can never silently permit (cloud.go EgressPolicy is allowlist-only by construction).
+# Logged, so every denied attempt is visible.
 #
-# NOTE: fd20:ce::254/128 and the ::/0 entry in the catch-all are inert on this IPv4-only subnet
-# (no IPv6 egress path exists to match); they are accepted by the firewall API regardless and
-# future-proof the floor for a dual-stack sandbox node pool — they are not active coverage today.
-resource "google_compute_firewall" "deny_metadata" {
-  project     = var.project_id
-  name        = "${var.name_prefix}-sandbox-deny-metadata"
-  network     = google_compute_network.sandbox.id
-  description = "Default-deny floor (1/2): drop all egress from sandbox-tagged workloads to the ROUTED GCE/GKE metadata IP endpoints (credential-theft / SSRF surface). One layer of defence-in-depth with the no-Workload-Identity sandbox node pool (modules/gke); does not cover the loopback/DNS-name paths a VPC firewall cannot match."
-  direction   = "EGRESS"
-  priority    = 900
-
-  target_tags        = [var.sandbox_node_tag]
-  destination_ranges = ["169.254.169.254/32", "169.254.169.252/32", "fd20:ce::254/128"]
-
-  deny {
-    protocol = "all"
-  }
-
-  log_config {
-    metadata = "INCLUDE_ALL_METADATA"
-  }
-}
-
-# The catch-all egress deny (priority 1000): everything from a sandbox-tagged workload to
-# anywhere — IPv4 0.0.0.0/0 (and IPv6 ::/0, inert on this IPv4-only subnet, see above) — is
-# dropped. This overrides GCP's implied allow-egress (priority 65535) and is the default-deny
-# baseline. The per-session ALLOW paths (the resolved inference endpoint, approved registries/MCP)
-# are NARROWER, higher-priority rules the orchestrator programs at the out-of-band proxy per
-# session (never a static wide grant here), so "forgot to deny" can never silently permit
-# (cloud.go EgressPolicy is allowlist-only by construction). Logged, so every denied attempt is
-# visible.
+# Scope note (deliberately NOT here, see the header): this rule does not — and at the VPC layer
+# cannot — block the metadata server (GCP exempts metadata traffic from firewall rules) or IPv6
+# (single-stack IPv4 subnet; a rule cannot mix families). Those are node-layer / dual-stack
+# concerns deferred to PR-2. The floor's job is general IPv4 egress, and for that it is authoritative.
 resource "google_compute_firewall" "deny_egress_all" {
   project     = var.project_id
   name        = "${var.name_prefix}-sandbox-deny-egress"
   network     = google_compute_network.sandbox.id
-  description = "Default-deny floor (2/2): drop ALL egress from sandbox-tagged workloads. Per-session allowlisted destinations are programmed narrower at the out-of-band proxy (providers/cloud-gcp), never widened here."
+  description = "Default-deny egress floor: drop ALL IPv4 egress from sandbox-tagged workloads. Per-session allowlisted destinations are programmed narrower at the out-of-band proxy (providers/cloud-gcp), never widened here. Metadata block + IPv6 are node-layer/dual-stack concerns (modules/gke), not enforceable at this layer."
   direction   = "EGRESS"
   priority    = 1000
 
   target_tags        = [var.sandbox_node_tag]
-  destination_ranges = ["0.0.0.0/0", "::/0"]
+  destination_ranges = ["0.0.0.0/0"]
 
   deny {
     protocol = "all"
