@@ -3,6 +3,13 @@ provider "google" {
   region  = var.region
 }
 
+# google-beta, configured identically — used ONLY by the gVisor sandbox node pool (modules/gke)
+# for its beta-only sandbox_config. Default config is inherited by the module.
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+}
+
 module "secrets" {
   source = "./modules/secrets"
 
@@ -47,6 +54,30 @@ module "networking" {
   subnet_cidr_range  = var.sandbox_subnet_cidr
   pod_cidr_range     = var.sandbox_pod_cidr
   service_cidr_range = var.sandbox_service_cidr
+}
+
+# Sandbox compute substrate (GKE): the hardened cluster + gVisor sandbox node pool the ephemeral
+# sandboxes run on, the Workload-Identity binding the control plane impersonates the secrets SA
+# through, and the Cloud Router + NAT for the sanctioned egress path (deferred from modules/networking).
+# Consumes the networking module's VPC/subnet/range/tag outputs and the secrets module's workload SA.
+# The APPLY identity needs roles/container.admin (cluster + node pools) and iam.serviceAccountUser on
+# the node SA (bootstrap.sh). Two properties here are preflighted by providers/cloud-gcp: GKE_METADATA
+# node-SA concealment and Dataplane V2 NetworkPolicy enforcement.
+module "gke" {
+  source = "./modules/gke"
+
+  project_id                             = var.project_id
+  region                                 = var.region
+  name_prefix                            = var.name_prefix
+  network_self_link                      = module.networking.network_self_link
+  subnetwork_self_link                   = module.networking.subnetwork_self_link
+  pods_range_name                        = module.networking.pods_range_name
+  services_range_name                    = module.networking.services_range_name
+  sandbox_node_tag                       = module.networking.sandbox_node_tag
+  secrets_workload_service_account_email = module.secrets.workload_service_account_email
+  control_plane_ksa                      = var.gke_control_plane_ksa
+  master_authorized_cidrs                = var.gke_master_authorized_cidrs
+  deletion_protection                    = var.gke_deletion_protection
 }
 
 # Durable WORM evidence backing (GCS): the bucket the EvidenceSink commits records through, plus

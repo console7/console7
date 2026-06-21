@@ -6,8 +6,7 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 6.0"
     }
-    # google-beta is used ONLY for the gVisor sandbox node pool's sandbox_config (GKE Sandbox is a
-    # beta-only provider field); every other resource stays on the GA google provider.
+    # Only the gVisor sandbox node pool uses google-beta (for sandbox_config).
     google-beta = {
       source  = "hashicorp/google-beta"
       version = "~> 6.0"

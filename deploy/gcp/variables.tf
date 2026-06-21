@@ -82,6 +82,27 @@ variable "sandbox_service_cidr" {
   }
 }
 
+variable "gke_master_authorized_cidrs" {
+  type = list(object({
+    cidr_block   = string
+    display_name = string
+  }))
+  description = "Source ranges allowed to reach the GKE control-plane public endpoint. GATING: the default (empty) is fail-CLOSED — the cluster control plane is UNREACHABLE from outside Google's network, so the keyless CD's `kubectl apply -f reaper.yaml` and providers/cloud-gcp's `gcloud container clusters get-credentials` will be REFUSED until you add the operator/CD egress range here. Set this to the CD egress CIDR (and any admin bastion); never 0.0.0.0/0."
+  default     = []
+}
+
+variable "gke_control_plane_ksa" {
+  type        = string
+  description = "Kubernetes \"<namespace>/<serviceaccount>\" the control plane runs as, bound to the secrets workload SA via Workload Identity. Override if you run the control plane under a non-default KSA (else the WI binding targets a KSA that never exists and is inert)."
+  default     = "console7-system/console7-control-plane"
+}
+
+variable "gke_deletion_protection" {
+  type        = bool
+  description = "Block `terraform destroy` of the GKE cluster. PRODUCTION SHOULD set true; default false so dev/dogfood clusters stay destroyable (mirrors evidence_retention_locked)."
+  default     = false
+}
+
 variable "evidence_retention_seconds" {
   type        = number
   description = "Evidence-bucket object retention period in seconds (the WORM window). Default 7 years."
