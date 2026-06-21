@@ -100,13 +100,16 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
 ## (c) Reviewer observations
 What a second-line (2LoD) reviewer should flag, roughly in priority order:
 
-1. **The controls of record lag the defence-in-depth layers.** Tenet 2 makes
-   least-privilege IAM + **default-deny egress** the authoritative controls — yet today the
-   *implemented* protections are the in-band/cryptographic layers (signing, evidence chain,
-   seam refusals), while the **egress perimeter, gVisor isolation, DLP, MCP allowlist, and
-   Observe Gateway are scaffolds**. Until P1–P3 land, the live security posture rests on
-   layers the design itself classifies as non-authoritative. This is the single most
-   important gap to track against the roadmap.
+1. **The controls of record lag the defence-in-depth layers (now partially closing).** Tenet 2
+   makes least-privilege IAM + **default-deny egress** the authoritative controls. The
+   *implemented* protections are still mostly the in-band/cryptographic layers (signing,
+   evidence chain, seam refusals); on the boundary side, PR #39 has landed the **static
+   default-deny egress floor** (VPC + DENY firewall rule), but the rest of the perimeter —
+   **gVisor node pool, Cloud NAT, egress proxy, per-session allowlist, NetworkPolicy, and the
+   node-layer metadata/IMDS block** — plus **DLP, MCP allowlist, and Observe Gateway** remain
+   scaffold or in-flight (`providers/cloud-gcp` #41, `modules/gke`). Until those land, the live
+   security posture still rests largely on layers the design itself classifies as
+   non-authoritative — the single most important gap to track against the roadmap.
 2. **Evidence integrity vs the privileged provisioning identity (SoD gap).** The GCS evidence
    bucket is only **tamper-evident** until `is_locked=true` (off by default, `RISKS.md` R-2),
    and the **APPLY SA holds `roles/storage.admin`** — so the very identity that provisions
