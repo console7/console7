@@ -123,6 +123,35 @@ func networkPolicyEnforced(describeOutput string) bool {
 	return strings.Contains(s, "ADVANCED_DATAPATH") || strings.Contains(s, "TRUE")
 }
 
+// preflightNodePoolMetadataConcealed refuses to build the provider against a sandbox node pool
+// that would EXPOSE the node's GCE service-account token to the pod. The GKE metadata server
+// (workloadMetadataConfig.mode = GKE_METADATA) intercepts the node-local metadata endpoint and
+// conceals the node SA, serving only Workload-Identity tokens for a pod's bound KSA (and the
+// sandbox pods are bound to none, with automountServiceAccountToken=false). The legacy
+// GCE_METADATA mode (or an unset mode) leaves the node SA reachable at 169.254.169.254/.252 — a
+// standing credential a prompt-injected sandbox could mint, violating cloud.go's "MUST NOT grant
+// the sandbox any standing credential of its own". A VPC firewall cannot block that node-local
+// path (PR-1), so this construction-time gate is the enforcement point. Fail closed.
+func (r *kubeRunner) preflightNodePoolMetadataConcealed(ctx context.Context, cluster, location, nodePool string) error {
+	out, err := r.run(ctx, "gcloud", nil,
+		"container", "node-pools", "describe", nodePool,
+		"--cluster", cluster, "--location", location, "--project", r.project,
+		"--format=value(config.workloadMetadataConfig.mode)")
+	if err != nil {
+		return err
+	}
+	if !nodePoolMetadataConcealed(string(out)) {
+		return fmt.Errorf("cloudgcp: sandbox node pool %q does not conceal the node service account (workloadMetadataConfig.mode must be GKE_METADATA; got %q) — refusing to provision untrusted pods that could mint the node credential", nodePool, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// nodePoolMetadataConcealed reports whether the node pool's workloadMetadataConfig.mode conceals
+// the node SA. Only GKE_METADATA does; GCE_METADATA / EXPOSE / unset all expose it. Fail-closed.
+func nodePoolMetadataConcealed(mode string) bool {
+	return strings.EqualFold(strings.TrimSpace(mode), "GKE_METADATA")
+}
+
 func (r *kubeRunner) kubectlDeletePod(ctx context.Context, ns, pod string) error {
 	// WAIT for the pod to actually be gone (kubectl --wait defaults true), with a short SIGTERM
 	// grace then SIGKILL, bounded by --timeout. DestroySandbox must not return — letting the
@@ -176,8 +205,9 @@ func (k *kubeRuntime) Destroy(ctx context.Context, h interfaces.SandboxHandle) e
 // is reached by IP (the orchestrator injects its address, no lookup needed — PR-3). It also sets a
 // default-deny INGRESS so another pod that discovers the sandbox IP cannot reach the engine. This
 // in-cluster policy is defence-in-depth, NOT the authoritative metadata block: a VPC firewall
-// cannot see the node-local metadata path, so the authoritative control is "no Workload Identity on
-// the sandbox node pool" (deploy/gcp/modules/networking + modules/gke, PR-2b).
+// cannot see the node-local metadata path, so the authoritative control is the GKE metadata server
+// (GKE_METADATA mode) on the sandbox node pool, which conceals the node service account
+// (deploy/gcp/modules/networking + modules/gke, PR-2b; New preflights it).
 type netpolEgressController struct {
 	run *kubeRunner
 	cfg Config
@@ -239,6 +269,15 @@ spec:
       securityContext:
         allowPrivilegeEscalation: false
         runAsNonRoot: true
+      resources:
+        requests:
+          cpu: 250m
+          memory: 256Mi
+          ephemeral-storage: 1Gi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+          ephemeral-storage: 4Gi
 `,
 		nsID,
 		jsonScalar(cfg.RuntimeClass),

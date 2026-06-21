@@ -48,6 +48,13 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		_ = os.Remove(kubeconfigPath)
 		return nil, err
 	}
+	// Fail closed if the sandbox node pool would EXPOSE the node service-account token to pods
+	// (workloadMetadataConfig.mode != GKE_METADATA) — a standing credential an untrusted sandbox
+	// could mint, which a VPC firewall cannot block at the node-local metadata path.
+	if err := rc.preflightNodePoolMetadataConcealed(ctx, cfg.Cluster, cfg.Location, cfg.NodePool); err != nil {
+		_ = os.Remove(kubeconfigPath)
+		return nil, err
+	}
 
 	p, err := NewWithPorts(
 		&kubeRuntime{run: rc, cfg: cfg},

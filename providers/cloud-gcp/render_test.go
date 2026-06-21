@@ -108,6 +108,33 @@ func TestNetworkPolicyEnforced(t *testing.T) {
 	}
 }
 
+func TestNodePoolMetadataConcealed(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{
+		{"GKE_METADATA", true},   // GKE metadata server conceals the node SA
+		{"gke_metadata\n", true}, // case/whitespace-insensitive
+		{"GCE_METADATA", false},  // exposes the node SA token
+		{"EXPOSE", false},
+		{"", false}, // unset → fail closed
+	} {
+		if got := nodePoolMetadataConcealed(tc.mode); got != tc.want {
+			t.Errorf("nodePoolMetadataConcealed(%q) = %v, want %v", tc.mode, got, tc.want)
+		}
+	}
+}
+
+func TestRenderSandboxPod_ResourceCaps(t *testing.T) {
+	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c"}.normalize()
+	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: time.Minute}))
+	for _, want := range []string{"resources:", "requests:", "limits:", "ephemeral-storage:"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("pod manifest missing resource cap %q (untrusted pod must be bounded)\n%s", want, m)
+		}
+	}
+}
+
 func TestRenderNamespaceAndEgress(t *testing.T) {
 	m := string(renderNamespaceAndEgress("sb", []string{"https://a.internal", "https://b.internal"}))
 	for _, want := range []string{

@@ -54,6 +54,11 @@ type sandboxState struct {
 	egress  []string // the default-deny allowlist currently in force at the perimeter.
 	expiry  time.Time
 	live    bool
+	// tainted marks a sandbox whose perimeter could NOT be guaranteed (a deny-all fallback failed):
+	// the workload is still running but with a stale/unknown perimeter, so the ONLY operation
+	// permitted on it is teardown. ApplyEgressPolicy refuses a tainted sandbox; DestroySandbox does
+	// not, so the caller can (and must) reclaim it.
+	tainted bool
 }
 
 // NewWithPorts builds a Provider over explicit ports. It is the constructor the conformance
@@ -172,6 +177,11 @@ func (p *Provider) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHa
 		// Fail closed: an unknown, destroyed, or expired sandbox has no perimeter to narrow.
 		return errors.New("cloudgcp: cannot apply egress to an unknown, destroyed, or expired sandbox")
 	}
+	if sb.tainted {
+		// A prior call could not guarantee this sandbox's perimeter; it is quarantined to teardown
+		// only, so refuse any further egress change rather than operate on an unknown perimeter.
+		return errors.New("cloudgcp: sandbox is tainted (its perimeter could not be guaranteed) — only teardown is permitted")
+	}
 	// Narrow-only: a permissive origin MUST NOT confer a stricter target's reach, so an update
 	// may only REMOVE destinations, never add one beyond those already permitted. A widening
 	// request cannot be honoured, so the sandbox fails CLOSED — its perimeter drops to deny-all
@@ -191,6 +201,9 @@ func (p *Provider) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHa
 	for _, d := range policy.Allowlist {
 		if !allowed[d] {
 			if err := p.egress.Set(ctx, h, nil); err != nil {
+				// Could not even enforce deny-all: the perimeter is now unknown. Taint the sandbox
+				// so only teardown is permitted, and surface the failure.
+				sb.tainted = true
 				return errors.Join(errWidenRefused, fmt.Errorf("cloudgcp: deny-all fallback failed, perimeter not guaranteed — destroy the sandbox: %w", err))
 			}
 			sb.egress = nil
@@ -201,8 +214,10 @@ func (p *Provider) ApplyEgressPolicy(ctx context.Context, h interfaces.SandboxHa
 	if err := p.egress.Set(ctx, h, next); err != nil {
 		// The narrowed policy did not apply; fail closed to deny-all. Only claim deny-all if it
 		// actually applied — otherwise leave sb.egress matching the cluster's still-live prior
-		// policy and surface BOTH failures (never swallow the fallback error).
+		// policy, taint the sandbox (perimeter unknown → teardown only), and surface BOTH failures
+		// (never swallow the fallback error).
 		if derr := p.egress.Set(ctx, h, nil); derr != nil {
+			sb.tainted = true
 			return errors.Join(
 				fmt.Errorf("cloudgcp: apply narrowed egress: %w", err),
 				fmt.Errorf("cloudgcp: deny-all fallback also failed, perimeter not guaranteed — destroy the sandbox: %w", derr),

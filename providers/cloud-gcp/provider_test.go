@@ -251,6 +251,31 @@ func TestApplyEgress_WidenFailsClosedWhenDenyAllAlsoFails(t *testing.T) {
 	}
 }
 
+func TestApplyEgress_TaintsWhenPerimeterUnenforceable(t *testing.T) {
+	p, _, eg := newTestProvider(t, nil)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// The deny-all fallback cannot apply → the sandbox is tainted (perimeter unknown).
+	eg.SetFailSet(true)
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Fatal("expected an error when the perimeter cannot be enforced")
+	}
+	// A tainted sandbox refuses any further egress change (even now that Set works again)...
+	eg.SetFailSet(false)
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
+		t.Fatal("expected a tainted sandbox to refuse further egress changes")
+	}
+	// ...but teardown is still permitted, so the caller can reclaim it.
+	if err := p.DestroySandbox(context.Background(), h); err != nil {
+		t.Fatalf("teardown of a tainted sandbox must be permitted: %v", err)
+	}
+	if p.Live(h) {
+		t.Fatal("sandbox still live after teardown")
+	}
+}
+
 func TestDestroy_IsIrreversible(t *testing.T) {
 	p, rt, _ := newTestProvider(t, nil)
 	h, err := p.ProvisionSandbox(context.Background(), baseSpec())

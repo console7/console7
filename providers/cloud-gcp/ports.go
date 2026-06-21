@@ -29,8 +29,9 @@ type SandboxRuntime interface {
 	// kernel/syscall-isolated compute only (gVisor RuntimeClass), never an in-process egress
 	// guard. It MUST stamp a hard lifetime from spec.MaxTTL onto the workload so an un-destroyed
 	// sandbox still dies (ephemeral by default), and MUST NOT grant the workload any standing
-	// credential of its own (no automounted service-account token; the node pool runs without
-	// Workload Identity — modules/gke).
+	// credential of its own (no automounted service-account token; the node pool runs the GKE
+	// metadata server — GKE_METADATA mode — which conceals the node service account, and the
+	// sandbox pods are bound to no KSA — modules/gke; New preflights this).
 	Provision(ctx context.Context, handle interfaces.SandboxHandle, spec interfaces.SandboxSpec) error
 	// Destroy irreversibly tears the workload down and reclaims its namespace, wiping the
 	// ephemeral workspace and any injected credential material. It MUST NOT snapshot or persist

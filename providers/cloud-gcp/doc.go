@@ -35,9 +35,11 @@
 //     NetworkPolicy.
 //   - DEFERRED to modules/gke (PR-2b): the gVisor sandbox node pool (carrying the
 //     networking module's sandbox tag), Workload Identity, Cloud Router + NAT for the
-//     sanctioned egress path, and the NODE-layer metadata block (no Workload Identity on the
-//     sandbox node pool + GKE metadata concealment) — the authoritative metadata control a VPC
-//     firewall cannot provide (see deploy/gcp/modules/networking).
+//     sanctioned egress path, and the NODE-layer metadata block (the GKE metadata server in
+//     GKE_METADATA mode on the sandbox node pool, which conceals the node service account; sandbox
+//     pods are bound to no KSA) — the authoritative metadata control a VPC firewall cannot provide
+//     (see deploy/gcp/modules/networking). New preflights both NetworkPolicy enforcement and this
+//     metadata concealment, failing closed.
 //   - DEFERRED to the egress-proxy + base-image (PR-3): the out-of-band forward proxy that does
 //     FQDN allowlisting is what the EgressController's allowlist ultimately feeds; the NetworkPolicy
 //     this adapter applies pins sandbox egress to that proxy ONLY (denying everything else —
