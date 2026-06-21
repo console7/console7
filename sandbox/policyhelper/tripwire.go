@@ -297,6 +297,9 @@ var mutatingVerbs = map[string]bool{
 	"mkfs": true, "shred": true, "shutdown": true, "reboot": true, "halt": true, "poweroff": true,
 	"kill": true, "killall": true, "pkill": true, "mount": true, "umount": true, "crontab": true,
 	"tar": true, "unzip": true,
+	// File creators: the operate lane denies Edit/Write, so these are the Bash route to creating or
+	// stamping in-sandbox files (the read-only/ephemeral workspace mount is the authoritative block).
+	"touch": true, "mkdir": true, "mknod": true, "mkfifo": true, "mktemp": true, "patch": true,
 }
 
 // mutatingSubcommands are "<tool> <subcommand>" pairs that mutate (the tool alone is read-only).

@@ -28,13 +28,24 @@ type Rendered struct {
 // --- the managed-settings.json shape (a subset of Claude Code's schema; struct-typed for stable
 // field order, so the rendered JSON is deterministic) ---
 
+// NOTE on schema fidelity: this is a SUBSET of Claude Code's managed-settings schema, and the
+// exact field placement/names below (the permissions nesting, the managed-only lockouts, the
+// filesystem-root "//" path anchor) MUST be validated against the PINNED engine version when the
+// orchestrator is wired to invoke the genuine engine (deferred in this PR — the lifecycle stays
+// synthetic, so nothing here is yet exercised by a real engine). They are the in-band, second-layer
+// guards (the boundary is authoritative); getting them exactly right is a correctness, not a
+// security-of-record, matter — but a misplaced field is a silent no-op, so it is treated as a bug.
 type managedSettings struct {
 	Permissions permissions       `json:"permissions"`
 	Hooks       hookSet           `json:"hooks"`
 	Env         map[string]string `json:"env"`
-	// disableBypassPermissionsMode = "disable" stops the agent from switching off permission
-	// prompts/rules at runtime — the locked rules below must actually bind.
-	DisableBypassPermissionsMode string `json:"disableBypassPermissionsMode"`
+	// allowManagedHooksOnly / allowManagedPermissionRulesOnly: make the engine ignore hooks and
+	// permission rules contributed by LOWER-precedence (project/user) settings. Without them, an
+	// untrusted target repo's .claude/settings.json can still register its own PreToolUse hooks
+	// (arbitrary shell, OUTSIDE the operate tripwire) and add auto-approve allow rules the deny set
+	// does not cover — i.e. the "locked" policy would not actually be locked against repo content.
+	AllowManagedHooksOnly           bool `json:"allowManagedHooksOnly"`
+	AllowManagedPermissionRulesOnly bool `json:"allowManagedPermissionRulesOnly"`
 	// cleanupPeriodDays 0: keep no local transcript retention inside the ephemeral sandbox (the
 	// durable, signed record is the WORM evidence sink, not the engine's local history).
 	CleanupPeriodDays int `json:"cleanupPeriodDays"`
@@ -44,6 +55,10 @@ type permissions struct {
 	Allow       []string `json:"allow"`
 	Deny        []string `json:"deny"`
 	DefaultMode string   `json:"defaultMode"`
+	// disableBypassPermissionsMode lives UNDER permissions (alongside defaultMode) in Claude Code's
+	// schema; "disable" stops the agent switching off permission prompts/rules at runtime so the
+	// locked allow/deny actually bind.
+	DisableBypassPermissionsMode string `json:"disableBypassPermissionsMode"`
 }
 
 type hookSet struct {
@@ -76,15 +91,20 @@ func lockedEnv() map[string]string {
 // commonDeny is the defence-in-depth denial set both personas carry: the agent may not rewrite its
 // own locked guards (the read-only mount is the authoritative control; this is the in-band echo),
 // nor disable the permission system. These are NOT the boundary — they are a second layer.
+//
+// Paths are anchored at the FILESYSTEM ROOT with a leading "//": in Claude Code's permission-path
+// syntax "/etc/..." is PROJECT-root-relative, while "//etc/..." is the absolute /etc — these rules
+// must bind to the real root-owned locked files, not a coincidental project-relative "etc/" dir. The
+// constants stay real filesystem paths (the cmd writes to them); we prepend the extra "/" here only.
 func commonDeny() []string {
 	return []string{
-		"Read(" + HooksDir + "/**)",
-		"Edit(" + HooksDir + "/**)",
-		"Write(" + HooksDir + "/**)",
-		"Edit(" + ManagedSettingsPath + ")",
-		"Write(" + ManagedSettingsPath + ")",
-		"Edit(/etc/claude-code/**)",
-		"Write(/etc/claude-code/**)",
+		"Read(/" + HooksDir + "/**)",
+		"Edit(/" + HooksDir + "/**)",
+		"Write(/" + HooksDir + "/**)",
+		"Edit(/" + ManagedSettingsPath + ")",
+		"Write(/" + ManagedSettingsPath + ")",
+		"Edit(//etc/claude-code/**)",
+		"Write(//etc/claude-code/**)",
 	}
 }
 
@@ -111,12 +131,16 @@ func Render(profile interfaces.SessionProfile) (Rendered, error) {
 		return Rendered{}, fmt.Errorf("policyhelper: unrecognised persona %q — refusing to render default-permissive settings (fail closed)", profile.Persona)
 	}
 
+	// Lock out runtime bypass of the permission system (under permissions, alongside defaultMode).
+	perms.DisableBypassPermissionsMode = "disable"
+
 	ms := managedSettings{
-		Permissions:                  perms,
-		Hooks:                        hooks,
-		Env:                          lockedEnv(),
-		DisableBypassPermissionsMode: "disable",
-		CleanupPeriodDays:            0,
+		Permissions:                     perms,
+		Hooks:                           hooks,
+		Env:                             lockedEnv(),
+		AllowManagedHooksOnly:           true,
+		AllowManagedPermissionRulesOnly: true,
+		CleanupPeriodDays:               0,
 	}
 	b, err := json.MarshalIndent(ms, "", "  ")
 	if err != nil {

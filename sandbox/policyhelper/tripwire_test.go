@@ -29,6 +29,10 @@ func TestIsMutating(t *testing.T) {
 		{"cp a b", true},
 		{"truncate -s0 f", true},
 		{"chmod +x f", true},
+		{"touch /workspace/x", true}, // file creators — operate is read-only
+		{"mkdir /workspace/x", true},
+		{"mktemp -p /workspace", true},
+		{"patch < diff", true},
 		{"terraform apply -auto-approve", true},
 		{"kubectl delete ns x", true},
 		{"git push origin main", true},

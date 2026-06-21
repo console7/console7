@@ -40,8 +40,12 @@ the default-deny egress perimeter. If the two disagree, the boundary wins.
   encoded payloads) are disclosed, and the **authoritative** local-FS control is the **read-only /
   ephemeral workspace mount** (a sandbox-runtime boundary control, `DESIGN.md` §5.1 — lands with the
   engine wiring). Cloud mutations are blocked authoritatively by the read-only IAM identity.
-- both → bypass-permissions mode disabled; the engine's non-essential outbound traffic /
-  auto-update / telemetry disabled (`tenet 1` — the engine must not phone home from in-sandbox).
+- both → bypass-permissions mode disabled; **lower-scope (project/user) hooks + permission rules
+  locked out** (`allowManagedHooksOnly` / `allowManagedPermissionRulesOnly`) so an untrusted target
+  repo's `.claude/settings.json` cannot inject its own hooks or auto-approve rules; the engine's
+  non-essential outbound traffic / auto-update / telemetry disabled (`tenet 1` — the engine must not
+  phone home from in-sandbox). *(The exact managed-settings field names/placement are validated
+  against the pinned engine when the orchestrator is wired — synthetic in this PR.)*
 
 The renderer runs **control-side** (the orchestrator renders + injects the managed-settings
 read-only) or, for the local dogfood, **inside the image as root** (where the locked dir exists):

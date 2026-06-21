@@ -57,5 +57,11 @@ func writeFile(root, path string, content []byte, mode os.FileMode) error {
 	if err := os.WriteFile(full, content, mode); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	// WriteFile's mode is filtered through the process umask, so a hardened root umask (e.g. 077)
+	// would create the policy 0400 — unreadable by the non-root agent, so the engine would start
+	// without it. Chmod is NOT umask-filtered; enforce the intended bits explicitly.
+	if err := os.Chmod(full, mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
+	}
 	return nil
 }

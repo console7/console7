@@ -28,8 +28,9 @@ func operateProfile() interfaces.SessionProfile {
 // parsed is the subset of managed-settings.json the tests assert against.
 type parsed struct {
 	Permissions struct {
-		Allow []string `json:"allow"`
-		Deny  []string `json:"deny"`
+		Allow                        []string `json:"allow"`
+		Deny                         []string `json:"deny"`
+		DisableBypassPermissionsMode string   `json:"disableBypassPermissionsMode"`
 	} `json:"permissions"`
 	Hooks struct {
 		PreToolUse []struct {
@@ -40,8 +41,9 @@ type parsed struct {
 			} `json:"hooks"`
 		} `json:"PreToolUse"`
 	} `json:"hooks"`
-	Env                          map[string]string `json:"env"`
-	DisableBypassPermissionsMode string            `json:"disableBypassPermissionsMode"`
+	Env                             map[string]string `json:"env"`
+	AllowManagedHooksOnly           bool              `json:"allowManagedHooksOnly"`
+	AllowManagedPermissionRulesOnly bool              `json:"allowManagedPermissionRulesOnly"`
 }
 
 func mustParse(t *testing.T, r Rendered) parsed {
@@ -72,8 +74,14 @@ func TestRender_LockdownFieldsOnEveryPersona(t *testing.T) {
 			t.Fatalf("render %s: %v", prof.Persona, err)
 		}
 		p := mustParse(t, r)
-		if p.DisableBypassPermissionsMode != "disable" {
-			t.Errorf("%s: bypass-permissions mode not disabled: %q", prof.Persona, p.DisableBypassPermissionsMode)
+		if p.Permissions.DisableBypassPermissionsMode != "disable" {
+			t.Errorf("%s: bypass-permissions mode not disabled: %q", prof.Persona, p.Permissions.DisableBypassPermissionsMode)
+		}
+		// Lower-scope (project/user) hooks + permission rules must be locked out, so an untrusted
+		// target repo's .claude/settings.json cannot inject hooks or auto-approve rules.
+		if !p.AllowManagedHooksOnly || !p.AllowManagedPermissionRulesOnly {
+			t.Errorf("%s: managed-only lockouts not set (hooks=%v rules=%v) — repo settings could inject",
+				prof.Persona, p.AllowManagedHooksOnly, p.AllowManagedPermissionRulesOnly)
 		}
 		// The engine must not phone home / auto-update / mutate its pinned version from in-sandbox.
 		for _, k := range []string{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY"} {
@@ -81,8 +89,9 @@ func TestRender_LockdownFieldsOnEveryPersona(t *testing.T) {
 				t.Errorf("%s: lockdown env %s not set to 1 (got %q)", prof.Persona, k, p.Env[k])
 			}
 		}
-		// Neither persona may rewrite its own locked guards (defence-in-depth echo of the read-only mount).
-		if !slices.Contains(p.Permissions.Deny, "Write("+ManagedSettingsPath+")") {
+		// Neither persona may rewrite its own locked guards (defence-in-depth echo of the read-only
+		// mount). The rule is anchored at the filesystem root ("//" prefix on the absolute path).
+		if !slices.Contains(p.Permissions.Deny, "Write(/"+ManagedSettingsPath+")") {
 			t.Errorf("%s: deny set does not protect the managed-settings path", prof.Persona)
 		}
 	}
