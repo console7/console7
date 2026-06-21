@@ -59,7 +59,6 @@ LABEL org.opencontainers.image.title="console7-sandbox-base" \
       dev.console7.trust-tier="data-plane-untrusted" \
       dev.console7.engine.version="${CLAUDE_CODE_VERSION}"
 
-ENV C7_MANAGED_SETTINGS=/etc/claude-code/managed-settings.json
 WORKDIR /workspace
 USER sandbox
 ENTRYPOINT ["/usr/local/bin/console7-entrypoint"]

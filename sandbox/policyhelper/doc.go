@@ -26,13 +26,15 @@
 //
 // # Real vs deferred in this PR (PR-3)
 //
-//   - REAL: the full render for author and operate personas, the lockdown fields, the operate
-//     tripwire hook + script, and the consistency invariant (every hook the settings reference is
-//     emitted in Rendered.Hooks).
-//   - DEFERRED: the tripwire's "emit an INCIDENT to the evidence sink" half (DESIGN.md §5.4) needs
-//     the engine wired into the orchestrator with a callback to the EvidenceSink; the orchestrator
-//     stays synthetic in this PR, so the script denies in-sandbox and marks the incident on stderr,
-//     and the evidence emission lands when the engine is wrapped end to end (a clean follow-up).
+//   - REAL: the full render for author and operate personas, the lockdown fields, and the operate
+//     mutating-command tripwire (a baked binary, cmd/tripwire, referenced by the operate Bash hook;
+//     quote-aware, recurses into sh -c / eval, denies interpreter inline-eval — fully table-tested).
+//   - DEFERRED: the tripwire is BEST-EFFORT defence-in-depth, not a reliable block — for local-FS
+//     mutations the authoritative control is the read-only / ephemeral workspace mount (DESIGN.md
+//     §5.1), a sandbox-runtime boundary control that lands with the engine wiring (residual bypasses
+//     like $(...) and encoded payloads are disclosed on IsMutating). The tripwire's "emit an
+//     INCIDENT to the evidence sink" half (DESIGN.md §5.4) also needs the engine wired into the
+//     orchestrator; here the deny + stderr marker are the live half.
 //   - DEFERRED: the full per-tier autonomy matrix is Phase 3; Phase 1 is author × T3/S1
 //     (control-plane/orchestrator.ResolveProfile), so tier currently shapes only the conservative
 //     defaults, not a rich matrix.

@@ -52,7 +52,39 @@ func TestIsMutating(t *testing.T) {
 		// redirection (file write) — operate is read-only
 		{"echo data > /etc/passwd", true},
 		{"echo data >> /etc/passwd", true},
+		{"echo x >| /etc/passwd", true},
 		{"kubectl get pods 2>&1", false}, // fd-dup, not a file write
+
+		// redirect FALSE POSITIVES that must stay read-only (the review caught these)
+		{`echo "a > b"`, false},      // > inside double quotes
+		{`grep '>' file.txt`, false}, // > inside single quotes
+		{"cat a->b.txt", false},      // -> arrow, not a redirect
+		{"git log --format=%h", false},
+
+		// shell / interpreter ESCAPE primitives — the big bypass class, must be caught
+		{`bash -c "rm -rf /etc"`, true},
+		{`sh -c 'rm -rf /etc'`, true},
+		{`bash -c "echo hi"`, false}, // recurse: read-only payload is allowed
+		{"eval rm -rf /etc", true},
+		{`python -c "import os; os.remove('x')"`, true},
+		{`python3 -c "..."`, true},
+		{"perl -e unlink", true},
+		{"node -e x", true},
+		{"echo x | sh", true}, // pipe to a bare subshell
+		{"cat script | bash", true},
+		{"python analyze.py", false}, // running a script file is not inline-eval
+
+		// global flag BEFORE the subcommand must not defeat the subcommand table
+		{"kubectl --context prod delete ns x", true},
+		{"kubectl -n ns delete pod x", true},
+		{"git -C /repo push", true},
+		{"terraform -chdir=/r apply", true},
+		{"docker -H tcp://x run img", true},
+		{"sudo -u root rm x", true}, // wrapper value-flag must not swallow the command
+		{"FOO=1 rm x", true},        // bare inline assignment prefix
+		{"helm upgrade rel chart", true},
+		{"aws s3 ls", false}, // cloud read-only — IAM-covered, not a tripwire false-positive
+		{"kubectl get pods -o yaml", false},
 	}
 	for _, tc := range cases {
 		got, matched := IsMutating(tc.cmd)

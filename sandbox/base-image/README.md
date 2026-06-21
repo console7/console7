@@ -34,8 +34,12 @@ the default-deny egress perimeter. If the two disagree, the boundary wins.
 - **author** → development-capable permissions; self-modification + obvious actuation denied.
 - **operate** → **read-only** (every file-mutating tool denied; Bash allowed for read-only CLI per
   `DESIGN.md` §5.4) + the **PreToolUse mutating-command tripwire** (the `console7-tripwire` binary)
-  on Bash — robust (JSON-parsed, command-position, separator-aware), heuristic, fail-closed, denies
-  in-sandbox. The tripwire is a **baked binary**, not a rendered script, so it is fully unit-tested.
+  on Bash — a **best-effort heuristic** (quote-aware tokenizer; recurses into `sh -c`/`eval`; denies
+  interpreter inline-eval; matches subcommands past global flags), fail-closed, denies in-sandbox. It
+  is a baked binary (fully table-tested), **not a reliable block**: residual bypasses (`$(...)`,
+  encoded payloads) are disclosed, and the **authoritative** local-FS control is the **read-only /
+  ephemeral workspace mount** (a sandbox-runtime boundary control, `DESIGN.md` §5.1 — lands with the
+  engine wiring). Cloud mutations are blocked authoritatively by the read-only IAM identity.
 - both → bypass-permissions mode disabled; the engine's non-essential outbound traffic /
   auto-update / telemetry disabled (`tenet 1` — the engine must not phone home from in-sandbox).
 

@@ -10,10 +10,13 @@
 # `console7-policyhelper <session-profile.json>`, then start the engine.)
 set -eu
 
-: "${C7_MANAGED_SETTINGS:=/etc/claude-code/managed-settings.json}"
+# Check the engine's OWN fixed managed-settings location (NOT an overridable env var), so the
+# fail-closed guard validates exactly the file the engine will read — a repointed env can't make the
+# check pass against a different path than the engine loads.
+MANAGED_SETTINGS=/etc/claude-code/managed-settings.json
 
-if [ ! -f "$C7_MANAGED_SETTINGS" ]; then
-	echo "console7: locked managed-settings missing at ${C7_MANAGED_SETTINGS} — refusing to start the engine without its policy (fail closed)" >&2
+if [ ! -f "$MANAGED_SETTINGS" ]; then
+	echo "console7: locked managed-settings missing at ${MANAGED_SETTINGS} — refusing to start the engine without its policy (fail closed)" >&2
 	exit 1
 fi
 
