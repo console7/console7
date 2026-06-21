@@ -65,6 +65,7 @@ flowchart LR
 | `terraform.yml` | PR, push | `terraform fmt`/`validate` + **trivy** config scan | CO-9, CO-7.1 | trivy report |
 | `shellcheck.yml` | PR, push | shell lint of `deploy/**/*.sh` | CO-17 | shellcheck report |
 | `governance-gate.yml` | PR, push | `audit-skill-provenance.sh` — `.claude/` skills/agents/hooks first-party only (**blocking**) | CO-12.7/12.8 | provenance audit |
+| `architecture-docs.yml` | PR, push | `validate-architecture-mermaid.py` — Mermaid soundness of `docs/architecture/` (**blocking**) + non-blocking drift `::warning::` | CO-14, CO-17 | validator result; drift annotation |
 | `dast-zap.yml` | manual | ZAP baseline (report-only) | CO-7.2 | ZAP report ◻ |
 | conformance | `go test ./conformance/...` | provider contract assertions (7 of 9 seams live) | CO-14, CO-15 | conformance results |
 

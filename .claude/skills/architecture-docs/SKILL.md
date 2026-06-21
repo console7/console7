@@ -70,28 +70,13 @@ README's status markers / reviewer-observations list.
    observation changed.
 
 ## Validate before pushing (offline, dependency-free)
-Run from the repo root — checks diagram-type, block balance, sequence-arrow misuse,
-stray FontAwesome, and code-fence parity. No network, stdlib `python3` only:
+Run the committed validator from the repo root — it checks diagram type, block balance,
+sequence-arrow misuse, stray FontAwesome, and code-fence parity (stdlib `python3` only,
+no network). It is the **same** check the `architecture-docs` CI workflow runs as a
+**blocking** gate, so a clean local run means a clean gate:
 
 ```bash
-python3 - <<'PY'
-import re, glob, sys
-flow_open=('subgraph',); seq_open=('alt','opt','loop','par','critical','rect','break','box')
-bad=0
-for f in sorted(glob.glob('docs/architecture/*.md')):
-    t=open(f).read()
-    if t.count('```')%2: print(f'{f}: ODD code fences'); bad=1
-    for i,b in enumerate(re.findall(r'```mermaid\n(.*?)```', t, re.S),1):
-        L=b.splitlines(); first=next((x.strip() for x in L if x.strip()),'')
-        dt='flow' if first.startswith(('flowchart','graph')) else ('seq' if first.startswith('sequenceDiagram') else '?')
-        op=sum(1 for x in L if x.strip().split(' ',1)[0] in (flow_open if dt=='flow' else seq_open))
-        en=sum(1 for x in L if x.strip()=='end')
-        if dt=='?': print(f'{f} block{i}: unknown diagram type'); bad=1
-        if op!=en: print(f'{f} block{i}: subgraph/end mismatch {op}!={en}'); bad=1
-        if dt=='seq' and any('==>' in x for x in L): print(f'{f} block{i}: ==> invalid in sequenceDiagram'); bad=1
-        if 'fa:fa-' in b: print(f'{f} block{i}: fa:fa- icon will render as literal text on GitHub'); bad=1
-print('VALIDATION', 'FAILED' if bad else 'OK'); sys.exit(1 if bad else 0)
-PY
+python3 scripts/validate-architecture-mermaid.py
 ```
 
 Structural validation is necessary but not sufficient — also eyeball the rendered
@@ -104,12 +89,16 @@ diagram (GitHub preview, or `mmdc` if the adopter has it pinned/vetted) for layo
   upgrade a scaffold to "implemented".
 - This is descriptive documentation: it changes no behaviour, so the **pure-docs**
   proportionality applies — the heavyweight `pre-pr-review` adversarial fan-out is not
-  required for a docs-only refresh, but the validation snippet above always is.
+  required for a docs-only refresh, but the committed validator above always is.
 
 ## Relationship to the other guards
+- The **`architecture-docs` CI workflow** (`.github/workflows/architecture-docs.yml`) runs
+  the shared validator as a **blocking** gate on every PR (a broken diagram fails CI) and
+  emits a **non-blocking** drift `::warning::` when an architecture-significant change lands
+  without a `docs/architecture/` update. The blocking half is deterministic (a real control
+  of record); the drift half is heuristic (advisory only, tenet 2).
 - The **pre-pr-review** skill/workflow runs an *architecture-docs currency* lens that
-  flags when an architecture-significant surface changed without a `docs/architecture/`
-  update, and points back here.
+  flags the same drift locally, before push, and points back here.
 - The **Bash guard** (`.claude/hooks/guard-bash.sh`) prints a **non-blocking** pre-push
-  reminder in the same situation. Both are nudges, never gates (tenet 2); the
+  reminder in the same situation. The local checks are nudges, never gates (tenet 2); the
   authoritative review remains CI + Socket/Codex + the maintainer's admin-merge.
