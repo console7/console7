@@ -167,8 +167,19 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 	if n := strings.Count(m, "- to:"); n != 1 {
 		t.Errorf("expected exactly one egress allow rule (the proxy), got %d\n%s", n, m)
 	}
-	// An empty allowlist still renders a valid default-deny policy.
-	if e := string(renderNamespaceAndEgress("sb", nil)); !strings.Contains(e, "kind: NetworkPolicy") {
-		t.Fatalf("empty allowlist did not render a NetworkPolicy:\n%s", e)
+	// An empty allowlist still renders a valid default-deny policy, and the allowlist wire format
+	// MUST be the canonical "[]" — never JSON "null" — so a PR-3 proxy parser can't read deny-all
+	// as "no policy → allow-all". Both nil and an empty slice render "[]".
+	for _, empty := range [][]string{nil, {}} {
+		e := string(renderNamespaceAndEgress("sb", empty))
+		if !strings.Contains(e, "kind: NetworkPolicy") {
+			t.Fatalf("empty allowlist did not render a NetworkPolicy:\n%s", e)
+		}
+		if !strings.Contains(e, `allowlist.json: "[]"`) {
+			t.Errorf("empty allowlist did not render the canonical []: \n%s", e)
+		}
+		if strings.Contains(e, "null") {
+			t.Errorf("empty allowlist rendered JSON null (fail-open contract trap)\n%s", e)
+		}
 	}
 }

@@ -250,10 +250,17 @@ func (p *Provider) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 	}
 	// The workload is gone; mark dead so any later operation fails closed. A Clear failure now
 	// only leaves orphaned perimeter config (harmless — nothing routes through it), so it is
-	// joined and surfaced but does not resurrect the sandbox.
+	// surfaced but does not resurrect the sandbox.
 	sb.live = false
 	sb.egress = nil
-	if err := p.egress.Clear(ctx, h); err != nil {
+	// Clear on a DETACHED, bounded context — the same reasoning as the provision-rollback above:
+	// runtime.Destroy may have waited out most of the caller's deadline, and once the sandbox is
+	// committed dead there is no API path back to retry the perimeter cleanup (lookup rejects a
+	// non-live handle), so the namespace would orphan until the reaper. Don't let a caller ctx that
+	// expired during the pod-delete wait take the namespace cleanup down with it.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	if err := p.egress.Clear(cleanupCtx, h); err != nil {
 		return fmt.Errorf("cloudgcp: sandbox destroyed but clearing its perimeter failed: %w", err)
 	}
 	return nil

@@ -308,9 +308,16 @@ const proxyPort = 3128
 // (the proxy resolves names and enforces the FQDN allowlist, which is carried to it in the
 // ConfigMap; a NetworkPolicy is IP-based and cannot match FQDNs anyway).
 func renderNamespaceAndEgress(nsID string, allowlist []string) []byte {
-	encoded, err := json.Marshal(allowlist)
-	if err != nil {
-		encoded = []byte("[]")
+	// Canonicalise the deny-all wire format: json.Marshal of a nil []string is "null", not "[]",
+	// and every deny-all path (widen-refused, narrow-fallback, an empty spec allowlist) passes nil.
+	// The NetworkPolicy is the authoritative perimeter regardless, but this ConfigMap is the
+	// contract PR-3's forward proxy will parse — emit exactly "[]" so a "null = no policy = allow"
+	// reading can never invert deny-all into allow-all (ports.go: empty allowlist means deny-all).
+	encoded := []byte("[]")
+	if len(allowlist) > 0 {
+		if m, err := json.Marshal(allowlist); err == nil {
+			encoded = m
+		}
 	}
 	return fmt.Appendf(nil, `apiVersion: v1
 kind: Namespace

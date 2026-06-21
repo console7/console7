@@ -18,10 +18,12 @@ import (
 // guarantee — the perimeter is set BEFORE the workload can run — by calling EgressController
 // before SandboxRuntime, rather than trusting one combined adapter to get the order right.
 
-// SandboxRuntime provisions and destroys the per-session, gVisor-isolated workload. The real
-// adapter creates an isolated Kubernetes namespace + a pod with the gVisor RuntimeClass,
-// pinned to the sandbox node pool, with no service-account token and an activeDeadlineSeconds
-// derived from spec.MaxTTL; Destroy deletes the namespace.
+// SandboxRuntime provisions and destroys the per-session, gVisor-isolated workload — the POD
+// only. The namespace it runs in (and that namespace's egress NetworkPolicy) is owned by the
+// EgressController, created by Set BEFORE Provision (perimeter-before-workload) and deleted by
+// Clear. The real adapter creates a pod with the gVisor RuntimeClass, pinned to the sandbox node
+// pool, with no service-account token and an activeDeadlineSeconds derived from spec.MaxTTL;
+// Destroy deletes that pod.
 type SandboxRuntime interface {
 	// Provision creates the isolated workload identified by handle for spec. The provider
 	// guarantees EgressController.Set has already succeeded for handle when this is called, so
@@ -33,10 +35,11 @@ type SandboxRuntime interface {
 	// metadata server — GKE_METADATA mode — which conceals the node service account, and the
 	// sandbox pods are bound to no KSA — modules/gke; New preflights this).
 	Provision(ctx context.Context, handle interfaces.SandboxHandle, spec interfaces.SandboxSpec) error
-	// Destroy irreversibly tears the workload down and reclaims its namespace, wiping the
-	// ephemeral workspace and any injected credential material. It MUST NOT snapshot or persist
-	// sandbox contents anywhere another session or the maintainer could read (GOAL.md tenet 1,
-	// tenet 5). Destroying a workload the cloud no longer has is acceptable success — the
+	// Destroy irreversibly tears the workload (the pod) down, wiping the ephemeral workspace and
+	// any injected credential material; the namespace + NetworkPolicy + ConfigMap are reaped by
+	// EgressController.Clear, which the provider calls after Destroy. It MUST NOT snapshot or
+	// persist sandbox contents anywhere another session or the maintainer could read (GOAL.md
+	// tenet 1, tenet 5). Destroying a workload the cloud no longer has is acceptable success — the
 	// provider is the source of truth for liveness and fails closed on a double destroy itself.
 	Destroy(ctx context.Context, handle interfaces.SandboxHandle) error
 }

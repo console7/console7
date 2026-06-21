@@ -28,15 +28,17 @@ type Config struct {
 	// pool. Defaults to DefaultNamePrefix; must match the deploy modules' name_prefix.
 	NamePrefix string
 	// NodePool is the gVisor (sandboxed) node pool the sandbox pods are pinned to (modules/gke
-	// output). The pool runs WITHOUT Workload Identity, which is the authoritative metadata
-	// block (a sandbox pod gets no node-local metadata credential). Defaults to
+	// output). The pool runs the GKE metadata server in GKE_METADATA mode, which conceals the node
+	// service account (a sandbox pod, bound to no KSA and with automountServiceAccountToken=false,
+	// gets no node-local metadata credential) — the authoritative metadata block. New refuses to
+	// construct against a pool whose workloadMetadataConfig.mode is not GKE_METADATA. Defaults to
 	// "<NamePrefix>-sandbox".
 	NodePool string
 	// RuntimeClass is the gVisor RuntimeClass name. Defaults to DefaultRuntimeClass.
 	RuntimeClass string
 }
 
-// namePrefixRe bounds the prefix so derived Kubernetes object names ("<prefix>-sb-<12 hex>")
+// namePrefixRe bounds the prefix so derived Kubernetes object names ("<prefix>-sb-<32 hex>")
 // are valid DNS-1123 labels and match the deploy modules' name_prefix validation.
 var namePrefixRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,17}[a-z0-9])?$`)
 
