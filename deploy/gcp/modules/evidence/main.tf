@@ -90,11 +90,23 @@ resource "google_project_iam_custom_role" "evidence_writer" {
   ]
 }
 
-# Bind the writer role to the EXISTING workload SA AT BUCKET SCOPE (google_storage_bucket_iam_member,
-# not a project binding) — tighter than a project-level grant with a resource-name condition: the
-# SA can append/read only within the evidence bucket, nothing else in the project.
-resource "google_storage_bucket_iam_member" "workload_evidence_writer" {
-  bucket = google_storage_bucket.evidence.name
-  role   = google_project_iam_custom_role.evidence_writer.id
-  member = "serviceAccount:${var.workload_service_account_email}"
+# AUTHORITATIVE bucket IAM policy (google_storage_bucket_iam_policy, not _iam_member). This is
+# deliberate and load-bearing: a NEW uniform-bucket-level-access bucket is auto-granted the project
+# CONVENIENCE roles, and a project Viewer thereby receives roles/storage.legacyObjectReader —
+# i.e. storage.objects.get on every object. The bootstrap PLAN identity holds project roles/viewer
+# and is impersonable from any branch, so an ADDITIVE member binding would leave PR plan jobs able
+# to READ evidence payloads (a tenet-1 confidentiality leak). An authoritative policy REPLACES the
+# whole bucket policy, dropping those convenience grants and leaving ONLY the append-only workload
+# binding. The APPLY/deploy identity keeps bucket access through its PROJECT-level roles/storage.admin
+# (project IAM is additive to the bucket policy), so this does not lock Terraform out.
+data "google_iam_policy" "evidence" {
+  binding {
+    role    = google_project_iam_custom_role.evidence_writer.id
+    members = ["serviceAccount:${var.workload_service_account_email}"]
+  }
+}
+
+resource "google_storage_bucket_iam_policy" "evidence" {
+  bucket      = google_storage_bucket.evidence.name
+  policy_data = data.google_iam_policy.evidence.policy_data
 }

@@ -60,8 +60,15 @@ func (s *Store) preflight(ctx context.Context) error {
 	if n == 0 {
 		return nil
 	}
-	if _, _, err := s.At(ctx, n-1); err != nil {
+	_, ok, err := s.At(ctx, n-1)
+	if err != nil {
 		return fmt.Errorf("evidencegcs: startup tail read failed at sequence %d: %w", n-1, err)
+	}
+	if !ok {
+		// The count is non-zero but the tail slot is absent: a gap (e.g. a privileged delete) or a
+		// stray non-record object under the prefix inflating the count. Fail closed rather than let
+		// evidence.New's best-effort hydration publish a sink that looks empty and collides at 0.
+		return fmt.Errorf("evidencegcs: store reports %d records but the tail at sequence %d is missing — refusing to start on a gapped/tampered backing", n, n-1)
 	}
 	return nil
 }

@@ -102,6 +102,13 @@ func (s *Store) At(ctx context.Context, seq uint64) (evidence.Entry, bool, error
 	if err != nil {
 		return evidence.Entry{}, false, fmt.Errorf("evidencegcs: decode entry at sequence %d: %w", seq, err)
 	}
+	// The object body carries its own Ref.Sequence; it MUST match the slot it was addressed by, or
+	// the backing has been tampered with / mis-imported (a direct GCS write under the workload
+	// creds, say). At is the Store boundary the Sink's hydrate/Seal/Stream all trust, so fail
+	// closed here rather than hand back a record as a slot it does not belong to.
+	if entry.Ref.Sequence != seq {
+		return evidence.Entry{}, false, fmt.Errorf("evidencegcs: object at sequence %d carries mismatched sequence %d (corrupt/tampered) — refusing", seq, entry.Ref.Sequence)
+	}
 	return entry, true, nil
 }
 

@@ -166,6 +166,38 @@ func TestStore_SinkRoundTripVerifies(t *testing.T) {
 	}
 }
 
+func TestStore_AtRejectsMismatchedSequence(t *testing.T) {
+	fake := NewInMemoryObjectIO()
+	s := NewWithObjectIO(fake, "records")
+	ctx := context.Background()
+	// Write an entry whose body claims sequence 9 into the object addressed as slot 0 (models a
+	// direct/tampered GCS write). At(0) must fail closed, not return it as slot 0.
+	bad, err := marshalEntry(entryAt(9))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := fake.PutIfAbsent(ctx, s.objectName(0), bad); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, _, err := s.At(ctx, 0); err == nil {
+		t.Fatal("expected At to reject an object whose Ref.Sequence != the requested slot")
+	}
+}
+
+func TestPreflight_RejectsMissingTail(t *testing.T) {
+	fake := NewInMemoryObjectIO()
+	s := NewWithObjectIO(fake, "records")
+	ctx := context.Background()
+	// Inflate the count with a stray object under the prefix that is NOT a real tail record, so
+	// Len==1 but At(0) is not found. preflight must fail closed, not treat the store as usable.
+	if err := fake.PutIfAbsent(ctx, "records/stray", []byte("x")); err != nil {
+		t.Fatalf("seed stray: %v", err)
+	}
+	if err := s.preflight(ctx); err == nil {
+		t.Fatal("expected preflight to reject a non-empty store whose tail slot is missing")
+	}
+}
+
 func TestPreflight_SurfacesReadFault(t *testing.T) {
 	ctx := context.Background()
 	fake := NewInMemoryObjectIO()

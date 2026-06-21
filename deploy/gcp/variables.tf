@@ -35,3 +35,15 @@ variable "kms_rotation_period" {
     error_message = "kms_rotation_period must be a positive number of seconds, e.g. \"7776000s\" (90 days)."
   }
 }
+
+variable "evidence_retention_seconds" {
+  type        = number
+  description = "Evidence-bucket object retention period in seconds (the WORM window). Default 7 years."
+  default     = 220752000
+}
+
+variable "evidence_retention_locked" {
+  type        = bool
+  description = "Whether to LOCK the evidence bucket's retention policy. PRODUCTION MUST set this true to make the WORM guarantee authoritative against a privileged actor (GOAL.md tenet 3; tenet 7) — surfaced at the root so operators need not edit module source. IRREVERSIBLE (the policy can never be removed/shortened; the bucket cannot be destroyed until retention expires). Default false so dev/dogfood buckets stay destroyable, leaving the default posture tamper-evident, not tamper-resistant."
+  default     = false
+}
