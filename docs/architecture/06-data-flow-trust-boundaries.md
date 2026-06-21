@@ -47,7 +47,7 @@ flowchart TB
       BRKp[["broker + signing"]]
     end
     subgraph DPZ["TB3 — Sandbox (untrusted, default-deny egress)"]
-      ENGp[["Claude Code engine (planned)"]]
+      ENGp[["Claude Code engine<br/>(invocation seam ✅ #47; live in-pod Tier-2)"]]
       PRX[["egress proxy (planned)"]]
     end
     SMs[("Secret Manager")]
@@ -77,6 +77,7 @@ flowchart TB
   ENGp --> PRX
   PRX ==>|"C-MODEL — THE crossing"| MODEL
   ENGp -->|"C-CODE proposed PR"| GH
+  ENGp -->|"C-CODE EngineResult.CommitDigest &rarr; orchestrator signs"| ORC
   ENGp -.->|"C-EVID tool evidence (planned)"| EVp
   ENGp -->|"pre-egress scan"| DLPp
   ORC -->|"C-EVID append (signed)"| EVp

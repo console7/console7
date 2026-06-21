@@ -12,9 +12,11 @@ Mermaid C4 dialect) for reliable GitHub rendering; the C4 *levels* are noted in 
 > GCP/GitHub/Vertex/Anthropic/GCS reference providers), and the **authoritative sandbox
 > boundary is now largely landed** — gVisor isolation, per-session default-deny egress
 > (NetworkPolicy on Dataplane V2), Cloud NAT, and node-SA metadata concealment
-> (`providers/cloud-gcp` #41, `modules/gke` #43). Still **target state**: the out-of-band
-> FQDN-allowlist egress **proxy** (PR-3), the **base-image/engine wrap**, **DLP**, the
-> **Observe Gateway**, the **MCP allowlist**, and the **release/signing pipeline**. The views
+> (`providers/cloud-gcp` #41, `modules/gke` #43), and the **engine-invocation seam** —
+> `Cloud.RunTask`→`EngineResult` with real-commit-digest signing (#47), plus in-sandbox
+> `git`/`ca-certificates` (#48). Still **target state**: the out-of-band FQDN-allowlist
+> egress **proxy** (PR-3), **DLP**, the **Observe Gateway**, the **MCP allowlist**, the
+> **release/signing pipeline**, and the engine's **live in-pod integration** (Tier-2). The views
 > mark this explicitly — **faded + dashed = target state**. See
 > [Reviewer observations](#c-reviewer-observations).
 
@@ -115,9 +117,11 @@ What a second-line (2LoD) reviewer should flag, roughly in priority order:
    **gVisor syscall isolation**, **per-session default-deny egress** (NetworkPolicy on Dataplane
    V2), **Cloud NAT**, and **node-SA metadata concealment** (`providers/cloud-gcp`, `modules/gke`)
    — on top of the already-implemented cryptographic layers (signing, evidence chain, seam
-   refusals). What **remains target state**: the **out-of-band FQDN-allowlist egress proxy**
-   (PR-3), the **base-image/engine wrap**, **DLP**, the **Observe Gateway**, the **MCP allowlist**,
-   and the **release/signing pipeline**. The residual gap is now the *content-aware* egress
+   refusals) and — as of #47/#48 — the **engine-invocation seam** (`Cloud.RunTask`→`EngineResult`
+   with real-commit-digest signing; in-sandbox `git`/`ca-certificates`). What **remains target
+   state**: the **out-of-band FQDN-allowlist egress proxy** (PR-3), **DLP**, the **Observe
+   Gateway**, the **MCP allowlist**, the **release/signing pipeline**, and the engine's **live
+   in-pod integration** (Tier-2). The residual gap is now the *content-aware* egress
    controls (FQDN allowlist + DLP) and the operate lane — not the coarse boundary, which is in place.
 2. **Evidence integrity vs the privileged provisioning identity (SoD gap).** The GCS evidence
    bucket is only **tamper-evident** until `is_locked=true` (off by default, `RISKS.md` R-2),

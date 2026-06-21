@@ -167,12 +167,12 @@ flowchart TB
 ### Data plane (`sandbox/`) — untrusted, ephemeral, distinct base image
 | Container | Status | Responsibility |
 |---|---|---|
-| `base-image` | ✅ Dockerfile + `policyhelper` | Wraps the **genuine**, pinned Claude Code engine (distinct build identity, non-root, fail-closed); `policyHelper` renders the locked managed-settings + the operate mutating-command tripwire binary per persona × tier (PR-3). Signing/SBOM + engine-wiring deferred. |
+| `base-image` | ✅ Dockerfile + `policyhelper` | Wraps the **genuine**, pinned Claude Code engine (distinct build identity, non-root, fail-closed); `policyHelper` renders the locked managed-settings + the operate mutating-command tripwire binary per persona × tier (PR-3). Engine-invocation seam landed (`Cloud.RunTask`→`EngineResult`, #47) + in-sandbox `git`/`ca-certificates` (#48); live in-pod engine integration ◻ Tier-2; Signing/SBOM ◻. |
 | `egress-proxy` | ◻ README | Control-side helper for the **authoritative** default-deny perimeter (cloud firewall + NAT), incl. IMDS block — *not* an in-process proxy. |
 | `observe-gateway` | ◻ README | Operate-lane redacting, query-audited, rate-limited façade over production telemetry. |
 
 ### The nine seams (`sdk/interfaces/`) and their reference providers
-`CloudProvider`→`cloud-gcp` ✅ (#41) (+ `devkit.MemCloud`, and the Docker provider in
+`CloudProvider`→`cloud-gcp` ✅ (#41; +`RunTask(EngineTask)`→`EngineResult` engine seam #47) (+ `devkit.MemCloud`, and the Docker provider in
 `console7-cloud-local`); `SecretsProvider`→`secrets-gcp` ✅; `IdentityProvider`→OIDC
 *(ref assumed)* + `devkit.DevIdentity`; `SCMProvider`→`scm-github` ✅;
 `InferenceBackend`→`inference-vertex` ✅ + `inference-anthropic` ✅; `PolicyEngine`→
@@ -190,8 +190,7 @@ flowchart TB
   deploy time, not runtime calls.
 
 ## Notes & confidence
-- The `inference-router`, `dlp`, `ui`, the sandbox trio (base-image / egress-proxy /
-  observe-gateway), and `policy-opa` are **scaffold/README-only** at this commit; their
+- The `inference-router`, `dlp`, `ui`, the sandbox egress-proxy + observe-gateway, and `policy-opa` are **scaffold/README-only** at this commit; their
   behaviour is shown per the normative spec and marked ◻ (faded). `cloud-gcp` **landed**
   (#41) — the `CloudProvider` is no longer MemCloud-only. Everything marked ✅ was read in source.
 - `IdentityProvider` and `PolicySoR` have **real dev/in-memory** implementations
