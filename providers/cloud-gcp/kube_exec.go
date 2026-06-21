@@ -338,9 +338,11 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	}, nil
 }
 
-// gitExec runs a git subcommand in the in-pod working directory via `kubectl exec`.
+// gitExec runs a git subcommand in the in-pod working directory via `kubectl exec`. safe.directory
+// is set because the checkout may be owned by a uid other than the engine's (e.g. a mounted or
+// pre-populated workspace), which modern git otherwise refuses with "dubious ownership".
 func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHandle, args ...string) ([]byte, error) {
-	return k.execIn(ctx, h, nil, append([]string{"git", "-C", k.cfg.Workdir}, args...)...)
+	return k.execIn(ctx, h, nil, append([]string{"git", "-c", "safe.directory=" + k.cfg.Workdir, "-C", k.cfg.Workdir}, args...)...)
 }
 
 // nonEmptyLines splits s into its non-blank, trimmed lines — the file paths from `git show

@@ -22,6 +22,18 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/console7-policyhelper ./sandbox/pol
 # ---- Stage 2: the runtime (the wrapped engine) ----
 FROM node:22-bookworm-slim AS runtime
 
+# git: the genuine engine works on repositories, and the orchestrator's RunTask adapters
+# (providers/cloud-gcp kubeEngineRunner; console7-cloud-local Docker) capture the engine's commit via
+# git INSIDE the sandbox — node:*-slim ships no git, so without this the engine wrap cannot complete a
+# run. ca-certificates: TLS trust for the engine's model calls. Both are runtime deps of the wrapped
+# engine.
+# DL3008: apt version pinning on a slim base is brittle and is deferred to the signed-release pipeline
+# (DESIGN.md §8), consistent with the deliberate-but-unlocked engine pin below.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # The genuine Claude Code engine, PINNED. Upgrades MUST be canaried before fleet rollout (DESIGN.md
 # §1.4) — bump this deliberately, never float to latest. Production SHOULD additionally pin the
 # base images above by digest.
