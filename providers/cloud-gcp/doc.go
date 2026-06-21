@@ -40,8 +40,9 @@
 //     firewall cannot provide (see deploy/gcp/modules/networking).
 //   - DEFERRED to the egress-proxy + base-image (PR-3): the out-of-band forward proxy that does
 //     FQDN allowlisting is what the EgressController's allowlist ultimately feeds; the NetworkPolicy
-//     this adapter applies pins sandbox egress to that proxy + kube-dns (denying everything else,
-//     including the metadata server, by omission). The genuine Claude Code engine +
+//     this adapter applies pins sandbox egress to that proxy ONLY (denying everything else —
+//     including DNS and the metadata server — by omission; name resolution is the proxy's job, so
+//     the sandbox does no DNS of its own per THREAT-MODEL.md). The genuine Claude Code engine +
 //     policyHelper-rendered managed settings ride the base image; this provider does not wrap the
 //     agent — Console7 orchestrates the genuine engine, it does not reimplement it (GOAL.md
 //     "what Console7 is not"; the wrap-not-reimplement principle).

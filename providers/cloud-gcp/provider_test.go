@@ -145,19 +145,56 @@ func TestApplyEgress_FailsClosedOnUnknownHandle(t *testing.T) {
 	}
 }
 
-func TestApplyEgress_FailsClosedIfPerimeterSetFails(t *testing.T) {
+func TestApplyEgress_TotalSetFailureDoesNotClaimDenyAll(t *testing.T) {
 	p, _, eg := newTestProvider(t, nil)
-	h, err := p.ProvisionSandbox(context.Background(), baseSpec())
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec()) // provisioned egress [a.internal]
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	eg.SetFailSet(true)
-	// A valid narrow (subset) but the perimeter Set fails → fail closed, error.
+	// A valid narrow, but BOTH the narrowed Set and the deny-all fallback fail → error.
 	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: nil}); err == nil {
-		t.Fatal("expected an error when the perimeter cannot be applied")
+		t.Fatal("expected an error when neither the narrow nor the deny-all fallback can apply")
+	}
+	// The provider must NOT falsely claim a deny-all it could not apply: in-memory egress stays
+	// matching the cluster's still-live prior policy (the error is what forces teardown).
+	if got, ok := p.EgressOf(h); !ok || len(got) != 1 || got[0] != "https://a.internal" {
+		t.Fatalf("expected unchanged egress (no false deny-all) after a total Set failure, got %v ok=%v", got, ok)
+	}
+}
+
+func TestApplyEgress_NarrowFailsButDenyAllApplies(t *testing.T) {
+	p, _, eg := newTestProvider(t, nil)
+	spec := baseSpec()
+	spec.Egress.Allowlist = []string{"https://a.internal", "https://b.internal"}
+	h, err := p.ProvisionSandbox(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Narrowed (non-empty) Sets fail, but the deny-all fallback succeeds → error, and the perimeter
+	// IS deny-all (truthfully recorded, because that Set actually applied).
+	eg.SetFailNonEmptySet(true)
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal"}}); err == nil {
+		t.Fatal("expected an error when the narrowed policy cannot apply")
 	}
 	if got, ok := p.EgressOf(h); !ok || len(got) != 0 {
-		t.Fatalf("expected deny-all after a failed apply, got %v ok=%v", got, ok)
+		t.Fatalf("expected deny-all (the fallback applied), got %v ok=%v", got, ok)
+	}
+	if got, _ := eg.PolicyOf(h); len(got) != 0 {
+		t.Fatalf("perimeter not deny-all at the controller: %v", got)
+	}
+}
+
+func TestApplyEgress_WidenFailsClosedWhenDenyAllAlsoFails(t *testing.T) {
+	p, _, eg := newTestProvider(t, nil)
+	h, err := p.ProvisionSandbox(context.Background(), baseSpec()) // [a.internal]
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	eg.SetFailSet(true)
+	// A widen attempt whose deny-all fallback also fails must still error (never silently widen).
+	if err := p.ApplyEgressPolicy(context.Background(), h, interfaces.EgressPolicy{Allowlist: []string{"https://a.internal", "https://evil.internal"}}); err == nil {
+		t.Fatal("expected a widen with a failing deny-all fallback to error")
 	}
 }
 

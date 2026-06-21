@@ -80,12 +80,15 @@ func (r *InMemorySandboxRuntime) SetFailDestroy(b bool) {
 	r.mu.Unlock()
 }
 
-// InMemoryEgressController records the allowlist set for each handle and can be told to fail Set.
+// InMemoryEgressController records the allowlist set for each handle and can be told to fail Set
+// (always, or only for a non-empty allowlist — so a test can model "the narrowed policy can't
+// apply but the deny-all fallback can").
 type InMemoryEgressController struct {
-	mu      sync.Mutex
-	policy  map[string][]string
-	cleared map[string]bool
-	failSet bool
+	mu           sync.Mutex
+	policy       map[string][]string
+	cleared      map[string]bool
+	failSet      bool
+	failNonEmpty bool
 }
 
 // NewInMemoryEgressController returns a ready InMemoryEgressController.
@@ -100,7 +103,7 @@ func NewInMemoryEgressController() *InMemoryEgressController {
 func (e *InMemoryEgressController) Set(_ context.Context, h interfaces.SandboxHandle, allowlist []string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.failSet {
+	if e.failSet || (e.failNonEmpty && len(allowlist) > 0) {
 		return errors.New("cloudgcp/fake: forced Set failure")
 	}
 	e.policy[h.ID] = append([]string(nil), allowlist...)
@@ -125,5 +128,13 @@ func (e *InMemoryEgressController) PolicyOf(h interfaces.SandboxHandle) ([]strin
 	return append([]string(nil), p...), ok
 }
 
-// SetFailSet toggles forced Set failure. Test-only.
+// SetFailSet toggles forced Set failure (for any allowlist). Test-only.
 func (e *InMemoryEgressController) SetFailSet(b bool) { e.mu.Lock(); e.failSet = b; e.mu.Unlock() }
+
+// SetFailNonEmptySet toggles forced Set failure ONLY for a non-empty allowlist (a deny-all
+// Set(nil) still succeeds). Test-only.
+func (e *InMemoryEgressController) SetFailNonEmptySet(b bool) {
+	e.mu.Lock()
+	e.failNonEmpty = b
+	e.mu.Unlock()
+}

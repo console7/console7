@@ -42,9 +42,9 @@ type SandboxRuntime interface {
 
 // EgressController programs the OUT-OF-BAND egress perimeter for one sandbox: it sets the
 // allowlist the cloud enforces around handle (the real adapter owns the sandbox namespace and a
-// per-session allow-list NetworkPolicy pinning the pod's egress to the approved forward proxy +
-// kube-dns, so every other destination — including the metadata server — is denied by omission at
-// this layer; the authoritative metadata block is node-level, modules/gke). The zero/empty
+// per-session allow-list NetworkPolicy pinning the pod's egress to the approved forward proxy
+// ONLY, so every other destination — including DNS and the metadata server — is denied by omission
+// at this layer; the authoritative metadata block is node-level, modules/gke). The zero/empty
 // allowlist is deny-all.
 type EgressController interface {
 	// Set makes the perimeter for handle enforce EXACTLY allowlist (default-deny everything

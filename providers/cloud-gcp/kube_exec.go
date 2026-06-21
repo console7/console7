@@ -89,8 +89,13 @@ func (r *kubeRunner) kubectlDeleteNamespace(ctx context.Context, ns string) erro
 }
 
 func (r *kubeRunner) kubectlDeletePod(ctx context.Context, ns, pod string) error {
+	// WAIT for the pod to actually be gone (kubectl --wait defaults true), with a short SIGTERM
+	// grace then SIGKILL, bounded by --timeout. DestroySandbox must not return — letting the
+	// orchestrator record session-end — while the workload (and any injected credential material)
+	// is still running through a long termination grace. A sandbox that ignores SIGTERM is killed
+	// after grace-period; the bound stops a wedged node from hanging teardown forever.
 	_, err := r.run(ctx, "kubectl", nil,
-		"delete", "pod", pod, "-n", ns, "--ignore-not-found", "--wait=false")
+		"delete", "pod", pod, "-n", ns, "--ignore-not-found", "--grace-period=5", "--timeout=30s")
 	return err
 }
 
@@ -118,22 +123,27 @@ func (k *kubeRuntime) Destroy(ctx context.Context, h interfaces.SandboxHandle) e
 }
 
 // netpolEgressController realises EgressController: it owns the sandbox NAMESPACE and its
-// default-deny egress NetworkPolicy (the perimeter), plus a ConfigMap carrying the FQDN allowlist
-// the out-of-band forward proxy consumes. The NetworkPolicy is an allow-list (egress permitted
-// ONLY to the proxy namespace and to kube-dns) so every other destination — including the
-// metadata server — is denied BY OMISSION at this layer. Note this in-cluster NetworkPolicy is
-// defence-in-depth, NOT the authoritative metadata block: a VPC firewall cannot see the node-local
-// metadata path, so the authoritative control is "no Workload Identity on the sandbox node pool"
-// (deploy/gcp/modules/networking + modules/gke, PR-2b).
+// default-deny NetworkPolicy (the perimeter), plus a ConfigMap carrying the FQDN allowlist the
+// out-of-band forward proxy consumes. The NetworkPolicy is an allow-list whose ONLY permitted
+// egress is to the proxy namespace (on the proxy port) — so every other destination, INCLUDING
+// DNS and the metadata server, is denied by omission at this layer. The sandbox is granted NO
+// in-cluster DNS deliberately (docs/THREAT-MODEL.md "no in-sandbox DNS for arbitrary names"): even
+// kube-dns resolves arbitrary names and forwards them upstream, which is a DNS-tunnelling exfil
+// path that bypasses the FQDN allowlist; name resolution is the forward proxy's job, and the proxy
+// is reached by IP (the orchestrator injects its address, no lookup needed — PR-3). It also sets a
+// default-deny INGRESS so another pod that discovers the sandbox IP cannot reach the engine. This
+// in-cluster policy is defence-in-depth, NOT the authoritative metadata block: a VPC firewall
+// cannot see the node-local metadata path, so the authoritative control is "no Workload Identity on
+// the sandbox node pool" (deploy/gcp/modules/networking + modules/gke, PR-2b).
 type netpolEgressController struct {
 	run *kubeRunner
 	cfg Config
 }
 
-// Set creates/updates the sandbox namespace, its default-deny egress NetworkPolicy, and the
-// allowlist ConfigMap for handle. It is applied (idempotent upsert) so a later narrow can update
-// the allowlist in place. An empty allowlist is deny-all (egress is still pinned to kube-dns +
-// the proxy namespace; the proxy then admits nothing).
+// Set creates/updates the sandbox namespace, its default-deny NetworkPolicy, and the allowlist
+// ConfigMap for handle. It is applied (idempotent upsert) so a later narrow can update the
+// allowlist in place. An empty allowlist is deny-all (egress is pinned to the proxy namespace; the
+// proxy then admits nothing).
 func (e *netpolEgressController) Set(ctx context.Context, h interfaces.SandboxHandle, allowlist []string) error {
 	return e.run.kubectlApply(ctx, renderNamespaceAndEgress(h.ID, allowlist))
 }
@@ -205,11 +215,12 @@ const sandboxImagePlaceholder = "gcr.io/google-containers/pause:3.9"
 // the proxy workload, at which point this rule is reconciled to match.
 const proxyPort = 3128
 
-// renderNamespaceAndEgress renders the sandbox Namespace + the default-deny egress NetworkPolicy +
-// the allowlist ConfigMap. The NetworkPolicy is an ALLOW-LIST: egress is permitted only to the
-// proxy namespace (on the proxy port) and to kube-dns (port 53) — every other destination,
-// including the metadata server, is denied by omission. The proxy enforces the FQDN allowlist (a
-// NetworkPolicy is IP-based and cannot match FQDNs), which is carried to it in the ConfigMap.
+// renderNamespaceAndEgress renders the sandbox Namespace + the default-deny NetworkPolicy + the
+// allowlist ConfigMap. The NetworkPolicy denies ALL ingress (no ingress rules), and its ONLY
+// permitted egress is to the proxy namespace on the proxy port — every other destination,
+// including DNS and the metadata server, is denied by omission. The sandbox does NO DNS of its own
+// (the proxy resolves names and enforces the FQDN allowlist, which is carried to it in the
+// ConfigMap; a NetworkPolicy is IP-based and cannot match FQDNs anyway).
 func renderNamespaceAndEgress(nsID string, allowlist []string) []byte {
 	encoded, err := json.Marshal(allowlist)
 	if err != nil {
@@ -233,11 +244,11 @@ data:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: console7-default-deny-egress
+  name: console7-default-deny
   namespace: %[1]s
 spec:
   podSelector: {}
-  policyTypes: [Egress]
+  policyTypes: [Egress, Ingress]
   egress:
     - to:
         - namespaceSelector:
@@ -246,18 +257,6 @@ spec:
       ports:
         - protocol: TCP
           port: %[3]d
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
 `,
 		nsID,
 		jsonScalar(string(encoded)),

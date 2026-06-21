@@ -95,24 +95,31 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 		"kind: Namespace",
 		"kind: ConfigMap",
 		"kind: NetworkPolicy",
-		"policyTypes: [Egress]",
+		"policyTypes: [Egress, Ingress]", // default-deny ingress AND egress
 		"console7.dev/egress-proxy",
 		"port: 3128", // proxy egress is port-scoped, not all-ports
 		"a.internal",
 		"namespace: sb",
-		// DNS egress is scoped to kube-dns, NOT open to the world.
-		"kubernetes.io/metadata.name: kube-system",
-		"k8s-app: kube-dns",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("namespace+egress manifest missing %q\n---\n%s", want, m)
 		}
 	}
-	// Guard the exfil hole the review caught: there must be no bare port-53 egress rule without a
-	// `to:` peer (which would permit DNS to every destination). Every `ports:` block here must be
-	// preceded by a `to:` selector.
+	// The sandbox gets NO in-cluster DNS (no kube-dns rule, no open port-53): name resolution is
+	// the proxy's job, and in-sandbox DNS would be a tunnelling exfil path (THREAT-MODEL.md).
+	for _, forbidden := range []string{"kube-dns", "port: 53"} {
+		if strings.Contains(m, forbidden) {
+			t.Errorf("manifest unexpectedly grants in-sandbox DNS (%q) — exfil channel\n%s", forbidden, m)
+		}
+	}
+	// Defence against re-introducing an open-egress rule: every `ports:` block must have a `to:`
+	// peer (a ports rule with no peer permits those ports to every destination).
 	if strings.Count(m, "ports:") != strings.Count(m, "- to:") {
 		t.Errorf("a ports rule is missing its `to:` peer (open-egress risk)\n%s", m)
+	}
+	// There is exactly one egress allow rule (to the proxy); ingress has none (default-deny).
+	if n := strings.Count(m, "- to:"); n != 1 {
+		t.Errorf("expected exactly one egress allow rule (the proxy), got %d\n%s", n, m)
 	}
 	// An empty allowlist still renders a valid default-deny policy.
 	if e := string(renderNamespaceAndEgress("sb", nil)); !strings.Contains(e, "kind: NetworkPolicy") {
