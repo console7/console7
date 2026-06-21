@@ -112,9 +112,9 @@ flowchart TB
 ## Trust boundaries & STRIDE posture
 | TB | Boundary | Top STRIDE threats | Authoritative mitigation (✅ impl / ◻ planned) |
 |---|---|---|---|
-| **TB1** | Adopter tenancy ↔ outside | **I**nfo-disclosure (exfil of code/creds); **T**ampering of egress dest | ✅ default-deny egress allowlist; ✅ single named crossing (inference); ◻ pre-egress DLP for T1/T2; ✅ maintainer receives nothing (no phone-home) |
-| **TB2** | Control plane ↔ key broker | **E**oP (control-plane compromise reaches keys); **S**poofing of lineage | ✅ separate artifact + distinct signing identity; ✅ keys never returned to control plane (opaque refs); ✅ NHI signing keys custodied in broker, die with session |
-| **TB3** | Control/data plane ↔ sandbox | **I**nfo-disclosure via lethal trifecta; **T**ampering by untrusted code; **E**oP out of sandbox | ✅ gVisor syscall confinement (target); ✅ default-deny egress from birth; ✅ ephemeral + irreversible teardown; ◻ no-prod-data default; ◻ MCP allowlist |
+| **TB1** | Adopter tenancy ↔ outside | **I**nfo-disclosure (exfil of code/creds); **T**ampering of egress dest | ◻ default-deny egress perimeter (policy plumbing ✅; authoritative wall scaffold); ✅ single named crossing (inference, by design); ◻ pre-egress DLP for T1/T2; ✅ maintainer receives nothing (no phone-home) |
+| **TB2** | Control plane ↔ key broker | **E**oP (control-plane compromise reaches keys); **S**poofing of lineage | ✅ separate key-broker package (distinct image/signing identity ◻ planned); ✅ keys never returned to control plane (opaque refs); ✅ NHI signing keys custodied in broker, die with session |
+| **TB3** | Control/data plane ↔ sandbox | **I**nfo-disclosure via lethal trifecta; **T**ampering by untrusted code; **E**oP out of sandbox | ◻ gVisor syscall confinement (cloud-gcp + sandbox scaffold); ◻ default-deny egress from birth (networking module stub); ◻ ephemeral/irreversible teardown (orchestration ✅; real sandbox scaffold); ◻ no-prod-data default; ◻ MCP allowlist |
 | **TB4** | Maintainer ↔ adopter | **T**ampering (supply-chain); **S**poofing of releases | ✅ pinned deps + SHA-pinned actions + gitleaks/govulncheck/CodeQL; ◻ SBOM + SLSA L3 provenance + signed releases (tracked targets) — see view [07](07-technology-lifecycle-controls.md)/[08](08-dependency-supply-chain.md) |
 | **TB5** | Session ↔ production estate | **T**ampering (unauthorised mutation); **R**epudiation | ✅ "observe ≠ actuate" design; ◻ read-only operate IAM (authoritative); ◻ Observe Gateway redaction + query audit; ◻ PreToolUse mutating-command tripwire; ✅ PR-only exit (no merge/actuate) |
 | **AuthN** | User ↔ UI | **S**poofing of identity | ✅ cryptographic SSO assertion verification; ✅ groups from IdP (no self-assert) |
@@ -124,7 +124,8 @@ flowchart TB
    read path, expiry caps. (✅ behavioural invariants proven; cryptographic-boundary
    hardening continues P1+.)
 2. **Lethal trifecta / indirect prompt injection** → TB1/TB3: remove a leg (default-deny
-   egress ✅, no-prod-data ◻, MCP allowlist ◻) + pre-egress DLP ◻.
+   egress ◻, no-prod-data ◻, MCP allowlist ◻) + pre-egress DLP ◻. *(The authoritative
+   egress/sandbox boundary is scaffold in core today — see TB1/TB3 and README observation 1.)*
 3. **Cross-tier escalation** → AuthZ: take-the-max + step-up; scope from target's tier ×
    stratum, never the launcher. (◻ P3; P1 admits only Author × T3/S1, fail-closed.)
 4. **Subscription-credential misuse / unattended drift** → TB2/TB1: attended +
