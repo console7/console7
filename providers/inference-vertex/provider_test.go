@@ -121,6 +121,8 @@ func TestConfig_RegionHostInjection(t *testing.T) {
 		"us_east5",          // underscore
 		"us-east",           // no trailing digit
 		"https://evil.com",  // an embedded scheme
+		"us",                // multi-region token — distinct host shape, use EndpointBaseURL
+		"eu",                // multi-region token — distinct host shape, use EndpointBaseURL
 		"",                  // empty (caught as missing region)
 	}
 	for _, in := range bad {

@@ -82,8 +82,10 @@ func (c Config) normalize() (Config, error) {
 	}
 	if !regionPattern.MatchString(c.Region) {
 		// Echo the bad value (it is a region identifier, never a credential) so the
-		// misconfiguration is diagnosable.
-		return Config{}, fmt.Errorf("inferencevertex: Config.Region %q is not a valid Vertex location (host-injection guard)", c.Region)
+		// misconfiguration is diagnosable, and point at the two other endpoint shapes — the
+		// global endpoint (Config.Global) and any non-regional host such as a multi-region
+		// (us/eu) or PSC/VPC-SC endpoint (Config.EndpointBaseURL) — so an adopter is not stuck.
+		return Config{}, fmt.Errorf("inferencevertex: Config.Region %q is not a regional Vertex location like \"us-east5\" (host-injection guard); for the global endpoint set Config.Global, and for a multi-region (us/eu) or private endpoint set Config.EndpointBaseURL", c.Region)
 	}
 	c.EndpointBaseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com", c.Region)
 	return c, nil

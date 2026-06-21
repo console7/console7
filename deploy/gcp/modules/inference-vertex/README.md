@@ -19,9 +19,10 @@ This module **adds exactly one verb to the one workload identity** (e.g. `module
 `workload_service_account_email`) rather than minting a second SA — least privilege composes.
 
 > **Boundary note.** Granting predict does **not** make Vertex reachable from a session. The
-> resolved endpoint host (`endpoint_host` output) MUST also be on the session's **default-deny
-> egress allowlist**, which is the authoritative control (GOAL.md tenet 3). The allowlist wiring
-> lands with the boundary-first sandbox PR.
+> resolved endpoint URL (`endpoint_url` output, emitted scheme-qualified to match
+> `BackendEndpoint.URL` exactly) MUST also be on the session's **default-deny egress allowlist**,
+> which is the authoritative control (GOAL.md tenet 3). The allowlist wiring lands with the
+> boundary-first sandbox PR.
 
 Deliberately **not** here: project/billing (human bootstrap), GCP credential acquisition / the
 workload-SA token mint (a `SecretsProvider` / key-broker concern), the engine-invocation env
@@ -42,4 +43,4 @@ allowlist itself.
 | Output | Description |
 |---|---|
 | `vertex_predict_role_id` | The least-privilege Vertex predict custom role |
-| `endpoint_host` | The regional endpoint host — add it to the egress allowlist |
+| `endpoint_url` | The regional endpoint URL (scheme-qualified) — seed the egress allowlist with it verbatim |

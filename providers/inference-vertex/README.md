@@ -50,6 +50,12 @@ the `SecretsProvider` / key broker and injected into the sandbox — not held he
 
 Endpoint precedence: `EndpointBaseURL` → `Global` → `https://{region}-aiplatform.googleapis.com`.
 
+**Multi-region locations** (`us`, `eu`) use a distinct host shape and are configured via
+`EndpointBaseURL` (e.g. `https://aiplatform.us.rep.googleapis.com`) rather than `Region`, which is
+restricted to the `{region}-aiplatform.googleapis.com` regional form. `Region` rejects bare
+multi-region tokens as a host-injection guard and the error points the adopter at `Global` /
+`EndpointBaseURL`.
+
 ## Deploying it
 
 [`deploy/gcp/modules/inference-vertex`](../../deploy/gcp/modules/inference-vertex/) enables the

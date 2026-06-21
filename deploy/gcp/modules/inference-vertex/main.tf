@@ -18,7 +18,7 @@
 # workload SA (e.g. modules/secrets' "<prefix>-cp-secrets") is created.
 #
 # Boundary note: enabling predict here does NOT make Vertex reachable from a session — the
-# resolved endpoint host (see outputs.tf) MUST also be on the session's default-deny egress
+# resolved endpoint URL (endpoint_url output) MUST also be on the session's default-deny egress
 # allowlist, which is the authoritative control (GOAL.md tenet 3; wired in the sandbox PR).
 
 resource "google_project_service" "aiplatform" {
