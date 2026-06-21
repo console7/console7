@@ -38,6 +38,12 @@ resource "google_project_service" "storage" {
 # public access prevented, versioning on, and a retention policy enforcing immutability. The
 # bucket name is "<prefix>-evidence-<project_id>" to be globally unique without leaking more than
 # the (already-known) project id.
+#
+# Access auditing for the evidence bucket is via Cloud Audit Logs (Data Access) — a project/org
+# control, not a bucket attribute — so legacy bucket access logging (trivy GCP-0077) is
+# intentionally not configured; wiring it would need a second log bucket that itself re-triggers
+# the rule. Tracked exception: docs/RISKS.md R-2.
+#trivy:ignore:AVD-GCP-0077
 resource "google_storage_bucket" "evidence" {
   project  = var.project_id
   name     = "${var.name_prefix}-evidence-${var.project_id}"
