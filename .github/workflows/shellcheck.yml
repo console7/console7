@@ -1,10 +1,9 @@
-name: shellcheck (deploy)
+name: shellcheck (deploy + sandbox)
 
-# CO-17 (code quality / lint) — lint the deploy shell scripts (bootstrap / scaffolding).
-# Scoped to deploy/ so
-# it activates with those scripts and does not entangle pre-existing shell elsewhere; a
-# repo-wide gate can broaden this later. Uses the runner's preinstalled shellcheck (no
-# third-party action), SHA-pinned checkout, least-privilege token.
+# CO-17 (code quality / lint) — lint the deploy/ and sandbox/ shell scripts (bootstrap /
+# scaffolding / the sandbox entrypoint). Scoped to those trees so it does not entangle
+# pre-existing shell elsewhere; a repo-wide gate can broaden this later. Uses the runner's
+# preinstalled shellcheck (no third-party action), SHA-pinned checkout, least-privilege token.
 
 on:
   pull_request:
@@ -28,7 +27,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - id: detect
         run: |
-          if find deploy -name '*.sh' -type f | grep -q .; then
+          if find deploy sandbox -name '*.sh' -type f | grep -q .; then
             echo "has_sh=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_sh=false" >> "$GITHUB_OUTPUT"
@@ -44,7 +43,7 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: shellcheck deploy/**/*.sh
+      - name: shellcheck deploy/ + sandbox/ *.sh
         run: |
           shellcheck --version
-          find deploy -name '*.sh' -type f -print0 | xargs -0 shellcheck
+          find deploy sandbox -name '*.sh' -type f -print0 | xargs -0 shellcheck

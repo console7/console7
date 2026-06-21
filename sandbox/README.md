@@ -7,9 +7,13 @@ thing that runs untrusted code must not share a build identity with the thing th
 holds the keys* (`ARCHITECTURE.md` §6.4; `DESIGN.md` §8). **Do not fuse with the
 control plane.**
 
-- [`base-image/`](base-image/) — wraps the **genuine** Claude Code engine + tooling
-  (we orchestrate it, we do not reimplement it — `GOAL.md` tenet 8); `policyHelper`
-  renders the composed, **locked** managed-settings + PreToolUse hooks per session.
+- [`base-image/`](base-image/) — **realised:** Dockerfile wrapping the **genuine**,
+  pinned Claude Code engine (we orchestrate it, we do not reimplement it — `GOAL.md`
+  "what Console7 is not"; `DESIGN.md` §1.4), non-root + fail-closed entrypoint,
+  **distinct build identity**.
+- [`policyhelper/`](policyhelper/) — **realised:** the Go package + `console7-policyhelper`
+  binary that renders the composed, **locked** managed-settings + PreToolUse hooks per
+  session (persona × tier) from a `SessionProfile`. Defence-in-depth, never the boundary.
 - [`egress-proxy/`](egress-proxy/) — control-side helper for the **default-deny**
   egress perimeter. The perimeter is the **authoritative** network control and is
   **out-of-band** (the cloud enforces; this configures) — *not* the engine's
@@ -22,4 +26,5 @@ ephemeral workspaces by default (`DESIGN.md` §5.1). In-sandbox hooks and the op
 tripwire are **defence-in-depth**, never the control of record — the boundary wins
 (`GOAL.md` tenet 3).
 
-> P0 scaffolding: directory tree and responsibilities only — **no implementation.**
+> `base-image/` + `policyhelper/` are **realised** (PR-3); `egress-proxy/` and
+> `observe-gateway/` remain scaffolding (later phases).

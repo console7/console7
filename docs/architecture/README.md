@@ -66,8 +66,9 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
 **(assumed)** in the views):
 1. **IdP and GitHub as federated SaaS** placement on the context diagram (both are pluggable
    seams; reference = Okta/Entra OIDC, GitHub App).
-2. **Operate lane & Observe Gateway behaviour** (read-only IAM, redaction, query audit,
-   PreToolUse tripwire) — specified in `DESIGN.md` §5.4, container is a scaffold.
+2. **Operate lane & Observe Gateway behaviour** (read-only IAM, redaction, query audit) —
+   specified in `DESIGN.md` §5.4. The `policyHelper` render + the operate **mutating-command
+   tripwire** binary exist (PR-3); the read-only IAM identity + Observe Gateway are not yet wired.
 3. **Bedrock / AWS / Azure** backends and **cross-cloud** inference topologies — admitted by
    `ARCHITECTURE.md` §4 + ADR-0004; only GCP+Vertex+direct-Anthropic exist in code.
 4. **Production signing root** (Sigstore-keyless or org CA) replacing the in-process
