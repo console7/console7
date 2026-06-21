@@ -1,9 +1,11 @@
 // Console7 pre-PR adversarial review fan-out (defence-in-depth; tenet 2).
 //
-// Runs three INDEPENDENT review lenses over the current branch's diff vs main —
-// correctness, security/threat, spec-alignment — then synthesizes a single
-// prioritized, deduplicated report. It does NOT gate anything: CI + Socket/Codex +
-// the human admin-merge stay authoritative. See .claude/skills/pre-pr-review.
+// Runs four INDEPENDENT review lenses over the current branch's diff vs main —
+// correctness, security/threat, spec-alignment, and architecture-docs currency —
+// then synthesizes a single prioritized, deduplicated report. It does NOT gate
+// anything: CI + Socket/Codex + the human admin-merge stay authoritative. See
+// .claude/skills/pre-pr-review (and .claude/skills/architecture-docs for the
+// currency lens).
 //
 // Opt-in: running this requires the user to opt into the Workflow tool. The
 // no-opt-in default is the Agent-tool fan-out documented in the skill.
@@ -13,9 +15,9 @@
 
 export const meta = {
   name: 'pre-pr-review',
-  description: 'Adversarial pre-push review fan-out: correctness + security + spec-alignment over the branch diff, reconciled into one prioritized report.',
+  description: 'Adversarial pre-push review fan-out: correctness + security + spec-alignment + architecture-docs currency over the branch diff, reconciled into one prioritized report.',
   phases: [
-    { title: 'Review', detail: 'three independent lenses over the diff' },
+    { title: 'Review', detail: 'four independent lenses over the diff' },
     { title: 'Synthesize', detail: 'dedup + prioritize findings' },
   ],
 }
@@ -59,6 +61,10 @@ const LENSES = [
     key: 'spec-alignment',
     prompt: `You are an ADVERSARIAL spec-alignment reviewer for Console7. Read GOAL.md, docs/DESIGN.md, docs/ARCHITECTURE.md, and docs/standards/console7-sdlc-standard.md, then run \`${diffCmd}\`. Does the change deviate from a tenet or doc section? In particular: does any SECURITY docstring or comment claim a guarantee the signature/type cannot actually enforce? Return findings (empty array if none).`,
   },
+  {
+    key: 'architecture-docs',
+    prompt: `You are an ADVERSARIAL architecture-documentation-currency reviewer for Console7. Run \`git --no-pager diff --name-only ${base}...HEAD\`. The repo keeps a multi-viewpoint architecture pack in docs/architecture/ (Mermaid views 01–08 + README). If the diff changes an architecture-significant surface but does NOT update the corresponding docs/architecture/ view(s), emit ONE finding per stale view (severity P3) whose fix is "run the architecture-docs skill to refresh the affected view and re-validate the Mermaid". Map changed paths to views: sdk/interfaces or sdk/types→02,03,06; control-plane/ or keybroker/→02,03,04,06; providers/→02,06,08; sandbox/ or deploy/→05; .github/workflows/ or scripts/ or .golangci.yml or socket.yml→07; go.mod or go.sum→08 (this map is a coarse subset — the architecture-docs skill's code-area→view map is canonical). If docs/architecture/ was updated appropriately for the change, or the change is architecturally inert (refactor with no new component/flow/boundary/dependency/control), return an empty findings array. Do NOT invent unrelated findings — currency only.`,
+  },
 ]
 
 phase('Review')
@@ -79,7 +85,7 @@ if (all.length === 0) {
 } else {
   phase('Synthesize')
   summary = await agent(
-    `Three independent reviewers produced these findings on the same diff:\n${JSON.stringify(all, null, 2)}\n\nDeduplicate, drop false positives, order by severity (P1 first), and for each surviving finding give file, severity, a one-line title, and the concrete fix. Be concise; this is a pre-push checklist to reconcile before \`git push\`.`,
+    `Four independent reviewers produced these findings on the same diff:\n${JSON.stringify(all, null, 2)}\n\nDeduplicate, drop false positives, order by severity (P1 first), and for each surviving finding give file, severity, a one-line title, and the concrete fix. Be concise; this is a pre-push checklist to reconcile before \`git push\`.`,
     { label: 'synthesize', phase: 'Synthesize' },
   )
 }

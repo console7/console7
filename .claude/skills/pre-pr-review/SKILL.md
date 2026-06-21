@@ -57,7 +57,7 @@ reason **and** a `docs/RISKS.md` entry (CO-17) — never a silent suppression.
 
 For a shell change, also run `shellcheck` on the touched scripts.
 
-## How to run it — three independent adversarial lenses
+## How to run it — three adversarial lenses + a docs-currency check
 
 The method is fixed; the *mechanism* depends on what your harness exposes. Run all
 three lenses over the **diff** (`git diff main...HEAD` or the staged diff), each
@@ -78,6 +78,14 @@ the security lens had test-passed over).
    cannot actually enforce?"* — the exact class Codex kept finding (a contract
    promising what its inputs can't support).
 
+**Plus — architecture-docs currency (not an adversarial lens, a drift check).** Check
+whether the diff changed an architecture-significant surface — `sdk/interfaces`,
+`control-plane`, `keybroker`, `providers`, `sandbox`, `deploy`, `.github/workflows`, or
+`go.mod` — **without** a corresponding update under `docs/architecture/`. If so, run the
+**`architecture-docs`** skill to refresh the affected view(s) and re-validate the Mermaid
+before pushing (skip only if the change is architecturally inert). The
+`pre-pr-review.mjs` workflow runs this automatically as a fourth lens.
+
 Pick the mechanism your harness offers, in order of preference:
 
 - **Sub-agent fan-out (richest).** If your harness can spawn sub-agents (e.g. an
@@ -85,7 +93,8 @@ Pick the mechanism your harness offers, in order of preference:
   giving each the diff and the docs it needs. Tool names vary by harness — use
   whatever yours exposes.
 - **One-command Workflow (opt-in).** `.claude/workflows/pre-pr-review.mjs` runs the
-  same three lenses and synthesizes them; it requires opting into the Workflow tool.
+  three lenses plus the architecture-docs currency check and synthesizes them; it
+  requires opting into the Workflow tool.
 - **Built-in skills (always available, the guaranteed fallback).** Run `/code-review`
   (correctness) and `/security-review` (security) — these ship with Claude Code — and
   do the spec-alignment lens yourself against the doc section the change maps to.

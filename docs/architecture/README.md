@@ -41,6 +41,17 @@ Mermaid C4 dialect) for reliable GitHub rendering; the C4 *levels* are noted in 
   `CredentialRef`, `SessionIdentity` (NHI), `SandboxSpec`/`Handle`, `EgressPolicy`,
   `EvidenceRecord`/`RecordRef`, `Signature`/`SinkSignature`.
 
+## Keeping this pack current
+When a change touches an architecture-significant surface (`sdk/interfaces`,
+`control-plane`, `keybroker`, `providers`, `sandbox`, `deploy`, `scripts`,
+`.github/workflows`, or `go.mod`), refresh the affected view(s) with the
+**`architecture-docs`** skill
+(`.claude/skills/architecture-docs/`) — it maps each code area to its view, enforces the
+conventions above, and ships an offline Mermaid validator. The `pre-pr-review` workflow
+runs an *architecture-docs currency* lens and the pre-push Bash guard prints a
+non-blocking nudge when an architecture-significant change lands without a
+`docs/architecture/` update (defence-in-depth, tenet 2 — never a gate).
+
 ## Sources read
 Normative docs (`GOAL.md`, `docs/DESIGN.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
 `docs/THREAT-MODEL.md`, `docs/RISKS.md`, `docs/adr/000{1..4}`, the SDLC standard); all Go in
