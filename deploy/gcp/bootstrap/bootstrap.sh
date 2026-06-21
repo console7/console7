@@ -261,6 +261,16 @@ grant_project_role "$APPLY_SA_EMAIL" "roles/resourcemanager.projectIamAdmin"
 # State read/write is scoped to the state bucket only, not project-wide storage admin.
 gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
   --member="serviceAccount:${APPLY_SA_EMAIL}" --role="roles/storage.objectAdmin"
+# providers/evidence-gcs' deploy delta (deploy/gcp/modules/evidence) adds a resource kind the
+# state-bucket-scoped grant above cannot cover: CREATING a new bucket and setting its retention
+# policy/lock. roles/storage.admin is the project-level grant for buckets.create + .update +
+# .setRetentionPolicy/.lockRetentionPolicy (and the bucket-level setIamPolicy for the workload
+# binding). NOTE: storage.admin also confers objects.delete on every bucket — but the APPLY
+# identity ALREADY holds resourcemanager.projectIamAdmin (secrets module), i.e. it can self-grant
+# any role, so this does NOT raise its effective ceiling. A least-privilege custom role
+# (buckets.create/get/update/setRetentionPolicy/lockRetentionPolicy + bucket setIamPolicy,
+# excluding objects.*) is a tracked future tightening (GOAL.md tenet 5).
+grant_project_role "$APPLY_SA_EMAIL" "roles/storage.admin"
 
 # --- outputs --------------------------------------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"

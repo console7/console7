@@ -12,3 +12,8 @@ output "inference_vertex_endpoint_url" {
   description = "The in-tenancy regional Vertex inference endpoint URL (scheme-qualified). Seed the session's default-deny egress allowlist with this verbatim — the orchestrator matches the resolved BackendEndpoint.URL against the allowlist by exact string."
   value       = module.inference_vertex.endpoint_url
 }
+
+output "evidence_bucket_name" {
+  description = "Name of the durable WORM evidence bucket. Wire it into providers/evidence-gcs Config.Bucket so the EvidenceSink commits records here. Evidence stays in the adopter's tenancy (GOAL.md tenet 1)."
+  value       = module.evidence.bucket_name
+}

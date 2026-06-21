@@ -25,3 +25,20 @@ module "inference_vertex" {
   name_prefix                    = var.name_prefix
   workload_service_account_email = module.secrets.workload_service_account_email
 }
+
+# Durable WORM evidence backing (GCS): the bucket the EvidenceSink commits records through, plus
+# an append-only (create/get/list, no delete) grant to the same workload SA at bucket scope —
+# omitting delete blocks both delete AND overwrite on the append identity (GCS overwrite needs
+# objects.delete). The retention LOCK is the authoritative WORM control against a privileged actor;
+# is_locked is left at its DEFAULT (off) here, so the dogfood posture is tamper-EVIDENT (the Sink's
+# hash-chain detects mutation) but not tamper-RESISTANT — a production deploy MUST set is_locked=true
+# on the module (irreversible). The APPLY identity needs storage bucket-admin for create + retention
+# (bootstrap.sh grants it).
+module "evidence" {
+  source = "./modules/evidence"
+
+  project_id                     = var.project_id
+  region                         = var.region
+  name_prefix                    = var.name_prefix
+  workload_service_account_email = module.secrets.workload_service_account_email
+}

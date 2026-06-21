@@ -22,6 +22,7 @@ github.com/console7/console7/control-plane/evidence 89
 github.com/console7/console7/control-plane/orchestrator 76
 github.com/console7/console7/keybroker/broker 74
 github.com/console7/console7/keybroker/signing 94
+github.com/console7/console7/providers/evidence-gcs 54
 github.com/console7/console7/providers/inference-anthropic 100
 github.com/console7/console7/providers/inference-vertex 100
 github.com/console7/console7/providers/scm-github 60
