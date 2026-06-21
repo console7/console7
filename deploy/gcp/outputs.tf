@@ -38,6 +38,21 @@ output "sandbox_node_tag" {
   value       = module.networking.sandbox_node_tag
 }
 
+output "gke_cluster_name" {
+  description = "GKE cluster name. Wire into providers/cloud-gcp Config.Cluster verbatim (string-exact)."
+  value       = module.gke.cluster_name
+}
+
+output "gke_cluster_location" {
+  description = "GKE cluster location (region). Wire into providers/cloud-gcp Config.Location verbatim."
+  value       = module.gke.cluster_location
+}
+
+output "gke_sandbox_node_pool" {
+  description = "gVisor sandbox node pool name. Wire into providers/cloud-gcp Config.NodePool verbatim — the provider preflights its GKE_METADATA mode (string-exact)."
+  value       = module.gke.sandbox_node_pool
+}
+
 output "evidence_bucket_name" {
   description = "Name of the durable WORM evidence bucket. Wire it into providers/evidence-gcs Config.Bucket so the EvidenceSink commits records here. Evidence stays in the adopter's tenancy (GOAL.md tenet 1)."
   value       = module.evidence.bucket_name

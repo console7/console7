@@ -24,14 +24,16 @@
 #     VM-to-metadata-server traffic (169.254.169.254 and the link-local GKE metadata server) as
 #     ALWAYS allowed and NOT subject to VPC firewall rules, so a firewall "deny" to those ranges
 #     neither blocks the traffic nor produces a deny log — it is null at this layer. The
-#     authoritative sandbox metadata block is therefore a NODE/POD-config control: no Workload
-#     Identity on the sandbox node pool + GKE metadata concealment (modules/gke), plus the legacy
-#     127.0.0.1:988/987 path and the metadata DNS names (metadata.google.internal / metadata.goog),
-#     which a VPC firewall cannot match either. All of it lands in PR-2/PR-3 (see those READMEs);
-#     PR-1 does not pretend to enforce it at the VPC.
-#   - IPv6 egress denial. This subnet is single-stack IPv4, and a VPC firewall rule cannot mix IP
-#     families; the IPv6 catch-all (::/0) lands as its own rule when modules/gke makes the node
-#     pool dual-stack (PR-2). On an IPv4-only subnet there is no IPv6 egress path to deny.
+#     authoritative sandbox metadata block is therefore a NODE-config control: the GKE metadata
+#     server in GKE_METADATA mode on the sandbox node pool, which CONCEALS the node service account
+#     (modules/gke) — NOT "disable Workload Identity", which would leave GCE_METADATA and EXPOSE the
+#     node SA token. Plus the legacy 127.0.0.1:988/987 path and the metadata DNS names
+#     (metadata.google.internal / metadata.goog), which a VPC firewall cannot match either. All of
+#     it lands in modules/gke (see its README); PR-1 does not pretend to enforce it at the VPC.
+#   - IPv6 egress denial. This subnet is single-stack IPv4 and a VPC firewall rule cannot mix IP
+#     families, so there is no IPv6 egress path to deny. modules/gke keeps the cluster single-stack
+#     IPv4 (no dual-stack node pool), so this is MOOT today, not deferred — if a future change makes
+#     the subnet/pool dual-stack, an IPv6 `::/0` deny rule MUST be added here at the same time.
 #   - in-sandbox DNS denial ("no arbitrary resolver" — sandbox/egress-proxy/README.md): the base
 #     image ships the sandbox no general resolver (PR-3).
 #

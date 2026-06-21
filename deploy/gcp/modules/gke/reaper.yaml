@@ -1,0 +1,119 @@
+# Console7 sandbox namespace-TTL reaper — enforces the ABSOLUTE session deadline.
+#
+# providers/cloud-gcp stamps each sandbox namespace with `console7.dev/expires-at` (RFC-3339,
+# = provision time + MaxTTL). The pod's activeDeadlineSeconds is only a pod-StartTime-RELATIVE
+# backstop (scheduling/image-pull latency can push it past the absolute deadline); this CronJob is
+# the authoritative absolute-deadline enforcement: every 5 minutes it deletes console7-managed
+# sandbox namespaces whose expires-at has passed, reaping the workload-free leftovers the provider
+# could not (it has no cloud I/O path once a sandbox is torn down or missed).
+#
+# Apply with: kubectl apply -f reaper.yaml   (deliberately NOT Terraform-managed, so the deploy
+# stays google-provider-only and the apply identity needs no cluster credentials).
+#
+# SECURITY: the reaper's RBAC is the narrowest the K8s model allows — get/list/delete on
+# Namespaces ONLY, no wildcard, no other resource. NOTE: RBAC cannot scope delete by label, so the
+# `managed-by=console7` filter is a QUERY-time selector in the script, NOT an authorization control
+# — the SA's delete reach is cluster-wide. Blast radius is namespace DELETION (DoS), never read/
+# exfil. It is bounded in depth by: (a) the SA having no other powers and its token automounted only
+# into this pod; (b) the script deleting only namespaces that carry the managed-by label AND a
+# passed expires-at annotation AND are not on a system-namespace denylist (below). The image SHOULD
+# be pinned by digest in production (the tag is a reference default).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: console7-system
+  labels:
+    app.kubernetes.io/managed-by: console7
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: console7-reaper
+  namespace: console7-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: console7-reaper
+rules:
+  # Namespaces only; no other resource, no wildcard. List to find expired sandboxes, delete to reap.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: console7-reaper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: console7-reaper
+subjects:
+  - kind: ServiceAccount
+    name: console7-reaper
+    namespace: console7-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: console7-sandbox-reaper
+  namespace: console7-system
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 240
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: console7-reaper
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              # Google Cloud SDK image (bundles kubectl + bash + GNU date) from the trusted gcr.io
+              # registry. Reference default — production SHOULD pin by DIGEST (supply-chain policy).
+              image: gcr.io/google.com/cloudsdktool/cloud-sdk:529.0.0
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  now=$(date -u +%s)
+                  # List console7-managed namespaces with their expires-at annotation (tab-separated).
+                  kubectl get namespaces -l app.kubernetes.io/managed-by=console7 \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.console7\.dev/expires-at}{"\n"}{end}' \
+                    | while IFS=$'\t' read -r ns exp; do
+                        # Defence-in-depth denylist: never delete a system/own namespace, even if it
+                        # somehow carried the managed-by label (RBAC can't enforce this, so the script must).
+                        case "$ns" in
+                          kube-system|kube-public|kube-node-lease|default|console7-system) continue ;;
+                        esac
+                        # Require an expires-at annotation (a console7 sandbox namespace always has one).
+                        [ -z "${exp:-}" ] && continue
+                        if exp_s=$(date -u -d "$exp" +%s 2>/dev/null); then
+                          if [ "$now" -ge "$exp_s" ]; then
+                            echo "reaping expired sandbox namespace: $ns (expired $exp)"
+                            kubectl delete namespace "$ns" --ignore-not-found --wait=false
+                          fi
+                        fi
+                      done

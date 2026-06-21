@@ -90,14 +90,17 @@ flowchart TB
 
 ## Network boundaries (the authoritative controls)
 - **Default-deny egress** is realised by the **VPC firewall** (out-of-band), not the engine's
-  in-process proxy. The static **default-DENY egress floor** is landed (PR #39); the *sanctioned*
-  path — **Cloud NAT** + the egress proxy that permits *only* the composed allowlist (inference
-  endpoint + approved registries + approved MCP) — and the per-pod NetworkPolicy are **pending**
-  (`modules/gke` + `providers/cloud-gcp`).
+  in-process proxy. The static **default-DENY egress floor** is landed (PR #39); the **gVisor
+  cluster + sandbox node pool + Cloud NAT** for the *sanctioned* path are landed (`modules/gke`),
+  and the `CloudProvider` that programs the **per-session egress NetworkPolicy** is landed
+  (`providers/cloud-gcp`, PR #41). The **out-of-band egress proxy** that enforces the composed FQDN
+  allowlist (inference endpoint + approved registries + approved MCP) is **pending** (PR-3).
 - **IMDS / metadata** (169.254.169.254, the IPv6 metadata address, metadata DNS) is **not** a VPC
-  control — GCP always allows VM→metadata traffic — so the authoritative block is **node/pod
-  config** (no Workload Identity on the sandbox node pool + GKE metadata concealment), which lands
-  with `modules/gke` (**pending**); PR #39 deliberately does not pretend to enforce it at the VPC.
+  control — GCP always allows VM→metadata traffic — so the authoritative block is **node config**:
+  the GKE metadata server in **`GKE_METADATA` mode** on the sandbox node pool, which *conceals* the
+  node service account (**not** "disable Workload Identity", which leaves `GCE_METADATA` and
+  *exposes* the node SA token). Landed with `modules/gke`; `providers/cloud-gcp` `New()` preflights
+  it. PR #39 deliberately does not pretend to enforce it at the VPC.
 - **VPC Service Controls** wraps the Google API surface — important nuance: it does **not**
   bound arbitrary egress, so it is *complementary* to the firewall, not a substitute
   (`DESIGN.md` §5.2, §11).

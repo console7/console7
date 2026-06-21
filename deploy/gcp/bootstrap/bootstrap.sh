@@ -281,6 +281,24 @@ grant_project_role "$APPLY_SA_EMAIL" "roles/storage.admin"
 # lands), so the deploy identity can shape the perimeter but not run workloads inside it.
 grant_project_role "$APPLY_SA_EMAIL" "roles/compute.networkAdmin"
 grant_project_role "$APPLY_SA_EMAIL" "roles/compute.securityAdmin"
+# (Note: the GKE node pools are managed by GKE itself under roles/container.admin below — the deploy
+# identity needs NO roles/compute.instanceAdmin, contrary to an earlier prediction here.)
+# deploy/gcp/modules/gke's delta adds the GKE cluster + node pools (roles/container.admin), the
+# Cloud Router + NAT (covered by compute.networkAdmin above), and a dedicated node service account
+# the node pools run as. Creating a node pool that runs AS that SA requires the APPLY identity to
+# hold iam.serviceAccounts.actAs on it (roles/iam.serviceAccountUser), in addition to
+# iam.serviceAccountAdmin (granted above) to create it and projectIamAdmin (secrets module) to bind
+# its project roles. This grant is PROJECT-scoped (not narrowed to the node SA) — which means the
+# APPLY identity can actAs other SAs too. That does NOT raise its effective ceiling: it ALREADY
+# holds resourcemanager.projectIamAdmin (secrets module), i.e. it can self-grant any role on any SA,
+# so a project-wide serviceAccountUser is within the bootstrap-trusted CD identity's existing reach
+# (the same reasoning the evidence module's project storage.admin uses). Narrowing it to a binding
+# on the node SA alone (created in the gke module) is a tracked future tightening; it does NOT touch
+# the secrets SA's "no HUMAN/operator impersonation binding" invariant, which is about people/
+# groups, not this CD identity. container.admin confers no instance-level compute beyond GKE's own
+# node pools, so the deploy identity still cannot run arbitrary VMs.
+grant_project_role "$APPLY_SA_EMAIL" "roles/container.admin"
+grant_project_role "$APPLY_SA_EMAIL" "roles/iam.serviceAccountUser"
 
 # --- outputs --------------------------------------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
