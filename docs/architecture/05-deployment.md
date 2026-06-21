@@ -12,6 +12,8 @@ only. The cloud-specific pieces sit behind the provider seams so AWS/Azure are p
 targets. Reference cloud = GCP; reference inference = Vertex (the inference cloud is an axis
 **orthogonal** to the control-plane cloud — ADR-0004).
 
+Legend: solid = implemented & landed · **faded + dashed = target state** (not yet coded & landed). After #39/#41/#43, the only target box here is the out-of-band egress **proxy** (PR-3).
+
 ```mermaid
 flowchart TB
   subgraph GCP["GCP project (adopter tenancy) — reference cloud"]
@@ -20,7 +22,7 @@ flowchart TB
     subgraph VPC["VPC — default-deny egress (authoritative perimeter)"]
       direction TB
       FW{{"VPC firewall + Cloud NAT<br/>default-deny egress; IMDS 169.254.169.254 blocked"}}
-      PROXY["egress proxy / forward-proxy<br/>allowlist: inference + registries + MCP"]
+      PROXY["egress proxy / forward-proxy (planned, PR-3)<br/>allowlist: inference + registries + MCP"]
 
       subgraph GKE["GKE cluster"]
         direction TB
@@ -73,11 +75,14 @@ flowchart TB
   classDef dp fill:#f7d6d6,stroke:#c0392b,color:#5b1b14;
   classDef store fill:#ececec,stroke:#888,color:#111;
   classDef net fill:#fde9c8,stroke:#b8860b,color:#5c4500;
+  classDef netPlan fill:#fdf5e8,stroke:#e3cda0,color:#ab9a7a,stroke-dasharray:5 4;
+  %% faded + dashed = target state (not yet coded & landed); solid = implemented & landed
   class CPP tier1;
   class KBP broker;
   class SBP dp;
   class KMS,SM,GCSE,VTX,TFS store;
-  class FW,PROXY,WIF net;
+  class FW,WIF net;
+  class PROXY netPlan;
 ```
 
 ## Nodes & hosting topology

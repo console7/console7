@@ -10,7 +10,7 @@ bound to an OpenSSF posture (Scorecard, OSPS Baseline L3, Best-Practices Badge s
 gates below are **as-code and CI-enforced**; the in-band hooks are defence-in-depth (tenet
 2) that front-run the authoritative CI + branch-protection controls.
 
-Legend: ✅ live · ◻ tracked target (no artifact/service yet).
+Legend: ✅ live · ◻ tracked target (no artifact/service yet). **Faded + dashed** node = wholly target state (here the Release gate/evidence).
 
 ```mermaid
 flowchart LR
@@ -26,7 +26,7 @@ flowchart LR
     G4["✅ CODEOWNERS + branch protection<br/>✅ required review · no self-approve<br/>AI (Codex) review · ✅ human merge"]
     G5["◻ SBOM · ◻ SLSA L3 provenance<br/>◻ signed images (distinct identities)"]
     G6["✅ WIF/OIDC keyless · PLAN(ro)/APPLY split<br/>◻ protected env · ✅ trivy IaC"]
-    G7["◻ default-deny egress · ◻ ephemeral sandbox<br/>✅ WORM evidence + ◻ SIEM · ✅ Dependabot · ✅ vuln SLAs"]
+    G7["✅ default-deny egress · ✅ ephemeral sandbox<br/>✅ WORM evidence + ◻ SIEM · ✅ Dependabot · ✅ vuln SLAs"]
   end
   subgraph L3["LANE — evidence produced"]
     direction LR
@@ -48,10 +48,15 @@ flowchart LR
 
   classDef stage fill:#cfe3f7,stroke:#1168bd,color:#11304a;
   classDef gate fill:#d8f0dd,stroke:#27ae60,color:#13502a;
+  classDef gatePlan fill:#eef8f1,stroke:#abd7ba,color:#8aa896,stroke-dasharray:5 4;
   classDef evid fill:#fff3cd,stroke:#b8860b,color:#5c4500;
+  classDef evidPlan fill:#fbf6e6,stroke:#ddc99c,color:#a89a78,stroke-dasharray:5 4;
+  %% faded + dashed = target state (not yet coded & landed); solid = implemented & landed
   class A1,A2,A3,A4,A5,A6,A7 stage;
-  class G1,G2,G3,G4,G5,G6,G7 gate;
-  class E1,E2,E3,E4,E5,E6,E7 evid;
+  class G1,G2,G3,G4,G6,G7 gate;
+  class G5 gatePlan;
+  class E1,E2,E3,E4,E6,E7 evid;
+  class E5 evidPlan;
 ```
 
 ## CI gates (each is a `.github/workflows/*` job — actions SHA-pinned)

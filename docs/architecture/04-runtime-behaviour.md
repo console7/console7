@@ -101,6 +101,8 @@ sequenceDiagram
   O->>SoR: ResolveRepo(target)
   Note over SoR: AUTHORITATIVE tier×stratum — from system-of-record,<br/>NOT an in-repo file; unknown ⇒ MOST RESTRICTIVE (fail-closed)
   SoR-->>O: TierStratum
+  rect rgb(244,244,244)
+  Note over O,PE: target state (P3) — not yet coded/landed
   opt cross-repo reach (P3, planned)
     O->>SoR: ResolveResource(other targets)
     Note over O: take-the-max + step-up, or BLOCK<br/>(permissive origin must not confer a stricter target's reach)
@@ -109,6 +111,7 @@ sequenceDiagram
     O->>PE: Evaluate(PolicyQuery{Input facts})
     Note over PE: deterministic; any error/timeout/ambiguity ⇒ DENY
     PE-->>O: Decision{Allow, Reason, Obligations}
+  end
   end
   O->>B: MintSessionIdentity(Subject, SessionID, Persona)
   Note over B: NHI cert binds Subject→key→SessionID→Persona<br/>(the lineage anchor for every later action)
@@ -155,9 +158,11 @@ sequenceDiagram
   CL->>CL: egress perimeter checks allowlist (deny ⇒ incident to Evidence)
   CL->>M: prompts + responses — THE ONLY trust-boundary crossing
   M-->>CL: completion
+  rect rgb(244,244,244)
   Note over O,DLP: anything committed/sent is DLP-scanned pre-egress (blocks T1/T2) — planned
   O->>DLP: scan(commit / artefact)
   DLP-->>O: allow OR block + incident
+  end
 ```
 
 **What to notice:** this path is where the **lethal-trifecta** default is enforced — the
@@ -182,6 +187,8 @@ sequenceDiagram
   participant SCM as SCMProvider
   participant PIPE as Adopter pipeline (human gate)
 
+  rect rgb(244,244,244)
+  Note over Ops,PIPE: entire operate lane is target state (P2) — not yet coded/landed
   Ops->>O: launch Operate session (read-only persona)
   Note over O,OG: operate NHI carries a READ-ONLY cloud identity<br/>(IAM is the authoritative mutation block)
   O->>OG: Query(TelemetryQuery{Target, query})
@@ -194,6 +201,7 @@ sequenceDiagram
   SCM-->>O: PRRef
   Note over O,PIPE: NO actuation from the session — the pipeline actuates later, under a human gate
   O-->>PIPE: change proposed (out of band)
+  end
 ```
 
 **What to notice:** "observe is not actuate." Even a fully compromised operate session holds

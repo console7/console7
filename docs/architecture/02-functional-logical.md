@@ -12,7 +12,7 @@ control plane** plus two deliberately separated isolation domains: the **key bro
 **per-session sandbox** (which runs untrusted agent code). Everything composes against the
 nine `sdk/interfaces` **provider seams**; reference implementations live in `providers/`.
 
-Legend: ✅ implemented · ◻ scaffold/placeholder · ⬡ pluggable seam.
+Legend: ✅ implemented · ◻ scaffold/placeholder · ⬡ pluggable seam. **Faded + dashed = target state** (not yet coded & landed); solid = implemented & landed.
 
 ```mermaid
 flowchart TB
@@ -64,7 +64,7 @@ flowchart TB
     %% ---------- Reference providers + adopter infra ----------
     subgraph PROV["providers/ &mdash; reference implementations only"]
       direction LR
-      PCloud["◻ cloud-gcp<br/>gVisor + VPC"]
+      PCloud["✅ cloud-gcp<br/>gVisor + VPC"]
       PSec["✅ secrets-gcp<br/>KMS + Secret Manager"]
       PScm["✅ scm-github<br/>GitHub App"]
       PVx["✅ inference-vertex"]
@@ -128,16 +128,21 @@ flowchart TB
   SB --> OG
 
   classDef tier1 fill:#cfe3f7,stroke:#1168bd,color:#11304a;
+  classDef tier1Plan fill:#eef3f8,stroke:#9bb3cf,color:#8a97a6,stroke-dasharray:5 4;
   classDef broker fill:#e7d6f5,stroke:#7b3fab,color:#3a1d52;
-  classDef dp fill:#f7d6d6,stroke:#c0392b,color:#5b1b14;
+  classDef dpPlan fill:#fbeeee,stroke:#e2a7a1,color:#b08a86,stroke-dasharray:5 4;
   classDef seam fill:#d8f0dd,stroke:#27ae60,color:#13502a;
   classDef prov fill:#fff3cd,stroke:#b8860b,color:#5c4500;
+  classDef provPlan fill:#fbf6e6,stroke:#ddc99c,color:#a89a78,stroke-dasharray:5 4;
   classDef store fill:#ececec,stroke:#888,color:#111;
-  class UI,ORCH,PDP,IR,DLP,EV tier1;
+  %% faded + dashed = target state (not yet coded & landed); solid = implemented & landed
+  class ORCH,PDP,EV tier1;
+  class UI,IR,DLP tier1Plan;
   class BRK,SIGN broker;
-  class SB,PX,OG dp;
+  class SB,PX,OG dpPlan;
   class S1,S2,S3,S4,S5,S6,S7,S8,S9 seam;
-  class PCloud,PSec,PScm,PVx,PAnt,POpa,PGcs prov;
+  class PCloud,PSec,PScm,PVx,PAnt,PGcs prov;
+  class POpa provPlan;
   class SECMGR,GCS,SANDINFRA,SoRsys,GH,SIEMsys store;
 ```
 
@@ -167,7 +172,7 @@ flowchart TB
 | `observe-gateway` | ◻ README | Operate-lane redacting, query-audited, rate-limited façade over production telemetry. |
 
 ### The nine seams (`sdk/interfaces/`) and their reference providers
-`CloudProvider`→`cloud-gcp` ◻ (+ `devkit.MemCloud`, and the Docker provider in
+`CloudProvider`→`cloud-gcp` ✅ (#41) (+ `devkit.MemCloud`, and the Docker provider in
 `console7-cloud-local`); `SecretsProvider`→`secrets-gcp` ✅; `IdentityProvider`→OIDC
 *(ref assumed)* + `devkit.DevIdentity`; `SCMProvider`→`scm-github` ✅;
 `InferenceBackend`→`inference-vertex` ✅ + `inference-anthropic` ✅; `PolicyEngine`→
@@ -185,9 +190,10 @@ flowchart TB
   deploy time, not runtime calls.
 
 ## Notes & confidence
-- The `inference-router`, `dlp`, `ui`, sandbox trio, `cloud-gcp`, `policy-opa`, and
-  `ObserveGateway` are **scaffold/README-only** at this commit; their behaviour is shown
-  per the normative spec and marked ◻. Everything marked ✅ was read in source.
+- The `inference-router`, `dlp`, `ui`, the sandbox trio (base-image / egress-proxy /
+  observe-gateway), and `policy-opa` are **scaffold/README-only** at this commit; their
+  behaviour is shown per the normative spec and marked ◻ (faded). `cloud-gcp` **landed**
+  (#41) — the `CloudProvider` is no longer MemCloud-only. Everything marked ✅ was read in source.
 - `IdentityProvider` and `PolicySoR` have **real dev/in-memory** implementations
   (`devkit.DevIdentity`, `devkit.FixedPolicySoR`); their *production* references
   (OIDC/JWKS, GRC registry adapter) are **(assumed/planned)** for later phases.
