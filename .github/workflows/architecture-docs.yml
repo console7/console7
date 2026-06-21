@@ -1,0 +1,65 @@
+name: architecture docs
+
+# Keeps the docs/architecture/ Mermaid pack honest under the Console7 Repository SDLC
+# Standard (CO-14 evidence/auditability; CO-17 code quality). Two checks, two postures —
+# GOAL.md tenet 2 (deterministic controls are authoritative; in-band heuristics are
+# defence-in-depth, never a control of record):
+#
+#   * validate (BLOCKING): the offline, stdlib Mermaid validator — structural soundness
+#     of every view (fence balance, diagram type, subgraph/end balance, sequence-arrow
+#     misuse, stray FontAwesome). Deterministic, so it is a legitimate gate.
+#   * currency (ADVISORY): if a PR changed an architecture-significant surface but no
+#     docs/architecture/ view, emit a NON-BLOCKING ::warning:: pointing at the
+#     architecture-docs skill. Heuristic, so it never fails the build — a "changed code
+#     but not docs" hard gate would be a false control of record (tenet 2), trivially
+#     gamed by touching any doc, and noisy on architecturally-inert changes.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate Mermaid (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate docs/architecture Mermaid
+        run: python3 scripts/validate-architecture-mermaid.py
+
+  currency:
+    name: architecture-docs currency (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Warn on architecture-doc drift (non-blocking)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Advisory only — this step never exits non-zero (tenet 2: heuristic guards are
+          # defence-in-depth, not gates). The blocking control is the `validate` job. The
+          # path set mirrors the architecture-docs skill's coarse trigger; the skill's
+          # code-area->view map is canonical for what actually needs refreshing.
+          changed="$(git diff --name-only "$BASE...$HEAD" || true)"
+          sig='^(sdk/|control-plane/|keybroker/|providers/|sandbox/|deploy/|scripts/|\.github/workflows/|go\.(mod|sum)$)'
+          if printf '%s\n' "$changed" | grep -qE "$sig" \
+             && ! printf '%s\n' "$changed" | grep -qE '^docs/architecture/'; then
+            echo "::warning title=Architecture docs may be stale::This PR changed an architecture-significant surface but no docs/architecture/ view. Run the architecture-docs skill to refresh the affected view(s) and re-validate the Mermaid. Defence-in-depth, not a gate; skip if the change is architecturally inert."
+          else
+            echo "architecture-docs currency: OK (no drift, or docs updated alongside)."
+          fi

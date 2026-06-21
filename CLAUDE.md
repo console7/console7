@@ -168,15 +168,18 @@ The standard is **self-enforcing for agent sessions** — you'll observe it by d
   push to `main`, un-signed-off commits, `curl|sh`, and un-vetted dependency installs.
   These are *in-band* convenience (tenet 2); the CI gates + branch protection are the
   controls of record.
-- **Skills.** `.claude/skills/sdlc-compliance` and `.claude/skills/supply-chain-policy`
-  are the self-authored how-to references; they auto-load when relevant.
+- **Skills.** `.claude/skills/sdlc-compliance`, `.claude/skills/supply-chain-policy`, and
+  `.claude/skills/architecture-docs` (keeps the `docs/architecture/` pack current when an
+  architecture-significant surface changes) are the self-authored how-to references; they
+  auto-load when relevant.
 - **Supply chain (CO-5/CO-12.7).** Route installs through **Socket Firewall**
   (`sfw …`) or a lockfile-faithful install; **pin** everything (Go releases; actions
   to full SHA); never `curl … | sh`. `.claude/` skills/agents/hooks are **code** —
   first-party/self-authored only, enforced by `scripts/audit-skill-provenance.sh`.
 - **Gates.** secret-scan, OpenSSF Scorecard (private for now), SAST (semgrep now,
-  CodeQL when Go lands), the governance gate, and — once Go code exists — lint +
-  `govulncheck`. Fix a failing gate's cause; never seek to bypass it.
+  CodeQL when Go lands), the governance gate, the architecture-doc Mermaid validation
+  (`architecture-docs.yml`, blocking; plus a non-blocking drift warning), and — once Go
+  code exists — lint + `govulncheck`. Fix a failing gate's cause; never seek to bypass it.
 
 ## What NOT to do
 

@@ -111,20 +111,31 @@ if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]])git[[:space:]]+commit\b'; then
 fi
 
 # ---------------------------------------------------------------------------
-# Advisory (NON-BLOCKING) — pre-push review reminder. Runs LAST, after every
-# blocking check, so it can NEVER pre-empt one (notably the DCO check on a
-# combined `git commit … && git push`). It never blocks: "not reviewed" is a
-# judgement call, not a violation, and a hard self-review gate would turn an
-# in-band check into a false control of record (tenet 2). Emitted as PreToolUse
-# additionalContext (static string — no untrusted data interpolated) so the agent
-# sees the nudge; control then falls through to the final allow (exit 0).
+# Advisory (NON-BLOCKING) — pre-push review + architecture-doc currency reminder.
+# Runs LAST, after every blocking check, so it can NEVER pre-empt one (notably the
+# DCO check on a combined `git commit … && git push`). It never blocks: "not
+# reviewed" / "docs not refreshed" are judgement calls, not violations, and a hard
+# self-review gate would turn an in-band check into a false control of record
+# (tenet 2). Emitted as PreToolUse additionalContext (static strings — no untrusted
+# data interpolated) so the agent sees the nudge; control then falls through to the
+# final allow (exit 0).
 # ---------------------------------------------------------------------------
 if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]])git[[:space:]]+push\b'; then
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   if [ -n "$branch" ] && [ "$branch" != "main" ] && [ "$branch" != "HEAD" ]; then
     changed="$(git diff --name-only main...HEAD 2>/dev/null || true)"
     if [ -n "$changed" ] && printf '%s' "$changed" | grep -qvE '(\.md$|^docs/)'; then
-      printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Console7 pre-push reminder: this feature branch changed non-doc files. For substantive changes, run the pre-pr-review skill (adversarial correctness + security + spec-alignment over the diff) and reconcile findings BEFORE pushing. Defence-in-depth, not a gate; skip for pure docs."}}'
+      # Architecture-doc currency (CO-14): if an architecture-significant surface
+      # changed but the docs/architecture/ pack did not, also nudge to refresh it via
+      # the architecture-docs skill. This path set is a COARSE subset of that skill's
+      # canonical code-area→view map; the skill decides what actually needs refreshing.
+      # Both branches emit a STATIC string and never block — exit 0 follows.
+      if printf '%s' "$changed" | grep -qE '^(sdk/|control-plane/|keybroker/|providers/|sandbox/|deploy/|scripts/|\.github/workflows/|go\.(mod|sum)$)' \
+         && ! printf '%s' "$changed" | grep -qE '^docs/architecture/'; then
+        printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Console7 pre-push reminder: this branch changed an architecture-significant surface (sdk/interfaces, control-plane, keybroker, providers, sandbox, deploy, CI, or go.mod) with NO change under docs/architecture/. (1) Run the pre-pr-review skill (correctness + security + spec-alignment) and reconcile findings. (2) Run the architecture-docs skill to refresh the affected view(s) and re-validate the Mermaid. Both are defence-in-depth, not gates; skip the arch refresh only if the change is architecturally inert."}}'
+      else
+        printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Console7 pre-push reminder: this feature branch changed non-doc files. For substantive changes, run the pre-pr-review skill (adversarial correctness + security + spec-alignment over the diff) and reconcile findings BEFORE pushing. Defence-in-depth, not a gate; skip for pure docs."}}'
+      fi
     fi
   fi
 fi
