@@ -183,3 +183,34 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 		}
 	}
 }
+
+func TestNonEmptyLines(t *testing.T) {
+	got := nonEmptyLines("main.go\n\n  README.md \n\t\npkg/x.go\n")
+	want := []string{"main.go", "README.md", "pkg/x.go"}
+	if len(got) != len(want) {
+		t.Fatalf("nonEmptyLines = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(nonEmptyLines("   \n\t\n")) != 0 {
+		t.Error("expected no lines from all-blank input")
+	}
+}
+
+func TestConfigNormalize_WorkdirDefault(t *testing.T) {
+	got, err := Config{ProjectID: "p", Location: "us-east4", Cluster: "c"}.normalize()
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if got.Workdir != DefaultWorkdir {
+		t.Errorf("Workdir default = %q, want %q", got.Workdir, DefaultWorkdir)
+	}
+	// An explicit Workdir is preserved.
+	got2, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", Workdir: "/src"}.normalize()
+	if got2.Workdir != "/src" {
+		t.Errorf("explicit Workdir not preserved: %q", got2.Workdir)
+	}
+}

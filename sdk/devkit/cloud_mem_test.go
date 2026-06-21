@@ -178,3 +178,50 @@ func TestMemCloud_DestroySandbox_IrreversibleAndWipes(t *testing.T) {
 		t.Error("expected a second destroy to fail closed")
 	}
 }
+
+func TestMemCloud_RunTask_DeterministicAndFailsClosed(t *testing.T) {
+	cloud, _ := newMemCloud()
+	ctx := context.Background()
+	task := interfaces.EngineTask{
+		SessionID: "s1",
+		Profile:   interfaces.SessionProfile{Persona: interfaces.PersonaAuthor},
+		Repo:      interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:    "feature/x",
+		Prompt:    "do the work",
+		Timeout:   time.Minute,
+	}
+
+	// Fail closed: a task must not run in an unknown sandbox.
+	if _, err := cloud.RunTask(ctx, interfaces.SandboxHandle{ID: "nope"}, task); err == nil {
+		t.Fatal("expected RunTask to fail closed on an unknown sandbox")
+	}
+
+	h, err := cloud.ProvisionSandbox(ctx, provisionSpec("s1", "https://a"))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// A live sandbox yields a deterministic, non-empty changed result.
+	res1, err := cloud.RunTask(ctx, h, task)
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if !res1.Changed || len(res1.CommitDigest) == 0 || res1.HeadSHA == "" {
+		t.Fatalf("expected a changed result with a digest and head, got %+v", res1)
+	}
+	// Deterministic over the same coordinates (offline, reproducible — the bench stand-in role).
+	res2, err := cloud.RunTask(ctx, h, task)
+	if err != nil {
+		t.Fatalf("RunTask (second): %v", err)
+	}
+	if string(res1.CommitDigest) != string(res2.CommitDigest) {
+		t.Error("MemCloud.RunTask digest is not deterministic over the same task")
+	}
+
+	// No run after destroy.
+	if err := cloud.DestroySandbox(ctx, h); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if _, err := cloud.RunTask(ctx, h, task); err == nil {
+		t.Fatal("expected RunTask to fail closed in a destroyed sandbox")
+	}
+}

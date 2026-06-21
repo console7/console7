@@ -39,6 +39,57 @@ type SandboxHandle struct {
 	ID string
 }
 
+// EngineTask is one governed unit of work the orchestrator asks the sandbox to run through the
+// genuine Claude Code engine (DESIGN.md §1.4 — Console7 wraps the engine, it does NOT reimplement
+// the agent). It carries only what the engine needs to PROPOSE a change; it is never a credential
+// carrier — no token or subscription material crosses this seam, that is injected separately and
+// by reference via the SecretsProvider/keybroker, exactly like SandboxSpec.Subject.
+type EngineTask struct {
+	// SessionID identifies the session whose sandbox runs this task; it is the lineage anchor the
+	// orchestrator stamps the resulting commit and evidence against.
+	SessionID SessionID
+	// Profile is the resolved session envelope. The implementation MUST render it into the engine's
+	// LOCKED managed-settings INSIDE the sandbox BEFORE the engine starts — the agent never applies
+	// or overrides its own policy (DESIGN.md §5.1; tenet 3 — in-band guards are defence-in-depth,
+	// the locked settings ride on top of the boundary). Profile.Persona selects the author/operate
+	// permission + hook set.
+	Profile SessionProfile
+	// Repo and Branch are the working coordinates: the engine works the checked-out repo and commits
+	// onto Branch. Branch MUST NOT be a protected/default branch — the session proposes, never
+	// actuates onto a protected ref (tenet 6).
+	Repo   RepoRef
+	Branch string
+	// Prompt is the task instruction handed to the headless engine (`claude -p`). It is UNTRUSTED
+	// content (it may originate from an issue/PR body) and MUST influence only the engine's work —
+	// never the egress perimeter, the isolation boundary, or the engine's own locked policy, all of
+	// which are enforced out-of-band regardless of what the prompt says (tenet 3).
+	Prompt string
+	// Timeout bounds the engine run. The implementation MUST cap it to the sandbox's remaining
+	// lifetime and MUST NOT let a run outlive the session deadline (ephemeral by default; tenet 5).
+	Timeout time.Duration
+}
+
+// EngineResult is what a completed engine run yields back to the control plane: the PROPOSAL the
+// orchestrator signs and opens as a PR. The engine itself actuates nothing (tenet 6).
+type EngineResult struct {
+	// CommitDigest is the digest of the REAL commit the engine produced on the working branch — the
+	// bytes the orchestrator hands to the key broker to be signed by the session NHI (DESIGN.md
+	// §2.3: produced artefacts are cryptographically signed by the session identity). It MUST be
+	// non-empty when Changed is true; a run that produced no commit MUST set Changed false rather
+	// than return a zero digest the orchestrator would sign as if work had happened.
+	CommitDigest []byte
+	// HeadSHA is the engine-produced commit's object id on the working branch. It is the head a
+	// later (Tier-2) control-plane-side push + PR consumes; this seam never pushes to a remote.
+	HeadSHA string
+	// FilesChanged is a short, human-auditable summary of the proposed change (paths / counts) for
+	// the PR body and the evidence record. It MUST NOT carry secret material or file CONTENTS — it
+	// is a summary for an auditor, never a data-exfiltration channel out of the sandbox (tenet 1).
+	FilesChanged []string
+	// Changed reports whether the run produced any commit. A no-op (Changed false) is a legitimate
+	// outcome the orchestrator records as "no change proposed" rather than signing an empty digest.
+	Changed bool
+}
+
 // CloudProvider abstracts sandbox isolation, networking, and the egress perimeter
 // (ARCHITECTURE.md §5; default ref: GCP — gVisor + VPC firewall/NAT for the egress
 // perimeter, with VPC Service Controls guarding the Google API surface only, not
@@ -74,4 +125,24 @@ type CloudProvider interface {
 	// or otherwise persist sandbox contents anywhere the maintainer or another
 	// session could read them (GOAL.md tenet 1, tenet 5).
 	DestroySandbox(ctx context.Context, h SandboxHandle) error
+
+	// RunTask runs the genuine Claude Code engine for one governed task INSIDE the live sandbox
+	// identified by h, and returns the proposed change as an EngineResult. It is the "do the work"
+	// step the orchestrator calls between narrowing egress and signing/opening the PR, so the engine
+	// always runs under the already-narrowed, default-deny perimeter.
+	//
+	// SECURITY: the implementation MUST run the engine ONLY inside the existing sandbox h (never
+	// spawn a fresh or shared one) and MUST fail closed if h is unknown, already destroyed, expired,
+	// or tainted — a task MUST NEVER run outside a live, perimeter-intact sandbox. It MUST render
+	// task.Profile into the engine's LOCKED managed-settings inside the sandbox BEFORE the engine
+	// starts, and MUST NOT let the agent self-apply or override that policy (DESIGN.md §5.1; tenet
+	// 3). It MUST NOT widen the sandbox's egress to run the task (tenet 3), and MUST NOT let the
+	// engine actuate the change — no push to a protected branch, no merge, no deploy: the engine
+	// PROPOSES a commit on the working branch and the control plane opens the PR (tenet 6; DESIGN.md
+	// §1.2). It MUST NOT return secret material, engine transcripts, or full sandbox contents — only
+	// the digest/head/summary the control plane needs to attest and propose (tenet 1). It MUST
+	// honour task.Timeout and MUST NOT let the run outlive the sandbox's hard lifetime (tenet 5).
+	// The returned CommitDigest is the bytes the session NHI signs (the orchestrator signs the
+	// engine's real output, never a synthesised stand-in — DESIGN.md §2.3, tenet 7).
+	RunTask(ctx context.Context, h SandboxHandle, task EngineTask) (EngineResult, error)
 }

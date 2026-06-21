@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/console7/console7/sandbox/policyhelper"
 	"github.com/console7/console7/sdk/interfaces"
 )
 
@@ -227,6 +229,130 @@ func (e *netpolEgressController) Set(ctx context.Context, h interfaces.SandboxHa
 // remove a perimeter whose workload never started, without leaking the namespace.
 func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.SandboxHandle) error {
 	return e.run.kubectlDeleteNamespace(ctx, h.ID)
+}
+
+// kubeEngineRunner realises EngineRunner: it runs the genuine Claude Code engine inside an
+// already-provisioned sandbox pod via `kubectl exec` and captures the commit it produces. The
+// provider has already gated this on the sandbox being live and perimeter-intact, and egress is
+// already narrowed to the inference endpoint, so the engine runs under the default-deny perimeter.
+//
+// Like the rest of this file it is PRODUCTION code in the default build but exercised only by the
+// opt-in integration test against a real cluster (CI runs the InMemoryEngineRunner fake). It is the
+// CI blind spot, so it is kept deliberately small and every dynamic value funnels through the single
+// audited kubeRunner.run site, with the untrusted prompt + the managed-settings passed over STDIN
+// (never an argv string a shell could re-split).
+//
+// The locked managed-settings are rendered from the resolved profile and mounted READ-ONLY at
+// PROVISION time (the agent never writes its own policy — DESIGN.md §5.1, tenet 3); this runner only
+// VERIFIES they are present and fails closed if not, mirroring the base image's own entrypoint guard.
+// It deliberately does NOT write the policy itself: the locked path is root-owned (sandbox/base-image:
+// /etc/claude-code is root:sandbox 2750) and the pod runs runAsNonRoot, so a writable render path would
+// be one the agent (same uid) could overwrite — the opposite of a locked policy.
+//
+// RESIDUALS (Tier-2 / sandbox-image, tracked — this adapter is not yet proven end to end):
+//   - The provision-time render + read-only volume mount of managed-settings is not yet wired here
+//     (deploy/gcp/modules/gke + sandbox-image). Until it lands, Run fails closed (the settings file is
+//     absent), which is the correct, honest behaviour — the engine never runs without its policy.
+//   - renderSandboxPod still pins the pause placeholder image; the real engine image (PR-3's signed
+//     base image) must be wired before `claude -p` exists in the pod.
+//   - The Anthropic credential reaches the engine via the SecretsProvider injection path, not this
+//     seam (EngineTask carries no secret); the integration wiring of that injection is Tier-2.
+type kubeEngineRunner struct {
+	run *kubeRunner
+	cfg Config
+}
+
+// execIn runs `kubectl exec -n <ns> <pod> [-i] -- args...`, feeding stdin (nil ⇒ no -i). The pod
+// name equals the namespace name (the crypto-random handle ID), as the renderers establish.
+func (k *kubeEngineRunner) execIn(ctx context.Context, h interfaces.SandboxHandle, stdin []byte, args ...string) ([]byte, error) {
+	base := []string{"exec", "-n", h.ID, h.ID}
+	if stdin != nil {
+		base = append(base, "-i")
+	}
+	base = append(base, "--")
+	return k.run.run(ctx, "kubectl", stdin, append(base, args...)...)
+}
+
+// Run verifies the locked managed-settings are present (fail closed otherwise), runs `claude -p`
+// headless under them, and captures the commit the engine produced on the working branch. It NEVER
+// pushes, merges, or widens egress; it returns only the digest/head/summary (cloud.go EngineResult
+// SECURITY).
+func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, task interfaces.EngineTask) (interfaces.EngineResult, error) {
+	// Ephemeral by default (tenet 5): a non-positive timeout means the session budget is already
+	// spent — refuse rather than run the engine unbounded. The orchestrator passes the time REMAINING
+	// to the session deadline, so this is the adapter's fail-closed half of "MUST honour task.Timeout".
+	if task.Timeout <= 0 {
+		return interfaces.EngineResult{}, errors.New("cloudgcp: non-positive task timeout (session budget exhausted) — refusing to run the engine (ephemeral by default)")
+	}
+	ctx, cancel := context.WithTimeout(ctx, task.Timeout)
+	defer cancel()
+
+	// 1. Fail closed unless the LOCKED managed-settings are already present in the pod. They are
+	// rendered from the resolved profile and mounted READ-ONLY at PROVISION time (the agent never
+	// writes its own policy — DESIGN.md §5.1, tenet 3); this run only VERIFIES them, mirroring the
+	// base image entrypoint's own guard. `test -s` is true only for a present, non-empty file. (The
+	// provision-time render + volume mount is the tracked Tier-2 residual — see the type comment.)
+	if _, err := k.execIn(ctx, h, nil, "test", "-s", policyhelper.ManagedSettingsPath); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: locked managed-settings absent/empty at %s — refusing to run the engine without its policy (fail closed): %w", policyhelper.ManagedSettingsPath, err)
+	}
+
+	// 2. Run the genuine engine headless. The untrusted prompt is passed over STDIN, so a shell can
+	// never re-split it into extra argv. The engine reads the locked managed-settings itself (the
+	// verified file is the authority; the conservative default permission mode is belt-and-suspenders).
+	if _, err := k.execIn(ctx, h, []byte(task.Prompt),
+		"claude", "-p", "--permission-mode", "default"); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: run engine: %w", err)
+	}
+
+	// 3. Capture the proposal: stage and commit whatever the engine changed, then read the head. A
+	// clean tree (the engine proposed nothing) is a no-op, not an error. NOTE (Tier-2 residual): the
+	// resulting commit is the one sanctioned outward channel (the deferred control-plane-side push →
+	// PR, under human review); `git add -A` stages broadly, so that push path MUST DLP-scan the diff
+	// pre-egress (DESIGN.md §10; the planned pre-egress DLP control) — it is not this seam's job.
+	if _, err := k.gitExec(ctx, h, "add", "-A"); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: stage engine changes: %w", err)
+	}
+	status, err := k.gitExec(ctx, h, "status", "--porcelain")
+	if err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: read worktree status: %w", err)
+	}
+	if len(bytes.TrimSpace(status)) == 0 {
+		return interfaces.EngineResult{Changed: false}, nil
+	}
+	if _, err := k.gitExec(ctx, h, "commit", "-m", "Console7 session "+string(task.SessionID)); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: commit engine changes: %w", err)
+	}
+	head, err := k.gitExec(ctx, h, "rev-parse", "HEAD")
+	if err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: read commit head: %w", err)
+	}
+	headSHA := strings.TrimSpace(string(head))
+	files, _ := k.gitExec(ctx, h, "show", "--stat", "--name-only", "--format=", "HEAD")
+	return interfaces.EngineResult{
+		// The commit SHA uniquely identifies the engine's real output; the orchestrator domain-tags
+		// it (commitTBS) before the NHI signs it, so the raw identity is all this seam returns.
+		CommitDigest: []byte(headSHA),
+		HeadSHA:      headSHA,
+		FilesChanged: nonEmptyLines(string(files)),
+		Changed:      true,
+	}, nil
+}
+
+// gitExec runs a git subcommand in the in-pod working directory via `kubectl exec`.
+func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHandle, args ...string) ([]byte, error) {
+	return k.execIn(ctx, h, nil, append([]string{"git", "-C", k.cfg.Workdir}, args...)...)
+}
+
+// nonEmptyLines splits s into its non-blank, trimmed lines — the file paths from `git show
+// --name-only` — for the auditable FilesChanged summary (paths only, never file contents).
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, ln := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(ln); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // jsonScalar encodes s as a double-quoted YAML scalar via encoding/json (a JSON string is a valid

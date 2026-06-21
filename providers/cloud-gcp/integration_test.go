@@ -18,6 +18,10 @@
 // NOTE: the authoritative egress + metadata-block ASSERTIONS (a non-allowlisted host and every
 // metadata endpoint are unreachable from inside the sandbox) need both modules/gke (PR-2b) and a
 // sandbox image with a shell (PR-3); until those land this test asserts the lifecycle only.
+// RunTask (the genuine `claude -p` run) is likewise exercised here only once renderSandboxPod pins
+// the real signed engine image instead of the pause placeholder — the placeholder has no engine,
+// git, or shell — so it is not called below; the seam's logic is proven by the in-memory
+// InMemoryEngineRunner conformance + white-box tests (Tier-2 residual, see kube_exec.go).
 package cloudgcp
 
 import (

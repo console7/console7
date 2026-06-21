@@ -59,6 +59,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	p, err := NewWithPorts(
 		&kubeRuntime{run: rc, cfg: cfg},
 		&netpolEgressController{run: rc, cfg: cfg},
+		&kubeEngineRunner{run: rc, cfg: cfg},
 		cfg.NamePrefix,
 		nil,
 	)

@@ -68,6 +68,12 @@ type LaunchRequest struct {
 	Persona   interfaces.Persona
 	Repo      interfaces.RepoRef
 	Branch    string
+	// Prompt is the task instruction handed to the genuine engine (`claude -p`) inside the sandbox.
+	// It is UNTRUSTED content (an issue/PR body, a human ask) that drives the engine's work only —
+	// the perimeter, isolation, and the engine's locked policy are enforced out-of-band regardless
+	// (tenet 3). The orchestrator passes it through to Cloud.RunTask via EngineTask; it never
+	// influences lineage, signing, or evidence.
+	Prompt string
 	// Attended marks a human present for this single-user session — the discriminator for
 	// subscription-backed inference (tenet 7). Headless/orchestrated launches set it false
 	// and route to the org API.
@@ -91,6 +97,11 @@ type Summary struct {
 	PR           interfaces.PRRef
 	CommitDigest []byte
 	CommitSig    signing.Signature
+	// HeadSHA is the engine-produced commit's object id on the working branch (empty for a no-change
+	// session). FilesChanged is the short, auditable summary of the proposed change. Both come from
+	// the EngineResult Cloud.RunTask returned; they carry no secret material or file contents.
+	HeadSHA      string
+	FilesChanged []string
 	Records      int
 }
 
@@ -110,10 +121,12 @@ type session struct {
 	sandbox    interfaces.SandboxHandle
 	records    int
 	// work outputs, filled by the operate phases and read into the final Summary.
-	endpoint  interfaces.BackendEndpoint
-	digest    []byte
-	commitSig signing.Signature
-	prRef     interfaces.PRRef
+	endpoint     interfaces.BackendEndpoint
+	digest       []byte
+	headSHA      string
+	filesChanged []string
+	commitSig    signing.Signature
+	prRef        interfaces.PRRef
 }
 
 // emit writes a signed evidence record under the given context. A failure to record
@@ -284,13 +297,52 @@ func (o *Orchestrator) resolveInference(s *session) error {
 	return nil
 }
 
-// propose does the work, signs the resulting commit digest with the session NHI, and opens
-// the change as a PR (the only outward side-effect). Every failure path aborts.
+// propose runs the genuine engine inside the sandbox via the Cloud seam, signs the digest of the
+// REAL commit it produced with the session NHI, and opens the change as a PR (the only outward
+// side-effect). Every failure path aborts.
 func (o *Orchestrator) propose(s *session) error {
-	// 7. "Do the work" → a commit digest → sign it with the session NHI (via the broker, so
-	// the key never enters the control plane). The signature is the crypto-attested output,
-	// recorded in the chain (tenet 6; ROADMAP Phase 1).
-	s.digest = commitDigest(s.req)
+	// 7. Do the work via the genuine Claude Code engine, INSIDE the already-provisioned,
+	// perimeter-narrowed sandbox (DESIGN.md §1.4 — wrap the engine, never reimplement it). The
+	// orchestrator stays authoritative: it asks the Cloud seam to run the task and gets back a
+	// PROPOSAL — a real commit digest — which it then signs. The engine never self-actuates (tenet
+	// 6); it runs under the already-narrowed default-deny perimeter (tenet 3) and is bounded by the
+	// time remaining to the session deadline (ephemeral by default, tenet 5).
+	remaining := time.Until(s.deadline)
+	if remaining <= 0 {
+		// The session budget (consumed by identity minting, evidence stamps, inference resolution) is
+		// already spent — abort rather than hand the engine a non-positive timeout it could run
+		// unbounded under (ephemeral by default; the sandbox is torn down by abort).
+		return s.abort(errors.New("session deadline exceeded before the engine could run"), "run-task")
+	}
+	result, err := o.Cloud.RunTask(s.ctx, s.sandbox, interfaces.EngineTask{
+		SessionID: s.req.SessionID,
+		Profile:   s.profile,
+		Repo:      s.req.Repo,
+		Branch:    s.req.Branch,
+		Prompt:    s.req.Prompt,
+		Timeout:   remaining,
+	})
+	if err != nil {
+		return s.abort(err, "run-task")
+	}
+	if !result.Changed {
+		// A no-op run is a legitimate outcome: the engine proposed no change. Record it and end the
+		// session cleanly rather than signing an empty digest or opening an empty PR. The sandbox is
+		// still torn down and the chain still sealed by Run.
+		if err := s.stamp("no-change", string(s.req.SessionID)); err != nil {
+			return s.abort(err, "no-change-evidence")
+		}
+		return nil
+	}
+	s.headSHA = result.HeadSHA
+	s.filesChanged = append([]string(nil), result.FilesChanged...)
+
+	// Sign the digest of the engine's REAL commit with the session NHI (via the broker, so the key
+	// never enters the control plane). commitTBS domain-tags the digest so a commit signature can
+	// never be confused with an evidence-record signature minted by the same NHI key — the control
+	// plane owns this domain separation, not the provider. The signature is the crypto-attested
+	// output, recorded in the chain (tenet 7; DESIGN.md §2.3).
+	s.digest = commitTBS(result.CommitDigest)
 	commitSig, err := o.Broker.SignSession(s.ctx, s.req.SessionID, s.digest)
 	if err != nil {
 		return s.abort(err, "sign-commit")
@@ -301,7 +353,16 @@ func (o *Orchestrator) propose(s *session) error {
 	}
 
 	// 8. PR-only exit: propose the change as a PR. The session never merges or actuates —
-	// author, approve, and actuate are separated (tenet 5/6).
+	// author, approve, and actuate are separated (tenet 6).
+	//
+	// SCOPING (Tier-2 residual): the engine produced a real commit on the working branch INSIDE the
+	// sandbox, but the branch is NOT pushed to the real remote here — egress is narrowed to the
+	// inference endpoint and the sandbox holds no push credential (tenet 6), so the push is a
+	// control-plane-side action (the orchestrator holds the branch-scoped SCM working credential).
+	// Wiring that push + a real GitHub PR over result.HeadSHA is the Tier-2 follow-up; this spine
+	// signs the genuine engine commit digest and opens the PR through the broker's SCM seam (against
+	// the local-cloud remote for the Tier-1 demo). result.HeadSHA is the handle that follow-up
+	// consumes.
 	//
 	// Write-ahead the INTENT before the external side-effect: the PR is the one irreversible
 	// outward action, so the WORM log must durably record that we are opening it BEFORE the
@@ -317,7 +378,7 @@ func (o *Orchestrator) propose(s *session) error {
 		Head:  s.req.Branch,
 		Base:  "main",
 		Title: "Console7 session " + string(s.req.SessionID),
-		Body:  "Proposed by attended author session; lineage " + string(s.subject) + " -> " + s.nhi + ".",
+		Body:  proposalBody(s),
 	})
 	if err != nil {
 		return s.abort(err, "open-pr")
@@ -327,6 +388,19 @@ func (o *Orchestrator) propose(s *session) error {
 		return s.abort(err, "pr-evidence")
 	}
 	return nil
+}
+
+// proposalBody renders the PR description: the lineage (human → NHI) plus the auditable head SHA
+// and file-change summary the engine produced. It carries no secret material or file contents.
+func proposalBody(s *session) string {
+	body := "Proposed by attended author session; lineage " + string(s.subject) + " -> " + s.nhi + "."
+	if s.headSHA != "" {
+		body += "\n\nEngine commit: " + s.headSHA
+	}
+	if len(s.filesChanged) > 0 {
+		body += "\nFiles changed: " + strings.Join(s.filesChanged, ", ")
+	}
+	return body
 }
 
 // Run executes one governed task end to end, stamping a signed evidence record at every
@@ -411,25 +485,31 @@ func (o *Orchestrator) Run(ctx context.Context, req LaunchRequest) (Summary, err
 		PR:           s.prRef,
 		CommitDigest: s.digest,
 		CommitSig:    s.commitSig,
+		HeadSHA:      s.headSHA,
+		FilesChanged: s.filesChanged,
 		Records:      s.records,
 	}, nil
 }
 
-// commitDigest derives the digest the session "produces" and signs. The real engine emits
-// a real commit; the spine signs a deterministic digest over the work's coordinates so the
-// attestation is exercised end to end without wrapping the engine yet (tenet 8 — that wrap
-// lands with sandbox/base-image in a later Phase-1 PR).
-func commitDigest(req LaunchRequest) []byte {
+// commitDomain separates the bytes signed for a commit from every other use of the session NHI key
+// (cf. evidenceDomain for evidence records, certTBS in the signing package). A signature minted for
+// one context can never be presented as another.
+const commitDomain = "c7-commit-v1"
+
+// commitTBS is the domain-tagged, length-prefixed digest the session NHI signs for the engine's
+// commit. The genuine engine (run via Cloud.RunTask) produces the real commit and returns its
+// digest; the orchestrator — NOT the provider — domain-tags it here before signing, so the commit
+// signature is structurally distinct from an evidence-record signature even if a provider returned
+// a digest that happened to collide with some other payload. This is where the spine binds the
+// attestation to the engine's REAL output (tenet 7; DESIGN.md §2.3), replacing the former synthetic
+// coordinate hash now that the engine is wrapped.
+func commitTBS(engineDigest []byte) []byte {
 	h := sha256.New()
-	// Domain-tag the commit-signing input so a commit signature can never be confused with
-	// an evidence-record signature minted by the same NHI key (cf. evidenceDomain).
-	h.Write([]byte("c7-commit-v1"))
-	for _, s := range []string{req.Repo.Host, req.Repo.Owner, req.Repo.Name, req.Branch, string(req.SessionID)} {
-		var u8 [8]byte
-		binary.BigEndian.PutUint64(u8[:], uint64(len(s)))
-		h.Write(u8[:])
-		h.Write([]byte(s))
-	}
+	h.Write([]byte(commitDomain))
+	var u8 [8]byte
+	binary.BigEndian.PutUint64(u8[:], uint64(len(engineDigest)))
+	h.Write(u8[:])
+	h.Write(engineDigest)
 	return h.Sum(nil)
 }
 
@@ -479,8 +559,8 @@ func (o *Orchestrator) sealOrJoin(ctx context.Context, cause error, where string
 }
 
 // evidenceDomain separates the bytes signed for an evidence record from every other use of
-// the session NHI key (cf. the commit-signing domain in commitDigest and certTBS in the
-// signing package). A signature minted for one context can never be presented as another.
+// the session NHI key (cf. commitDomain/commitTBS for commits and certTBS in the signing
+// package). A signature minted for one context can never be presented as another.
 const evidenceDomain = "c7-evidence-v1"
 
 // stampedPayload is the body of every evidence record the orchestrator emits: the event and

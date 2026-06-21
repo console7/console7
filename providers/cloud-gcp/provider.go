@@ -36,6 +36,7 @@ type Provider struct {
 	mu        sync.Mutex
 	runtime   SandboxRuntime
 	egress    EgressController
+	runner    EngineRunner
 	prefix    string
 	now       func() time.Time
 	newID     func() (string, error)
@@ -64,10 +65,11 @@ type sandboxState struct {
 // NewWithPorts builds a Provider over explicit ports. It is the constructor the conformance
 // harness, the unit tests, and (later) the orchestrator use; New wires the real kubectl/gcloud
 // adapters into it. A nil now defaults to time.Now; a nil newID defaults to a crypto/rand
-// handle generator; nil ports are rejected (a Provider with no runtime/egress would fail open).
-func NewWithPorts(runtime SandboxRuntime, egress EgressController, prefix string, now func() time.Time) (*Provider, error) {
-	if runtime == nil || egress == nil {
-		return nil, errors.New("cloudgcp: NewWithPorts requires a non-nil SandboxRuntime and EgressController")
+// handle generator; nil ports are rejected (a Provider with no runtime/egress/runner would fail
+// open — a nil runner would let RunTask be called on a Provider that cannot run the engine).
+func NewWithPorts(runtime SandboxRuntime, egress EgressController, runner EngineRunner, prefix string, now func() time.Time) (*Provider, error) {
+	if runtime == nil || egress == nil || runner == nil {
+		return nil, errors.New("cloudgcp: NewWithPorts requires a non-nil SandboxRuntime, EgressController, and EngineRunner")
 	}
 	if prefix == "" {
 		prefix = DefaultNamePrefix
@@ -78,6 +80,7 @@ func NewWithPorts(runtime SandboxRuntime, egress EgressController, prefix string
 	return &Provider{
 		runtime:   runtime,
 		egress:    egress,
+		runner:    runner,
 		prefix:    prefix,
 		now:       now,
 		newID:     randomID(prefix),
@@ -264,6 +267,43 @@ func (p *Provider) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 		return fmt.Errorf("cloudgcp: sandbox destroyed but clearing its perimeter failed: %w", err)
 	}
 	return nil
+}
+
+// RunTask runs the genuine engine inside the live sandbox h and returns the proposed commit. It
+// gates the run on the sandbox being live and not tainted, then delegates the exec to the
+// EngineRunner port.
+//
+// CONCURRENCY EXCEPTION: unlike every other method, RunTask does NOT hold p.mu across its port
+// I/O. An engine run can take minutes; serialising it under p.mu (the package's default) would
+// wedge every other sandbox's provision/apply/destroy for the whole run. So RunTask takes the lock
+// only for the liveness/taint GATE, then releases it before the long runner.Run call. This is safe:
+// DestroySandbox marks a sandbox dead UNDER the lock and tears the pod down, so a destroy racing an
+// in-flight run either (a) is ordered before this gate — the gate then fails closed — or (b) lands
+// after the gate, killing the pod mid-run, which surfaces as a runner error, never a task running
+// in a torn-down (perimeter-gone) sandbox. The in-memory egress/liveness view is never mutated by
+// RunTask, so releasing the lock cannot corrupt the narrow-only invariant the other methods rely on.
+//
+// LIFETIME: a sandbox can cross its MaxTTL expiry DURING the (post-gate) run; the provider does not
+// re-check it mid-run. The run is bounded instead by task.Timeout (which the orchestrator caps to the
+// time REMAINING to the session deadline) enforced in the runner, with the pod's activeDeadlineSeconds
+// as the hard backstop — so the engine cannot outlive the sandbox even though this method's gate is
+// point-in-time.
+func (p *Provider) RunTask(ctx context.Context, h interfaces.SandboxHandle, task interfaces.EngineTask) (interfaces.EngineResult, error) {
+	p.mu.Lock()
+	sb, ok := p.lookup(h)
+	if !ok || !sb.live {
+		p.mu.Unlock()
+		// Fail closed: a task must never run outside a live sandbox (unknown, destroyed, or expired).
+		return interfaces.EngineResult{}, errors.New("cloudgcp: cannot run a task in an unknown, destroyed, or expired sandbox")
+	}
+	if sb.tainted {
+		p.mu.Unlock()
+		// A prior egress change could not guarantee this sandbox's perimeter; it is quarantined to
+		// teardown only, so refuse to run the engine inside an unknown perimeter (tenet 3).
+		return interfaces.EngineResult{}, errors.New("cloudgcp: sandbox is tainted (its perimeter could not be guaranteed) — only teardown is permitted")
+	}
+	p.mu.Unlock()
+	return p.runner.Run(ctx, h, task)
 }
 
 // lookup returns the state for h, marking it dead first if it has aged past its MaxTTL so a

@@ -25,6 +25,10 @@ func TestCloudProvider_DestroySandbox(t *testing.T) {
 	runContract(t, "CloudProvider", "DestroySandbox")
 }
 
+func TestCloudProvider_RunTask(t *testing.T) {
+	runContract(t, "CloudProvider", "RunTask")
+}
+
 // --- SecretsProvider (secret storage, envelope encryption, KMS) ---
 
 func TestSecretsProvider_MintEphemeral(t *testing.T) {

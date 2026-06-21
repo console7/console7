@@ -61,3 +61,19 @@ type EgressController interface {
 	// already-absent perimeter as success.
 	Clear(ctx context.Context, handle interfaces.SandboxHandle) error
 }
+
+// EngineRunner runs the genuine Claude Code engine inside an already-provisioned sandbox pod and
+// captures the commit it produces. It is a SEPARATE port from SandboxRuntime because running the
+// engine is an EXEC INTO a live pod, not a lifecycle op on the pod — keeping it distinct lets the
+// provider gate the run on the sandbox's liveness/taint under the lock before any exec happens, and
+// lets a deployment swap the engine-exec mechanism (kubectl exec vs a typed client) without
+// touching provisioning. The real adapter (kube_exec.go) shells `kubectl exec` (no new dependency);
+// the in-memory fake (fakes.go) records the task so conformance runs credential-free.
+type EngineRunner interface {
+	// Run renders task.Profile into the engine's LOCKED managed-settings inside the pod, runs
+	// `claude -p`, and returns the engine's produced commit. The provider GUARANTEES handle is live
+	// and perimeter-intact when Run is called (it holds that gate under the lock); the adapter MUST
+	// NOT widen egress, MUST NOT push/merge/actuate, and MUST return only the digest/head/summary —
+	// never transcripts or secret material (cloud.go EngineResult SECURITY; GOAL.md tenets 1/3/6).
+	Run(ctx context.Context, handle interfaces.SandboxHandle, task interfaces.EngineTask) (interfaces.EngineResult, error)
+}
