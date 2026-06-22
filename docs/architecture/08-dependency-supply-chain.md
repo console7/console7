@@ -79,9 +79,12 @@ specifically so `govulncheck` stays clean of `.0` stdlib CVEs.
 ## Tooling supply chain (build/test, not shipped at runtime)
 All pinned and checksum-/SHA-verified (CI installs the exact version): `golangci-lint`
 v2.12.2 (built from source via checksum-verified proxy), `govulncheck` v1.1.4, `gitleaks`
-v8.21.2 (binary SHA256-verified before run), `trivy` v0.70.0, `terraform` v1.12.2. GitHub
-Actions are **SHA-pinned**; Dependabot refreshes actions + gomod weekly; installs route
-through **Socket Firewall** or a lockfile-faithful path; `curl | sh` is hook-blocked.
+v8.21.2 (binary SHA256-verified before run), `trivy` v0.70.0, `terraform` v1.12.2,
+`hadolint` (digest-pinned image). The sandbox-image release uses **cosign** (`sigstore/
+cosign-installer` SHA-pinned) for keyless signing/verification and BuildKit's syft-based **SBOM** +
+**SLSA provenance** attestors. GitHub Actions are **SHA-pinned**; Dependabot refreshes actions +
+gomod weekly; installs route through **Socket Firewall** or a lockfile-faithful path; `curl | sh`
+is hook-blocked.
 
 ## The wrapped engine — a distinct supply-chain axis
 The genuine **Claude Code engine** (Node/Python) is not a Go dependency; it is **wrapped,
@@ -90,14 +93,20 @@ not reimplemented**, run as-is in the sandbox over its CLI/Agent SDK. It is a se
 change can shift permission/hook behaviour (`DESIGN.md` §1.4). It lives only in the
 **sandbox base image** — never in the control-plane or key-broker images.
 
-**Image distribution & integrity.** The sandbox base image is published to a dedicated
-**Artifact Registry** Docker repository (`deploy/gcp/modules/artifact-registry`, ✅ in tree) with
-**immutable tags** (a pushed tag cannot be moved to different bytes) and a **repo-scoped** pull
-grant to the GKE node SA. The **signing/SBOM/provenance build pipeline**
-(`.github/workflows/sandbox-image-release.yml`) and the **consumer-side digest pin**
-(`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, the intended authoritative content-address)
-are **(planned)** — not in tree at this commit. Until they land, `immutable_tags` is the registry-
-side integrity control in place.
+**Image distribution & integrity.** The **signing/SBOM/provenance release pipeline**
+(`.github/workflows/sandbox-image-release.yml`, ✅ in tree) builds the sandbox base image on a
+`sandbox-image/v*` tag, attaches an **SBOM** and **SLSA provenance** (BuildKit `--sbom` /
+`--provenance=mode=max`), **keyless-signs** it (GitHub Actions OIDC → Sigstore/Fulcio, no long-lived
+key), and publishes the **reference** to `ghcr.io/<owner>/sandbox-base`. The base images it builds
+from are **digest-pinned** (`FROM …@sha256:`). The "distinct signing identity" is **enforced** — an
+always-on job proves cosign rejects a wrong identity — not asserted. Runtime stays in-tenancy: an
+adopter **verifies** (`scripts/verify-sandbox-image.sh`, pinned identity) and **mirrors** the signed
+image into their own **Artifact Registry** (`deploy/gcp/modules/artifact-registry`, ✅, `immutable_
+tags` + repo-scoped node-SA pull); the node pulls in-region, so no adopter artifact leaves the
+tenancy (ghcr is OSS distribution, not a runtime path — `GOAL.md` tenet 1). The **consumer-side
+digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, the authoritative content-
+address that rejects a tag-only reference) is the one remaining leg, **(planned)** for B3;
+`verify-sandbox-image.sh` already refuses a tag-only ref.
 
 ## `console7-cloud-local` dependency posture
 Out-of-tree, **consume-by-pin**: `go.mod` requires `github.com/console7/console7` at a

@@ -8,8 +8,8 @@ Wraps the **genuine Claude Code engine** (headless CLI), **pinned** via the `CLA
 build arg — Console7 **orchestrates** the engine and **MUST NOT reimplement the agent** (`GOAL.md`
 "what Console7 is not"; `DESIGN.md` §1.4). Upgrades are **canaried** before fleet rollout (an
 upstream change can shift permission/hook behaviour), so the version is bumped deliberately, never
-floated. The build and runtime base images are tag-pinned; **production MUST pin them by digest**
-before the signed release (this is the artifact that runs untrusted code).
+floated. The build and runtime base images are **digest-pinned** (`@sha256:…` alongside the tag), so
+the bytes are content-addressed and a tag cannot be moved under the build.
 
 ## What's here
 
@@ -62,13 +62,34 @@ SessionProfile ──Render──▶ managed-settings.json (→ /etc/claude-code
                            entrypoint.sh ──exec──▶ claude (non-root, locked by managed-settings)
 ```
 
-## Real vs deferred (PR-3)
+## Release & verification (the signed-release pipeline)
+
+The image is built, SBOM'd, provenance'd, and **keyless-signed** by
+[`.github/workflows/sandbox-image-release.yml`](../../.github/workflows/sandbox-image-release.yml),
+triggered by an operator pushing a `sandbox-image/v*` tag.
+
+- **Distinct signing identity, enforced.** Signing is **keyless** (GitHub Actions OIDC → Sigstore/
+  Fulcio, no long-lived key); the signing identity is that workflow on a release tag. The workflow's
+  always-on `identity-enforcement` job proves on every PR/push that cosign **rejects a wrong
+  identity** — the "distinct signing identity" (`ARCHITECTURE.md` §6.4) is enforced, not asserted.
+- **Publish model.** The maintainer publishes the **reference** image to `ghcr.io/<owner>/sandbox-
+  base` (OSS artifact distribution, like the Go module — *not* a runtime maintainer path). An adopter
+  **verifies** it (`scripts/verify-sandbox-image.sh <ref@sha256:…>`, the same pinned check the
+  pipeline runs) and **mirrors** it into their **own** in-tenancy Artifact Registry
+  (`deploy/gcp/modules/artifact-registry`); the GKE node pulls in-region, so nothing leaves the
+  adopter tenancy at run time (`GOAL.md` tenet 1). An adopter who rebuilds + re-signs under their own
+  identity overrides the pinned anchors via `COSIGN_IDENTITY_REGEXP`/`COSIGN_OIDC_ISSUER`.
+- **SBOM + SLSA provenance** are attached as OCI attestations by BuildKit (`--sbom`,
+  `--provenance=mode=max`).
+- The consumer-side **digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, rejecting
+  a tag-only reference) is the next PR (B3); `verify-sandbox-image.sh` already refuses a tag-only ref.
+
+## Real vs deferred
 
 - **REAL:** the policyHelper renderer (author + operate, tested), the operate tripwire binary
-  (robust + table-tested), the Dockerfile + entrypoint (fail-closed), and the hadolint gate.
-- **DEFERRED — the signed-release pipeline:** building the image and signing it with a **distinct
-  signing identity** + SBOM + SLSA provenance (`DESIGN.md` §8; the ROADMAP Phase-1 "first signed
-  release" milestone) is a separate workstream; this PR lands the artifact + its static-lint gate.
+  (robust + table-tested), the Dockerfile + entrypoint (fail-closed), the hadolint gate, and **the
+  signed-release pipeline** (build + SBOM + SLSA provenance + keyless sign + the identity-pin
+  enforcement test).
 - **DEFERRED — engine wiring:** the orchestrator stays synthetic, so wrapping the engine end to end
   (and the tripwire's "emit an incident to the evidence sink" half) is a clean follow-up — which is
   also the trigger to pivot the out-of-tree `console7-cloud-local` dogfood to its real-engine loop.
