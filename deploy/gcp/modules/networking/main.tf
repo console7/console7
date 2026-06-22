@@ -146,16 +146,17 @@ resource "google_compute_firewall" "deny_egress_all" {
 # destination still hits the floor. The destination is the POD range — the proxy runs as a pod — so
 # at the VPC layer this is necessarily coarse (it permits :3128 to any pod). It is therefore the
 # NODE-layer HALF of the path; the AUTHORITATIVE per-pod restriction is the per-session NetworkPolicy
-# (providers/cloud-gcp renderNamespaceAndEgress), which pins sandbox egress to the
-# console7.dev/egress-proxy namespace ONLY, and only the proxy listens on this port. The proxy itself
-# (on the non-sandbox control pool, NAT egress) enforces the per-session FQDN allowlist
-# (modules/egress-proxy + the orchestrator, B8). Keep var.egress_proxy_port in sync with the
-# providers/cloud-gcp proxyPort (3128). Logged.
+# (providers/cloud-gcp renderNamespaceAndEgress), which pins sandbox egress to THIS session's proxy
+# namespace ONLY (the per-session console7.dev/proxy-for:<id> label), and only the proxy listens on
+# this port. The per-session proxy itself (rendered by providers/cloud-gcp on the non-sandbox control
+# pool, NAT egress) enforces the FQDN allowlist as Squid host:port ACLs. The proxy pods sit in the pod
+# range, so this one ALLOW rule already covers every session's proxy (no per-session firewall change).
+# Keep var.egress_proxy_port in sync with the providers/cloud-gcp proxyPort (3128). Logged.
 resource "google_compute_firewall" "allow_egress_proxy" {
   project     = var.project_id
   name        = "${var.name_prefix}-sandbox-allow-egress-proxy"
   network     = google_compute_network.sandbox.id
-  description = "Narrow ALLOW: sandbox-tagged workloads may egress to the in-cluster forward proxy (pod range) on the proxy port ONLY (priority 900, above the deny floor). The per-pod NetworkPolicy restricts this to the egress-proxy namespace; the proxy enforces the per-session FQDN allowlist. Every other destination stays denied."
+  description = "Narrow ALLOW: sandbox-tagged workloads may egress to the in-cluster forward proxy (pod range) on the proxy port ONLY (priority 900, above the deny floor). The per-pod NetworkPolicy restricts this to the session's own per-session proxy namespace; the proxy enforces the per-session FQDN allowlist. Every other destination stays denied."
   direction   = "EGRESS"
   priority    = 900
 

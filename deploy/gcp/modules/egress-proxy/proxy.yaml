@@ -1,17 +1,23 @@
-# Console7 egress forward proxy (Squid) — the out-of-band FQDN-allowlist enforcement point every
-# sandbox pod reaches for ALL egress. It is the authoritative content-aware perimeter that a
-# NetworkPolicy (IP-based) cannot be: the per-pod NetworkPolicy pins a sandbox to THIS proxy, and the
-# proxy decides which FQDNs:port the session may reach.
+# Console7 egress forward proxy (Squid) — REFERENCE SHAPE.
 #
-# kubectl-applied (kept OUT of Terraform so the deploy stays google-provider-only, exactly like
-# modules/gke/reaper.yaml): `kubectl apply -f proxy.yaml`.
+# >>> NOT APPLIED PER SESSION. The AUTHORITATIVE runtime is the PER-SESSION proxy the CloudProvider
+#     renders in code (providers/cloud-gcp/kube_exec.go: renderPerSessionProxy / renderSquidConf):
+#     one Squid in its OWN <session-id>-proxy namespace, created and torn down with the session, so a
+#     sandbox can reach ONLY its own proxy (no cluster-wide allowlist union — the B8 decision). This
+#     manifest documents that hardened single-proxy SHAPE for an operator to inspect or mirror; it is
+#     NOT the deploy path (do not `kubectl apply` it as a shared proxy — sandboxes pin to the
+#     per-session `console7.dev/proxy-for: <id>` label, not the shared `egress-proxy: "true"` below).
+#
+# It is the authoritative content-aware perimeter a NetworkPolicy (IP-based) cannot be: the per-pod
+# NetworkPolicy pins a sandbox to its proxy, and the proxy decides which FQDNs:port the session may
+# reach. Kept OUT of Terraform so the deploy stays google-provider-only (like modules/gke/reaper.yaml).
 #
 # DEFAULT-DENY: this base config admits NOTHING — no maintainer destinations, adopter-composed only
-# (GOAL.md tenet 1). The orchestrator injects the per-session allowlist ACLs (B8); until then the
-# proxy denies every request. It runs on the NON-sandbox (control) node pool — the gVisor sandbox
-# pool's structural taint keeps this untainted Deployment off it, and the control pool has the
-# sanctioned NAT egress the sandbox pool is denied. The sandbox->proxy path is the VPC ALLOW rule
-# (modules/networking, port 3128) + the per-session NetworkPolicy (providers/cloud-gcp).
+# (GOAL.md tenet 1). The per-session renderer injects the session's allowlist ACLs above the deny
+# floor (egressAllowlistToSquidACL). The proxy runs on the NON-sandbox (control) node pool — the
+# gVisor sandbox pool's structural taint keeps this untainted Deployment off it, and the control pool
+# has the sanctioned NAT egress the sandbox pool is denied. The sandbox->proxy path is the VPC ALLOW
+# rule (modules/networking, port 3128) + the per-session NetworkPolicy (providers/cloud-gcp).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -37,9 +43,9 @@ metadata:
   namespace: console7-egress-proxy
 data:
   squid.conf: |
-    # DEFAULT-DENY forward proxy. The per-session allowlist (dstdomain/port ACLs + matching
-    # http_access allow lines) is injected ABOVE the final deny by the orchestrator (B8); until then
-    # the proxy admits NOTHING.
+    # DEFAULT-DENY forward proxy. In the authoritative per-session renderer the session's allowlist
+    # (dstdomain/port ACLs + matching http_access allow lines) is composed ABOVE the final deny by
+    # egressAllowlistToSquidACL (providers/cloud-gcp); with no allow line the proxy admits NOTHING.
     http_port 3128
     acl CONNECT method CONNECT
     # No caching: this is a policy gateway, not a cache — keep it stateless and memory-light.

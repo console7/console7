@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph DPZ["TB3 — Sandbox (untrusted, default-deny egress)"]
       ENGp[["Claude Code engine<br/>(invocation seam ✅ #47; live in-pod Tier-2)"]]
-      PRX[["egress proxy (planned)"]]
+      PRX[["egress proxy — per-session Squid"]]
     end
     SMs[("Secret Manager")]
     KMSs[("Cloud KMS")]
@@ -95,10 +95,10 @@ flowchart TB
   classDef ext fill:#dfe6e9,stroke:#636e72,color:#2d3436;
   classDef danger fill:#ffd6a5,stroke:#c0392b,color:#5b1b14;
   %% faded + dashed = target state (not yet coded & landed); solid = implemented & landed
-  class UI,ORC,PDPp,EVp proc;
+  class UI,ORC,PDPp,EVp,PRX proc;
   class DLPp,OGp procPlan;
   class BRKp broker;
-  class ENGp,PRX dpPlan;
+  class ENGp dpPlan;
   class SMs,KMSs,EVs,TELs store;
   class USER,IDP,GH,SORX,SIEMX,MODEL,MAINT ext;
   class UNTRUST danger;
@@ -118,9 +118,9 @@ flowchart TB
 ## Trust boundaries & STRIDE posture
 | TB | Boundary | Top STRIDE threats | Authoritative mitigation (✅ impl / ◻ planned) |
 |---|---|---|---|
-| **TB1** | Adopter tenancy ↔ outside | **I**nfo-disclosure (exfil of code/creds); **T**ampering of egress dest | ✅ default-deny egress perimeter — VPC floor (#39) + Cloud NAT (#43) + per-session NetworkPolicy (cloud-gcp #41 on Dataplane V2 #43) landed; ◻ out-of-band FQDN-allowlist proxy (PR-3); ✅ single named crossing (inference, by design); ◻ pre-egress DLP for T1/T2; ✅ maintainer receives nothing (no phone-home) |
+| **TB1** | Adopter tenancy ↔ outside | **I**nfo-disclosure (exfil of code/creds); **T**ampering of egress dest | ✅ default-deny egress perimeter — VPC floor (#39) + Cloud NAT (#43) + per-session NetworkPolicy (cloud-gcp #41 on Dataplane V2 #43) landed; ✅ per-session out-of-band FQDN-allowlist Squid proxy (cloud-gcp B8; live egress/metadata-deny proof ◻ B11); ✅ single named crossing (inference, by design); ◻ pre-egress DLP for T1/T2; ✅ maintainer receives nothing (no phone-home) |
 | **TB2** | Control plane ↔ key broker | **E**oP (control-plane compromise reaches keys); **S**poofing of lineage | ✅ separate key-broker package (distinct image/signing identity ◻ planned); ✅ keys never returned to control plane (opaque refs); ✅ NHI signing keys custodied in broker, die with session |
-| **TB3** | Control/data plane ↔ sandbox | **I**nfo-disclosure via lethal trifecta; **T**ampering by untrusted code; **E**oP out of sandbox | ✅ gVisor syscall confinement (gVisor sandbox node pool #43, cloud-gcp #41); ✅ default-deny egress from birth (per-session NetworkPolicy #41, enforced by Dataplane V2 #43); ✅ node-SA metadata concealment (GKE_METADATA #43); ✅ ephemeral/irreversible teardown (cloud-gcp destroy); ◻ no-prod-data default; ◻ MCP allowlist; ◻ out-of-band FQDN-allowlist proxy (PR-3) |
+| **TB3** | Control/data plane ↔ sandbox | **I**nfo-disclosure via lethal trifecta; **T**ampering by untrusted code; **E**oP out of sandbox | ✅ gVisor syscall confinement (gVisor sandbox node pool #43, cloud-gcp #41); ✅ default-deny egress from birth (per-session NetworkPolicy #41, enforced by Dataplane V2 #43); ✅ node-SA metadata concealment (GKE_METADATA #43); ✅ ephemeral/irreversible teardown (cloud-gcp destroy); ◻ no-prod-data default; ◻ MCP allowlist; ✅ per-session out-of-band FQDN-allowlist Squid proxy (cloud-gcp B8; live egress/metadata-deny proof ◻ B11) |
 | **TB4** | Maintainer ↔ adopter | **T**ampering (supply-chain); **S**poofing of releases | ✅ pinned deps + SHA-pinned actions + gitleaks/govulncheck/CodeQL; ◻ SBOM + SLSA L3 provenance + signed releases (tracked targets) — see view [07](07-technology-lifecycle-controls.md)/[08](08-dependency-supply-chain.md) |
 | **TB5** | Session ↔ production estate | **T**ampering (unauthorised mutation); **R**epudiation | ✅ "observe ≠ actuate" design; ◻ read-only operate IAM (authoritative); ◻ Observe Gateway redaction + query audit; ◻ PreToolUse mutating-command tripwire; ✅ PR-only exit (no merge/actuate) |
 | **AuthN** | User ↔ UI | **S**poofing of identity | ✅ cryptographic SSO assertion verification; ✅ groups from IdP (no self-assert) |
@@ -130,10 +130,11 @@ flowchart TB
    read path, expiry caps. (✅ behavioural invariants proven; cryptographic-boundary
    hardening continues P1+.)
 2. **Lethal trifecta / indirect prompt injection** → TB1/TB3: remove a leg (default-deny
-   egress ✅ — VPC floor #39 + NAT + per-session NetworkPolicy #41/#43 landed; ◻ out-of-band
-   FQDN-allowlist proxy PR-3; no-prod-data ◻; MCP allowlist ◻) + pre-egress DLP ◻. *(The
-   authoritative egress/sandbox boundary is now largely landed in core; the FQDN-allowlist
-   proxy, DLP, and MCP allowlist remain — see TB1/TB3 and README observation 1.)*
+   egress ✅ — VPC floor #39 + NAT + per-session NetworkPolicy #41/#43 landed; ✅ per-session
+   FQDN-allowlist Squid proxy rendered by cloud-gcp (B8), live egress/metadata-deny proof ◻ B11;
+   no-prod-data ◻; MCP allowlist ◻) + pre-egress DLP ◻. *(The authoritative egress/sandbox
+   boundary is now landed in core — VPC floor + per-session NetworkPolicy + per-session FQDN
+   proxy; DLP and the MCP allowlist remain — see TB1/TB3 and README observation 1.)*
 3. **Cross-tier escalation** → AuthZ: take-the-max + step-up; scope from target's tier ×
    stratum, never the launcher. (◻ P3; P1 admits only Author × T3/S1, fail-closed.)
 4. **Subscription-credential misuse / unattended drift** → TB2/TB1: attended +

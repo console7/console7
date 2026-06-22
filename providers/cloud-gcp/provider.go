@@ -166,6 +166,15 @@ func (p *Provider) ProvisionSandbox(ctx context.Context, spec interfaces.Sandbox
 	// the perimeter does not. If the perimeter cannot be set, nothing is provisioned — fail closed.
 	allowlist := append([]string(nil), spec.Egress.Allowlist...)
 	if err := p.egress.Set(ctx, h, allowlist); err != nil {
+		// Set provisions TWO namespaces (the per-session forward proxy AND the sandbox perimeter); a
+		// failure of the second apply after the first succeeded would orphan the proxy namespace. Roll
+		// BOTH back (Clear is idempotent --ignore-not-found) on a DETACHED, bounded context — the
+		// caller's ctx may be the very reason Set failed — exactly as the failed-Provision path below.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		if cerr := p.egress.Clear(cleanupCtx, h); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("cloudgcp: clear perimeter after failed egress set: %w", cerr))
+		}
 		return interfaces.SandboxHandle{}, fmt.Errorf("cloudgcp: set egress perimeter before provision: %w", err)
 	}
 	// Now provision the isolated compute. If it fails, tear the perimeter back down so we do not

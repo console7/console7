@@ -128,6 +128,14 @@ func (e *InMemoryEgressController) PolicyOf(h interfaces.SandboxHandle) ([]strin
 	return append([]string(nil), p...), ok
 }
 
+// Cleared reports whether handle's perimeter was torn down via Clear. Test-only (lets a test assert
+// the provider rolled back the perimeter — e.g. after a failed egress Set or workload provision).
+func (e *InMemoryEgressController) Cleared(h interfaces.SandboxHandle) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cleared[h.ID]
+}
+
 // SetFailSet toggles forced Set failure (for any allowlist). Test-only.
 func (e *InMemoryEgressController) SetFailSet(b bool) { e.mu.Lock(); e.failSet = b; e.mu.Unlock() }
 

@@ -36,4 +36,9 @@ sandbox. Independent analysis of an adjacent platform (see `docs/THREAT-MODEL.md
   and auditable**; Console7 MUST NOT silently add hosts (`GOAL.md` tenet 1) — the exact
   anti-pattern the adjacent platform exhibited.
 
-> P0: placeholder — requirements only, no implementation.
+> Realised by the **per-session forward proxy** the reference `CloudProvider` renders
+> (`providers/cloud-gcp/kube_exec.go`: `renderPerSessionProxy` / `renderSquidConf`) — one Squid per
+> `<session-id>-proxy` namespace, default-deny, reached by IP with no in-sandbox DNS, behind the VPC
+> deny-floor + per-session NetworkPolicy. The node-local **metadata block** is the GKE metadata server
+> (GKE_METADATA mode) on the sandbox node pool, not this proxy. The live egress/metadata-deny proof is
+> the B11 integration test. This directory stays a requirements/helper README.

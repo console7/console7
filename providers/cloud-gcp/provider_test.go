@@ -158,6 +158,20 @@ func TestProvision_RollsBackPerimeterIfWorkloadFails(t *testing.T) {
 	}
 }
 
+func TestProvision_ClearsPerimeterIfEgressSetFails(t *testing.T) {
+	p, _, eg := newTestProvider(t, nil)
+	eg.SetFailSet(true)
+	if _, err := p.ProvisionSandbox(context.Background(), baseSpec()); err == nil {
+		t.Fatal("expected provision to fail when the egress perimeter cannot be set")
+	}
+	// Set now provisions TWO namespaces (the per-session proxy + the sandbox perimeter); a partial
+	// Set must be rolled back via Clear so the proxy namespace is not orphaned (the handle id is
+	// deterministic in the test rig — the first provision is test-sb-1).
+	if !eg.Cleared(interfaces.SandboxHandle{ID: "test-sb-1"}) {
+		t.Fatal("a failed egress Set was not rolled back (the per-session proxy namespace would orphan)")
+	}
+}
+
 func TestProvision_FreshHandlePerCall(t *testing.T) {
 	p, _, _ := newTestProvider(t, nil)
 	h1, _ := p.ProvisionSandbox(context.Background(), baseSpec())
