@@ -53,7 +53,10 @@
 //
 //   - REAL: per-user DEK envelope, KMS wrap/unwrap with owner-bound AAD, Secret Manager
 //     storage, attended/single-beneficiary + ownership injection gates, expiry-capped
-//     ephemeral leases, crypto-shred on revoke.
+//     ephemeral leases, crypto-shred on revoke. Plus (B9b) the adopter's shared ORG API
+//     credential: sealed under its own AAD-bound envelope (SetOrgCredential) and injected into a
+//     session's sandbox by reference with the same ownership gate, no plaintext returned
+//     (InjectOrgCredential) — the org-API lane (GOAL.md tenet 2).
 //   - The production Injector (real data-plane sandbox delivery) is SATISFIED STRUCTURALLY and
 //     fail-closed — the providers/cloud-gcp Provider implements the Injector seam (Owns/
 //     DeliverIfOwned, B5) — but is NOT YET WIRED into a running session: this convenience New still

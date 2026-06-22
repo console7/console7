@@ -279,6 +279,91 @@ func (p *Provider) InjectSubscriptionToken(ctx context.Context, in interfaces.Su
 	return nil
 }
 
+// orgSecretID is the fixed Secret Manager id the adopter's shared ORG API credential is sealed
+// under — org-wide, not per-subject. The same value is the AAD bound into the KMS wrap.
+func (p *Provider) orgSecretID() string { return p.prefix + "-org" }
+
+// SetOrgCredential seals the adopter's shared ORG API credential under a fresh DEK, wraps that DEK
+// under the KMS KEK (AAD-bound to the org secret id), and persists only the ciphertext envelope. It
+// is provider CONFIGURATION supplied out-of-band at wiring time (modelling the adopter loading their
+// org key into the secrets manager) — NOT on the SecretsProvider seam, so the control plane never
+// carries the plaintext through the seam. An empty key destroys it (injection then fails closed).
+//
+// ROTATION/REVOCATION is ORG-WIDE and out-of-band (this is one shared key, not per-subject — there
+// is no per-subject tombstone like RevokeSubject): SetOrgCredential replaces it for every future
+// session, and an empty key clears the lane for all. A copy already injected into a live sandbox is
+// reaped only by tearing that sandbox down (the CloudProvider's job), exactly as for a subscription
+// token. There is one org credential per provider instance (the fixed orgSecretID).
+func (p *Provider) SetOrgCredential(ctx context.Context, key []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sid := p.orgSecretID()
+	if len(key) == 0 {
+		return p.store.Destroy(ctx, sid)
+	}
+	aad := []byte(sid)
+	dek, err := mintDEK()
+	if err != nil {
+		return err
+	}
+	defer zero(dek)
+	sealedKey, err := seal(dek, key, aad)
+	if err != nil {
+		return err
+	}
+	wrapped, kekVersion, err := p.kek.WrapDEK(ctx, dek, aad)
+	if err != nil {
+		return err
+	}
+	_, err = p.store.Put(ctx, sid, payload{kekVersion: kekVersion, wrappedDEK: wrapped, sealedToken: sealedKey}.marshal())
+	return err
+}
+
+// InjectOrgCredential decrypts the adopter's shared ORG API credential and delivers it ONLY into the
+// session's own sandbox. It returns nil on success and never the plaintext; it fails CLOSED if no org
+// credential is configured or on any decrypt/store error. There is no attended/beneficiary gate — the
+// org credential backs any org-API-lane session (GOAL.md tenet 2).
+func (p *Provider) InjectOrgCredential(ctx context.Context, in interfaces.OrgCredentialInjection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Ownership gate (cheap fail-fast before the KMS round-trip): the sandbox must belong to this
+	// subject's session. The authoritative check is re-done atomically with delivery below.
+	if !p.inject.Owns(in.Sandbox, in.Subject, in.SessionID) {
+		return errors.New("secretsgcp: sandbox does not belong to the subject's session")
+	}
+	sid := p.orgSecretID()
+	aad := []byte(sid)
+	blob, found, err := p.store.Get(ctx, sid)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("secretsgcp: no org credential configured (the org-API lane requires SetOrgCredential)")
+	}
+	pl, err := unmarshalPayload(blob)
+	if err != nil {
+		return err
+	}
+	dek, err := p.kek.UnwrapDEK(ctx, pl.wrappedDEK, pl.kekVersion, aad)
+	if err != nil {
+		return err
+	}
+	defer zero(dek)
+	key, err := open(dek, pl.sealedToken, aad)
+	if err != nil {
+		return err
+	}
+	defer zero(key)
+	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery
+	// (DeliverIfOwned closes the teardown race). The plaintext never leaves this call by any other path.
+	if !p.inject.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, key) {
+		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
+	}
+	return nil
+}
+
 // RevokeSubject deletes a user's at-rest material, making it unrecoverable. Destroying the
 // secret destroys the only copy of the per-user wrapped DEK, so the sealed token is
 // crypto-shredded; the KEK is left untouched (it wraps every other user's DEK).

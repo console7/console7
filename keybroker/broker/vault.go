@@ -37,6 +37,18 @@ func (b *Broker) InjectSubscription(ctx context.Context, in interfaces.Subscript
 	return b.Secrets.InjectSubscriptionToken(ctx, in)
 }
 
+// InjectOrgCredential asks the SecretsProvider to inject the adopter's shared ORG API
+// credential into a session's sandbox (the org-API lane — orchestrated/headless work, or an
+// attended session that did not opt into its subscription; GOAL.md tenet 2). The seam verifies
+// the sandbox belongs to the session and injects only there; the broker only forwards the facts
+// and never carries the plaintext.
+func (b *Broker) InjectOrgCredential(ctx context.Context, in interfaces.OrgCredentialInjection) error {
+	if b.Secrets == nil {
+		return errors.New("broker: missing secrets seam")
+	}
+	return b.Secrets.InjectOrgCredential(ctx, in)
+}
+
 // ResolveInference asks the InferenceBackend to route a session to its model endpoint,
 // enforcing the attended/unattended seam. The discriminator is the (Attended,
 // Beneficiaries) facts in sel, not how the session was invoked. A nil seam is reported as

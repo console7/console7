@@ -35,7 +35,7 @@ flowchart TB
     %% ---------- Key broker (Tier-1, SEPARATE artifact) ----------
     subgraph KB["key broker &mdash; Tier-1, separately hardened, DISTINCT signing identity"]
       direction TB
-      BRK["✅ broker<br/>mint per-session NHI; subscription vault<br/>pass-through; sign session; route inference"]
+      BRK["✅ broker<br/>mint per-session NHI; subscription + org-cred<br/>inject pass-through; sign session; route inference"]
       SIGN["✅ signing<br/>SSO&rarr;NHI bind; Ed25519 DevCA<br/>commit/record/checkpoint signatures"]
     end
 
@@ -161,7 +161,7 @@ flowchart TB
 ### Key broker (Tier-1, `keybroker/`) — separate artifact, distinct signing identity
 | Container | Status | Responsibility |
 |---|---|---|
-| `broker` | ✅ `broker.go`, `vault.go` | Mints the per-session **NHI**, mints short-lived cloud + SCM credentials (opaque `CredentialRef`), custodies the session signing keys, and proxies subscription store/inject + inference routing + PR opening to the seams. **Never returns key material to the control plane.** |
+| `broker` | ✅ `broker.go`, `vault.go` | Mints the per-session **NHI**, mints short-lived cloud + SCM credentials (opaque `CredentialRef`), custodies the session signing keys, and proxies subscription store/inject, **org-credential inject (the org-API lane, B9b)**, inference routing, and PR opening to the seams. **Never returns key material to the control plane.** |
 | `signing` | ✅ `signer.go`, `nhi.go`, `ca_dev.go`, `sink.go` | Binds SSO subject → per-session NHI (`nhi/<sessionID>/<persona>`), issues an Ed25519 cert from a **DevCA** (dev-only; Sigstore/org-CA later — *(assumed)*), and produces lineage-stamped `Signature` and `SinkSignature` with domain-separation tags. |
 
 ### Data plane (`sandbox/`) — untrusted, ephemeral, distinct base image

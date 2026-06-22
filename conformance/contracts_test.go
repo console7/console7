@@ -43,6 +43,10 @@ func TestSecretsProvider_InjectSubscriptionToken(t *testing.T) {
 	runContract(t, "SecretsProvider", "InjectSubscriptionToken")
 }
 
+func TestSecretsProvider_InjectOrgCredential(t *testing.T) {
+	runContract(t, "SecretsProvider", "InjectOrgCredential")
+}
+
 func TestSecretsProvider_RevokeSubject(t *testing.T) {
 	runContract(t, "SecretsProvider", "RevokeSubject")
 }

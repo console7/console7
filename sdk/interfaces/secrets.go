@@ -62,6 +62,23 @@ type SubscriptionInjection struct {
 	Beneficiaries int
 }
 
+// OrgCredentialInjection identifies an injection of the adopter's shared ORG API credential
+// (the engine's ANTHROPIC_API_KEY for the org-API lane) into one session's sandbox. Unlike a
+// subscription token it is NOT beneficiary-bound: the org credential backs EVERY session the
+// orchestrator routes to the org-API lane — anything orchestrated/scheduled/headless, OR an
+// attended session whose user did not opt into their subscription (GOAL.md tenet 2 — subscription
+// is permitted, never mandatory). So it carries only the binding facts needed to deliver into the
+// right sandbox, no attended/beneficiary flags.
+type OrgCredentialInjection struct {
+	// Subject is the session's human subject — used (with SessionID) to verify the target sandbox
+	// is the one provisioned for this session before the org credential is delivered into it.
+	Subject Subject
+	// SessionID is the session the sandbox belongs to; binds the injection to one session.
+	SessionID SessionID
+	// Sandbox is the session's sandbox to inject the org credential into.
+	Sandbox SandboxHandle
+}
+
 // SecretsProvider abstracts secret storage, envelope encryption, and KMS
 // (ARCHITECTURE.md §5; default ref: GCP Secret Manager + Cloud KMS). It is a broker,
 // not a vault the control plane reads: it mints and injects, it does not hand keys
@@ -101,6 +118,19 @@ type SecretsProvider interface {
 	// it), and MUST NEVER use it for any beneficiary but its owner or for any
 	// unattended/orchestrated/multi-beneficiary session (DESIGN.md §2.2, §3).
 	InjectSubscriptionToken(ctx context.Context, in SubscriptionInjection) error
+
+	// InjectOrgCredential injects the adopter's ORG API credential — configured out-of-band on the
+	// provider, NEVER supplied by the control plane — into a session's sandbox for the org-API lane.
+	//
+	// SECURITY: the implementation MUST verify in.Sandbox belongs to in.Subject's in.SessionID and
+	// MUST inject the credential ONLY into that owning sandbox; it MUST NOT return the plaintext
+	// credential to the caller (the control plane never sees it); and it MUST fail closed if no org
+	// credential is configured (refuse, rather than let the engine run unauthenticated). The org
+	// credential is org-wide, not per-user, so — unlike InjectSubscriptionToken — there is no
+	// attended/single-beneficiary gate: it backs ANY session routed to the org-API lane, which is
+	// exactly the orchestrated/scheduled/headless/multi-beneficiary work GOAL.md tenet 2 assigns to
+	// org API keys (DESIGN.md §2.1, §3).
+	InjectOrgCredential(ctx context.Context, in OrgCredentialInjection) error
 
 	// RevokeSubject deletes a user's stored material on revocation/offboarding
 	// (e.g. SCIM deprovision).

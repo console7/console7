@@ -45,6 +45,11 @@ func newBenchWithAllowlist(t *testing.T, allowlist []string) bench {
 	reg := devkit.NewSandboxRegistry()
 	cloud := devkit.NewMemCloud(reg)
 	secrets := devkit.NewMemSecrets(reg)
+	// The adopter's shared org API credential, configured out-of-band — the org-API lane injects it
+	// into the sandbox (the control plane never carries its plaintext through the seam).
+	if err := secrets.SetOrgCredential([]byte("org-api-key-fixture")); err != nil {
+		t.Fatalf("set org credential: %v", err)
+	}
 	scm := devkit.NewMemSCM(15 * time.Minute)
 	ca := signing.NewDevCA()
 	binder := signing.NewNHIBinder(ca)
@@ -226,12 +231,22 @@ func TestRun_UnattendedRoutesOrgAPI(t *testing.T) {
 	if sum.Inference.Mode != interfaces.ModeOrgAPI || sum.Inference.URL != orgAPIURL {
 		t.Errorf("inference = %+v, want org API %q", sum.Inference, orgAPIURL)
 	}
-	// No subscription-injected event for an unattended session.
+	// The org-API lane injects the org credential (never a subscription token) for an unattended session.
+	var sawOrg, sawSub bool
 	for i := 0; i < b.evidence.Len(); i++ {
 		rec, _, _ := b.evidence.At(i)
-		if rec.Type == "subscription-injected" {
-			t.Error("unattended session injected a subscription token")
+		switch rec.Type {
+		case "subscription-injected":
+			sawSub = true
+		case "org-credential-injected":
+			sawOrg = true
 		}
+	}
+	if sawSub {
+		t.Error("unattended session injected a subscription token")
+	}
+	if !sawOrg {
+		t.Error("unattended (org-API) session did not inject the org credential")
 	}
 }
 
