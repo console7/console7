@@ -186,3 +186,72 @@ func (r *InMemoryEngineRunner) LastTask() (interfaces.EngineTask, bool) {
 
 // SetFailRun toggles forced Run failure, to drive the provider's RunTask error path. Test-only.
 func (r *InMemoryEngineRunner) SetFailRun(b bool) { r.mu.Lock(); r.failRun = b; r.mu.Unlock() }
+
+// denyDeliverer is the fail-closed CredentialDeliverer NewWithPorts defaults to: it delivers
+// nothing, so a Provider with no real deliverer wired refuses every injection rather than dropping
+// material silently. The real adapter is kubeCredentialDeliverer.
+type denyDeliverer struct{}
+
+func (denyDeliverer) Deliver(context.Context, interfaces.SandboxHandle, []byte) error {
+	return errors.New("cloudgcp: no credential deliverer wired (fail closed)")
+}
+func (denyDeliverer) Wipe(context.Context, interfaces.SandboxHandle) error { return nil }
+
+// InMemoryCredentialDeliverer records the material delivered per handle (and which handles were
+// wiped), so the provider's ownership-gated DeliverIfOwned can be exercised without a cluster. A
+// thin effect recorder like the other fakes; it can be told to fail Deliver to drive the
+// provider's fail-closed delivery path.
+type InMemoryCredentialDeliverer struct {
+	mu          sync.Mutex
+	delivered   map[string][]byte
+	wiped       map[string]bool
+	failDeliver bool
+}
+
+// NewInMemoryCredentialDeliverer returns a ready InMemoryCredentialDeliverer.
+func NewInMemoryCredentialDeliverer() *InMemoryCredentialDeliverer {
+	return &InMemoryCredentialDeliverer{delivered: make(map[string][]byte), wiped: make(map[string]bool)}
+}
+
+// Deliver records a copy of material for handle (or fails if SetFailDeliver(true)).
+func (d *InMemoryCredentialDeliverer) Deliver(_ context.Context, h interfaces.SandboxHandle, material []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.failDeliver {
+		return errors.New("cloudgcp/fake: forced Deliver failure")
+	}
+	d.delivered[h.ID] = append([]byte(nil), material...)
+	delete(d.wiped, h.ID)
+	return nil
+}
+
+// Wipe records the shred of handle's material.
+func (d *InMemoryCredentialDeliverer) Wipe(_ context.Context, h interfaces.SandboxHandle) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.delivered, h.ID)
+	d.wiped[h.ID] = true
+	return nil
+}
+
+// Delivered returns a copy of the material recorded for handle. Test-only.
+func (d *InMemoryCredentialDeliverer) Delivered(h interfaces.SandboxHandle) ([]byte, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	m, ok := d.delivered[h.ID]
+	return append([]byte(nil), m...), ok
+}
+
+// Wiped reports whether handle's material was wiped. Test-only.
+func (d *InMemoryCredentialDeliverer) Wiped(h interfaces.SandboxHandle) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.wiped[h.ID]
+}
+
+// SetFailDeliver toggles forced Deliver failure, to drive DeliverIfOwned's fail-closed path. Test-only.
+func (d *InMemoryCredentialDeliverer) SetFailDeliver(b bool) {
+	d.mu.Lock()
+	d.failDeliver = b
+	d.mu.Unlock()
+}

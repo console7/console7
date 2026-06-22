@@ -63,6 +63,17 @@ handle IDs.
   does not reimplement it. The Anthropic API key is NOT in the pod spec — it is injected at run time
   (B5/B9). *(Digest-pinning is content-addressed at the kubelet, not admission-enforced; a binding
   admission policy requiring the signature is Phase-2 hardening.)*
+- **REAL (B4):** the LOCKED managed-settings are rendered at provision time — an init container runs
+  `console7-policyhelper` (non-root) and writes the `0444` policy into a memory `emptyDir` the engine
+  mounts **read-only** at `/etc/claude-code` (the readOnly mount is the authoritative lock). The
+  namespace is admitted under **Pod Security Admission `restricted`** (closes the `hostNetwork`
+  metadata-bypass).
+- **REAL (B5):** the data-plane **credential Injector** — the Provider satisfies the
+  `providers/secrets-gcp` `Injector` seam (`Owns`/`DeliverIfOwned`): an ownership-checked
+  (subject+session, atomic under the lock), fail-closed write of credential material into the pod's
+  **memory** volume via `kubectl exec` over **stdin** (never argv), wiped on Destroy (the memory
+  volume also dies with the pod). The engine's consumption of that credential as `ANTHROPIC_API_KEY`
+  is B9.
 - **DEFERRED to the egress proxy (B7):** the out-of-band forward proxy that does the FQDN
   allowlisting the `EgressController`'s allowlist feeds (a NetworkPolicy is IP-based and cannot
   match FQDNs).

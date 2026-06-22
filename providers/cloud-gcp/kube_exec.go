@@ -359,6 +359,42 @@ func nonEmptyLines(s string) []string {
 	return out
 }
 
+// credentialPath is the in-pod file the CredentialDeliverer writes short-lived credential material
+// to. It lives under /run/console7 — a `medium: Memory` emptyDir mounted into the sandbox container
+// (renderSandboxPod) — so the secret is tmpfs-only (never on disk) and dies with the pod. The value
+// is a filesystem PATH, not a credential, so gosec G101 is a false positive here (RISKS R-5).
+const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
+
+// kubeCredentialDeliverer realises CredentialDeliverer: it writes credential material into a live
+// sandbox pod's memory volume via `kubectl exec`, feeding the material over STDIN (never argv) so it
+// cannot leak into a process table, shell history, or this adapter's logs. The provider only calls
+// Deliver after re-verifying ownership under its lock (DeliverIfOwned). Like the rest of this file it
+// is exercised live only by the integration test; CI drives the provider over the in-memory fake.
+type kubeCredentialDeliverer struct {
+	run *kubeRunner
+}
+
+// Deliver writes material to credentialPath in the sandbox container. `umask 077` makes the file
+// 0600 (owner-only); the engine runs as that same non-root uid and reads its own credential. The
+// material is the exec's STDIN, so it is never an argument. cat truncates+rewrites, so a re-deliver
+// (a refreshed token) replaces the prior bytes.
+func (d *kubeCredentialDeliverer) Deliver(ctx context.Context, h interfaces.SandboxHandle, material []byte) error {
+	_, err := d.run.run(ctx, "kubectl", material,
+		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "-i", "--",
+		"/bin/sh", "-c", "umask 077; cat > "+credentialPath)
+	return err
+}
+
+// Wipe best-effort shreds the credential file. The authoritative wipe is the pod's deletion (the
+// volume is medium: Memory), so an exec failure here (e.g. the pod is already gone) is tolerated by
+// the caller; `rm -f` is idempotent.
+func (d *kubeCredentialDeliverer) Wipe(ctx context.Context, h interfaces.SandboxHandle) error {
+	_, err := d.run.run(ctx, "kubectl", nil,
+		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--",
+		"/bin/sh", "-c", "rm -f "+credentialPath)
+	return err
+}
+
 // jsonScalar encodes s as a double-quoted YAML scalar via encoding/json (a JSON string is a valid
 // YAML double-quoted scalar, with the YAML-structural characters — quote, backslash, newline,
 // colon, etc. — escaped). For the validated values this adapter renders (the persona enum,
@@ -407,6 +443,10 @@ spec:
       emptyDir:
         medium: Memory
         sizeLimit: 1Mi
+    - name: credentials
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
     - name: session-profile
       configMap:
         name: %[1]s-session-profile
@@ -445,6 +485,8 @@ spec:
         - name: managed-settings
           mountPath: /etc/claude-code
           readOnly: true
+        - name: credentials
+          mountPath: /run/console7
       resources:
         requests:
           cpu: 250m
