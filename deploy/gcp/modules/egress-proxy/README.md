@@ -36,10 +36,27 @@ non-allowlisted/metadata egress-deny tests real (rather than a vacuous deny-all)
 Keep the port (**3128**) in sync across all three (`var.egress_proxy_port`, the NetworkPolicy, and
 `providers/cloud-gcp` `proxyPort`).
 
-## Deferred
+## Deferred — with B8 design preconditions (record these so the next rung can't regress)
 
-- **The per-session allowlist injection** (the orchestrator composes the `host:port` ACLs and updates
-  the proxy/ConfigMap; the sandbox is given the proxy IP + `HTTPS_PROXY`) is **B8**.
+- **The per-session allowlist injection** (the orchestrator composes the `host:port` ACLs; the sandbox
+  is given the proxy IP + `HTTPS_PROXY`) is **B8**. **Two preconditions B8 MUST resolve (CO-2):**
+  - **Per-session SOURCE discriminator.** This is ONE shared Squid + ONE shared ConfigMap; every
+    sandbox is pinned to it. A `dstdomain`-only `http_access allow` (no `src` ACL) would admit that
+    FQDN for *every* client on the shared listener → session allowlists become a cluster-wide **union**
+    (a tenet-4 / scope-follows-artefact violation). B8 MUST pick a discriminator — src-IP-keyed ACLs
+    (`acl sess_<id> src <pod-ip/32>` paired with each allow), per-session proxy-auth, or a
+    per-namespace proxy instance — **before** composing the first allow line. (Today's config is
+    genuinely default-deny, so there is no current bleed; the hole would be *introduced* by a naive B8.)
+  - **Config RELOAD model.** `squid.conf` is **subPath-mounted**, and a subPath ConfigMap mount does
+    **not** receive updates — editing the ConfigMap will not change the file a running Squid reads.
+    B8 needs a different model (dir-mount + `include conf.d/*.conf` + a reloader/SIGHUP sidecar, or a
+    per-session proxy), NOT "edit the shared ConfigMap in place".
+- **HA / SPOF (CO-16).** This is a **single replica** with no PDB, anti-affinity, or (until the probe
+  added in this PR) readiness gate. Once B8 routes sessions through it, a node drain/upgrade/eviction
+  severs egress for **every running session at once** (fail-*safe* — egress denies, never opens — but
+  data-plane-wide blast radius). Any multi-replica answer must also resolve how per-session config
+  reaches each replica (see the reload model above). Tracked, not yet hardened.
+- **Ingress restriction (CO-2).** No ingress NetworkPolicy yet bounds *who* may open `:3128` to Squid;
+  add one (allow only the managed sandbox namespaces) alongside the source discriminator.
 - **Reachability + the egress-deny proof** (non-allowlisted host and every metadata endpoint fail
   *through* the proxy; genuine inference succeeds) is the live **B11** integration test.
-- **PSA `restricted`** for the proxy namespace, once the Squid image is confirmed to run non-root.

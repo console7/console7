@@ -21,10 +21,13 @@ metadata:
     # Selected by the sandbox NetworkPolicy's namespaceSelector (providers/cloud-gcp): the ONLY
     # egress destination a sandbox pod is permitted at the K8s layer. Keep this key/value in sync.
     console7.dev/egress-proxy: "true"
-    # Trusted infra (not untrusted agent code): PSA `baseline` forbids privileged/host namespaces.
-    # `restricted` (non-root + dropped caps) is a hardening follow-up once the Squid image is
-    # confirmed to run non-root cleanly (it sets up as root then drops to the squid user).
-    pod-security.kubernetes.io/enforce: baseline
+    # PSA `restricted`: the Squid Deployment below already meets it (runAsNonRoot uid 65532, read-only
+    # root FS, drop ALL caps, RuntimeDefault seccomp, no host namespaces, emptyDir/configMap volumes),
+    # so enforce it at the namespace too — a future manifest edit that drops the securityContext is then
+    # rejected at admission, not silently admitted. (PSA enforce adds no NEW live failure mode beyond
+    # what the pod's own runAsNonRoot already imposes; if B11 finds the image can't run non-root, that
+    # would fail the pod regardless of PSA, and both are relaxed together.)
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
 ---
 apiVersion: v1
@@ -91,12 +94,24 @@ spec:
           ports:
             - name: proxy
               containerPort: 3128
+          # Gate Service Endpoints on Squid actually listening (prevents the connect-before-listen
+          # race where the Service routes to a still-starting pod). A SPOF caveat remains until B8/HA
+          # (single replica, no PDB) — see modules/egress-proxy/README.md "Deferred".
+          readinessProbe:
+            tcpSocket:
+              port: 3128
+            initialDelaySeconds: 2
+            periodSeconds: 5
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            # NB (B8): squid.conf is subPath-mounted, so a ConfigMap UPDATE does NOT reach the running
+            # Squid (subPath freezes the file at pod creation). The per-session-allowlist reload model
+            # (B8) needs a different mount — dir-mount + `include conf.d/*.conf` + a reloader/SIGHUP
+            # sidecar, or a per-session proxy — NOT "edit this ConfigMap in place". See README "Deferred".
             - name: squid-config
               mountPath: /etc/squid/squid.conf
               subPath: squid.conf

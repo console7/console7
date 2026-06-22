@@ -70,12 +70,13 @@ type Config struct {
 // are valid DNS-1123 labels and match the deploy modules' name_prefix validation.
 var namePrefixRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,17}[a-z0-9])?$`)
 
-// sandboxImageRe requires a digest-pinned image reference: a non-empty repository part, then a
-// "@sha256:" digest of 64 lowercase hex at the end. It rejects a tag-only ("repo:tag") reference —
-// only the digest content-addresses the bytes the kubelet runs. A ref MAY carry both a tag and a
-// digest ("repo:tag@sha256:..."); the digest is always last, so anchoring the digest at the end is
-// sufficient.
-var sandboxImageRe = regexp.MustCompile(`^\S+@sha256:[0-9a-f]{64}$`)
+// sandboxImageRe requires a digest-pinned image reference: a non-empty repository part with NO
+// embedded "@" (so a malformed double-digest "repo@sha256:…@sha256:…" is rejected at construction,
+// not deferred to a confusing kubelet pull error), then a single "@sha256:" digest of 64 lowercase
+// hex at the end. It rejects a tag-only ("repo:tag") reference — only the digest content-addresses
+// the bytes the kubelet runs. A ref MAY carry both a tag and a digest ("repo:tag@sha256:…"); the
+// digest is always last, so anchoring it at the end is sufficient.
+var sandboxImageRe = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
 // normalize applies defaults and validates. It returns the effective config so New does not
 // mutate the caller's value.

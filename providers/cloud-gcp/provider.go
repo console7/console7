@@ -269,7 +269,8 @@ func (p *Provider) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 	// Best-effort shred of any injected credential before tearing the pod down. The AUTHORITATIVE
 	// wipe is the pod deletion below (the credential lives in a medium: Memory volume that dies with
 	// the pod), so a failure here — nothing was injected, or the exec is refused — is ignored; this
-	// is defence in depth that shreds the secret a moment sooner.
+	// is defence in depth that shreds the secret a moment sooner. (Held under p.mu like the rest of
+	// Destroy — the same atomicity-over-throughput tradeoff DeliverIfOwned documents; RISKS R-7.)
 	wipeCtx, wipeCancel := context.WithTimeout(ctx, deliverTimeout)
 	_ = p.deliverer.Wipe(wipeCtx, h)
 	wipeCancel()
@@ -358,6 +359,11 @@ func (p *Provider) owns(h interfaces.SandboxHandle, subject interfaces.Subject, 
 // single-step check-and-deliver closes the race where a teardown between a separate Owns and the
 // write would let a credential land in a sandbox that is already gone. Any delivery error reports
 // non-delivery (fail closed). The seam carries no context, so a bounded one is derived for the I/O.
+//
+// CONCURRENCY: like the package default (see the Provider struct doc), this holds p.mu across the
+// Deliver I/O (bounded by deliverTimeout) — the atomic check-and-deliver REQUIRES the lock not be
+// released mid-flight, so a stuck delivery head-of-line-blocks other sessions for up to that bound.
+// Atomicity over throughput; per-handle lock sharding is the production fix (docs/RISKS.md R-7).
 func (p *Provider) DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

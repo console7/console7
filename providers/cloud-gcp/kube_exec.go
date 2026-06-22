@@ -371,9 +371,12 @@ func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHand
 // in-repo ignore that is itself never committed and that a target repo's own .gitignore cannot undo.
 var engineDotfileExcludes = []string{".claude/", ".config/", ".cache/"}
 
-// protectedBranches are refs a session must NEVER seed onto or propose to: it works a FRESH branch
-// and the human/pipeline actuates onto a protected ref (tenet 6 — observe/propose, never actuate).
-// Case-insensitive exact match; a deployment can extend the list, never the session.
+// protectedBranches is a DEFENCE-IN-DEPTH seed-time pre-check, NOT the control of record: the
+// authoritative tenet-6 (observe/propose, never actuate) enforcement is the SCMProvider seam, which
+// refuses a push to the ADOPTER-configured protected set (scm-github). This is a deliberately small,
+// non-configurable denylist of common defaults — it can DIVERGE from the adopter's real set both
+// ways, so it never stands alone; the seed also does no push (content fetch/push is B11), and
+// task.Branch is orchestrator-set, not agent-set. Case-insensitive exact match.
 var protectedBranches = map[string]bool{
 	"main": true, "master": true, "trunk": true, "develop": true, "production": true, "release": true,
 }
@@ -404,7 +407,7 @@ func workspaceSeedScript(workdir string, task interfaces.EngineTask) (string, er
 		return "", errors.New("cloudgcp: EngineTask.Branch is required (the session's fresh working branch)")
 	}
 	if isProtectedBranch(branch) {
-		return "", fmt.Errorf("cloudgcp: refusing to seed onto protected branch %q — a session works a fresh branch, never a protected ref (tenet 6)", branch)
+		return "", fmt.Errorf("cloudgcp: refusing to seed onto protected branch %q — a session works a fresh branch (defence-in-depth; the SCM seam enforces the adopter's protected set authoritatively, tenet 6)", branch)
 	}
 	remote := fmt.Sprintf("https://%s/%s/%s.git", task.Repo.Host, task.Repo.Owner, task.Repo.Name)
 
@@ -442,6 +445,11 @@ func nonEmptyLines(s string) []string {
 // to. It lives under /run/console7 — a `medium: Memory` emptyDir mounted into the sandbox container
 // (renderSandboxPod) — so the secret is tmpfs-only (never on disk) and dies with the pod. The value
 // is a filesystem PATH, not a credential, so gosec G101 is a false positive here (RISKS R-5).
+//
+// FILE→ENV BRIDGE (B9): B5 only DELIVERS the material to this file. B9 reads it and injects it as the
+// engine's ANTHROPIC_API_KEY on the Run-controlled `kubectl exec … claude -p` (kubeEngineRunner.Run) —
+// set at exec time on that invocation, never baked into the pod spec (no secret in etcd) and never in
+// argv. The two seams agree on this path as the contract.
 const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
 
 // kubeCredentialDeliverer realises CredentialDeliverer: it writes credential material into a live
@@ -476,16 +484,23 @@ func (d *kubeCredentialDeliverer) Wipe(ctx context.Context, h interfaces.Sandbox
 
 // jsonScalar encodes s as a double-quoted YAML scalar via encoding/json (a JSON string is a valid
 // YAML double-quoted scalar, with the YAML-structural characters — quote, backslash, newline,
-// colon, etc. — escaped). For the validated values this adapter renders (the persona enum,
-// RuntimeClass/NodePool config, policy-sourced FQDNs) this removes any field-breakout path.
-// CAVEAT: encoding/json does not escape U+2028/U+2029/U+0085, which YAML 1.1 can read as line
-// breaks; do not feed jsonScalar a value that could carry those without escaping them first.
+// colon, etc. — escaped), then escapes U+2028/U+2029/U+0085 itself (encoding/json does NOT, yet
+// YAML 1.1 can read them as line breaks). The result is UNCONDITIONALLY field-breakout-safe for any
+// input — so a future caller feeding policy- or agent-influenced text (e.g. the B8 host:port ACLs)
+// cannot inject a YAML structure, with no per-caller reasoning required.
 func jsonScalar(s string) string {
 	b, err := json.Marshal(s)
 	if err != nil {
 		return `""`
 	}
-	return string(b)
+	out := string(b)
+	// json.Marshal emits these code points literally; replace each with its 6-char \u escape (valid
+	// inside the already double-quoted JSON/YAML scalar) so YAML 1.1 cannot read them as line breaks
+	// that escape the field.
+	out = strings.ReplaceAll(out, "\u2028", `\u2028`)
+	out = strings.ReplaceAll(out, "\u2029", `\u2029`)
+	out = strings.ReplaceAll(out, "\u0085", `\u0085`)
+	return out
 }
 
 // sandboxPodManifestTemplate is the ConfigMap(session-profile)+Pod manifest rendered per sandbox.

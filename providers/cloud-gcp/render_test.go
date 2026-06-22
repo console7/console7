@@ -34,6 +34,7 @@ func TestConfigNormalize(t *testing.T) {
 		{"missing image", Config{ProjectID: "p", Location: "us-east4", Cluster: "c"}},
 		{"tag-only image (not digest-pinned)", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: "ghcr.io/console7/sandbox-base:v1"}},
 		{"image with short/invalid digest", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: "ghcr.io/console7/sandbox-base@sha256:abc"}},
+		{"malformed double-digest image", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: "ghcr.io/console7/sandbox-base@sha256:" + strings.Repeat("a", 64) + "@sha256:" + strings.Repeat("b", 64)}},
 	} {
 		if _, err := tc.cfg.normalize(); err == nil {
 			t.Errorf("%s: expected a validation error", tc.name)
@@ -51,6 +52,15 @@ func TestJSONScalar_IsYAMLSafe(t *testing.T) {
 	}
 	if strings.Contains(got, "\n") {
 		t.Fatalf("newline not escaped — YAML-injection risk: %q", got)
+	}
+
+	// U+2028/U+2029/U+0085 are line breaks to a YAML 1.1 reader but encoding/json emits them
+	// literally; jsonScalar must escape them so any future caller's value is unconditionally safe.
+	for _, lb := range []string{"\u2028", "\u2029", "\u0085"} {
+		out := jsonScalar("a" + lb + "kind: Secret")
+		if strings.Contains(out, lb) {
+			t.Errorf("jsonScalar left a raw YAML-1.1 line separator %q unescaped: %q", lb, out)
+		}
 	}
 }
 
