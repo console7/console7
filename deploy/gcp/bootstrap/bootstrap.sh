@@ -312,6 +312,17 @@ grant_project_role "$APPLY_SA_EMAIL" "roles/iam.serviceAccountUser"
 # forthcoming consumer-side digest pin, not on withholding push from the deploy identity.
 grant_project_role "$APPLY_SA_EMAIL" "roles/artifactregistry.admin"
 
+# deploy/gcp/modules/gke's finding-#8 delta: the sandbox NODE's sanctioned egress to Google APIs over
+# Private Google Access is pinned to the private.googleapis.com VIP by VPC-scoped private Cloud DNS
+# zones (googleapis.com / pkg.dev / gcr.io), so the node can register + pull its image while the
+# default-deny floor still walls everything else. Creating those managed zones + record sets needs
+# dns.managedZones.create + dns.changes.create — no narrower predefined role covers both, so dns.admin
+# is the least over-grant. It confers no compute and nothing outside this project's Cloud DNS. (Finding
+# #9: the role set drifts as modules land — this grant was missing when modules/gke gained the DNS
+# zones, and the first apply 403'd on ManagedZone create until it was added. Re-run bootstrap.sh before
+# the first apply of any new module.)
+grant_project_role "$APPLY_SA_EMAIL" "roles/dns.admin"
+
 # --- outputs --------------------------------------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 cat <<EOF
