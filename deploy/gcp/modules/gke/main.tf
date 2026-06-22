@@ -216,17 +216,13 @@ resource "google_container_node_pool" "sandbox" {
     }
 
     # STRUCTURAL gVisor enforcement (cloud.go: isolation MUST be at the kernel/syscall boundary,
-    # never by asking the agent to behave; GOAL.md tenet 3). The taint repels any pod that does NOT
-    # tolerate it, so a pod WITHOUT runtimeClassName=gvisor cannot land on the sandbox nodes and run
-    # un-sandboxed (a co-tenancy break) — GKE auto-injects the matching toleration only for gvisor
-    # RuntimeClass pods, so the cloud-gcp pod (which sets runtimeClassName: gvisor) schedules and
-    # ordinary pods are excluded. Declared explicitly (matching GKE Sandbox's own taint) so the
-    # guarantee lives in the IaC, not implicit runtime behaviour.
-    taint {
-      key    = "sandbox.gke.io/runtime"
-      value  = "gvisor"
-      effect = "NO_SCHEDULE"
-    }
+    # never by asking the agent to behave; GOAL.md tenet 3). Enabling sandbox_config above makes GKE
+    # AUTO-APPLY the `sandbox.gke.io/runtime=gvisor:NoSchedule` taint to these nodes (and auto-inject
+    # the matching toleration ONLY for gvisor-RuntimeClass pods) — so a pod WITHOUT
+    # runtimeClassName=gvisor cannot land here and run un-sandboxed (a co-tenancy break). The taint is
+    # GKE-MANAGED and MUST NOT be declared here: the API rejects a manual copy ("Node taints with key
+    # sandbox.gke.io/runtime are managed by GKE and must not be manually specified" — caught by the
+    # live-PoC dogfood). The isolation guarantee therefore comes from GKE's own automatic taint.
 
     # Conceal the node SA from pods (the authoritative metadata block; cloud-gcp preflights this).
     workload_metadata_config {
