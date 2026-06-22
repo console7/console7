@@ -75,7 +75,7 @@ type LaunchRequest struct {
 	// influences lineage, signing, or evidence.
 	Prompt string
 	// Attended marks a human present for this single-user session — the discriminator for
-	// subscription-backed inference (tenet 7). Headless/orchestrated launches set it false
+	// subscription-backed inference (tenet 2). Headless/orchestrated launches set it false
 	// and route to the org API.
 	Attended bool
 	// UseSubscription requests that this attended session run on the user's vaulted
