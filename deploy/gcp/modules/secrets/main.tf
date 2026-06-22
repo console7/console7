@@ -119,7 +119,11 @@ resource "google_project_iam_member" "workload_secrets_create" {
   member  = "serviceAccount:${google_service_account.workload.email}"
 }
 
-# ADD/ACCESS/DELETE: restricted to "<prefix>-sub-*" secrets only.
+# ADD/ACCESS/DELETE: restricted to the provider's managed secrets — the per-subject subscription
+# tokens ("<prefix>-sub-*") AND the single shared org API credential ("<prefix>-org", the org-API
+# lane; providers/secrets-gcp SetOrgCredential/InjectOrgCredential). The org clause is an EXACT
+# secret match plus its versions subtree ("<prefix>-org/...") so it covers versions.add/access on the
+# org secret WITHOUT re-widening to look-alikes (e.g. "<prefix>-organization" matches neither).
 resource "google_project_iam_member" "workload_secrets_rw" {
   project = var.project_id
   role    = google_project_iam_custom_role.secrets_rw.id
@@ -127,7 +131,11 @@ resource "google_project_iam_member" "workload_secrets_rw" {
 
   condition {
     title       = "console7-managed-secrets-only"
-    description = "Restrict to the provider's per-subject secrets (<prefix>-sub-*)."
-    expression  = "resource.name.startsWith(\"projects/${data.google_project.this.number}/secrets/${var.name_prefix}-sub-\")"
+    description = "Restrict to the provider's per-subject secrets (<prefix>-sub-*) and the shared org credential (<prefix>-org)."
+    expression  = <<-EOT
+      resource.name.startsWith("projects/${data.google_project.this.number}/secrets/${var.name_prefix}-sub-") ||
+      resource.name == "projects/${data.google_project.this.number}/secrets/${var.name_prefix}-org" ||
+      resource.name.startsWith("projects/${data.google_project.this.number}/secrets/${var.name_prefix}-org/")
+    EOT
   }
 }

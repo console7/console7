@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"context"
 	"testing"
 
 	secretsgcp "github.com/console7/console7/providers/secrets-gcp"
@@ -8,7 +9,7 @@ import (
 	"github.com/console7/console7/sdk/testkit"
 )
 
-// This run asserts the GCP reference SecretsProvider upholds the same four SECURITY contracts
+// This run asserts the GCP reference SecretsProvider upholds the same five SECURITY contracts
 // the devkit double does — but exercising providers/secrets-gcp's own logic. The provider is
 // wired with its in-memory fakes (Cloud KMS + Secret Manager stand-ins) and the devkit
 // SandboxRegistry as both the ownership Injector and the injection rig, so the contract checks
@@ -18,8 +19,14 @@ import (
 // behaviour only (sdk/testkit check doc; docs/THREAT-MODEL.md §1/§4).
 func secretsGCPUnderTest() testkit.ProviderUnderTest {
 	reg := devkit.NewSandboxRegistry()
+	sec := secretsgcp.NewWithPorts(secretsgcp.NewInMemoryKEK(), secretsgcp.NewInMemoryStore(), reg, "console7", nil)
+	// Configure the adopter's shared org API credential out-of-band — the InjectOrgCredential contract
+	// delivers it into the owning sandbox; the control plane never carries the plaintext through the seam.
+	if err := sec.SetOrgCredential(context.Background(), []byte("conf-org-api-key")); err != nil {
+		panic("conformance: set org credential: " + err.Error())
+	}
 	return testkit.ProviderUnderTest{
-		Secrets:    secretsgcp.NewWithPorts(secretsgcp.NewInMemoryKEK(), secretsgcp.NewInMemoryStore(), reg, "console7", nil),
+		Secrets:    sec,
 		SecretsRig: reg,
 	}
 }
@@ -30,7 +37,7 @@ func secretsGCPUnderTest() testkit.ProviderUnderTest {
 func TestSecretsGCPConformance(t *testing.T) {
 	res := testkit.Run(secretsGCPUnderTest())
 	if len(res.Checked) == 0 {
-		t.Fatal("expected the four SecretsProvider contracts to be checked, got none")
+		t.Fatal("expected the five SecretsProvider contracts to be checked, got none")
 	}
 	if len(res.Failed) != 0 {
 		t.Fatalf("secrets-gcp conformance run reported %d contract failure(s): %v", len(res.Failed), res.Failed)

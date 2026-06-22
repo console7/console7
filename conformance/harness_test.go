@@ -60,9 +60,16 @@ func providersUnderTest() testkit.ProviderUnderTest {
 	if err != nil {
 		panic("conformance: anthropic inference backend: " + err.Error())
 	}
+	// Configure MemSecrets with the adopter's shared org API credential out-of-band — the
+	// InjectOrgCredential contract delivers it into the owning sandbox (the control plane never
+	// carries the plaintext through the seam).
+	sec := devkit.NewMemSecrets(reg)
+	if err := sec.SetOrgCredential([]byte("conf-org-api-key")); err != nil {
+		panic("conformance: set org credential: " + err.Error())
+	}
 	return testkit.ProviderUnderTest{
 		Cloud:     devkit.NewMemCloud(reg),
-		Secrets:   devkit.NewMemSecrets(reg),
+		Secrets:   sec,
 		Identity:  devkit.NewDevIdentity(idpPub, nil),
 		SCM:       devkit.NewMemSCM(15 * time.Minute),
 		Inference: inference,

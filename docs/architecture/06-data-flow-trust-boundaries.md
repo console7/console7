@@ -71,7 +71,7 @@ flowchart TB
   BRKp -->|"wrap DEK under KEK"| KMSs
   BRKp -->|"C-CRED branch-scoped token"| GH
   ORC -->|"provision + narrow egress"| ENGp
-  BRKp -->|"C-CRED inject sub-token (owner only)"| ENGp
+  BRKp -->|"C-CRED inject sub-token (owner) or org cred"| ENGp
   UNTRUST -->|"C-CODE untrusted"| ENGp
   GH -->|"C-CODE clone"| ENGp
   ENGp --> PRX
@@ -111,6 +111,7 @@ flowchart TB
 | Tool execution, filesystem, processes | — | Sandbox (adopter cloud) | No |
 | Cloud & SCM credentials | `C-CRED` | Broker + Secret Manager | No |
 | Subscription OAuth token | `C-CRED` | Per-user vault (KMS-sealed) | No — authenticates the user's own session only |
+| Org API credential | `C-CRED` | Shared org vault (KMS-sealed) | No — backs org-API/headless sessions; injected by reference into the owning sandbox, never returned |
 | Production telemetry | `C-TELEM` | Observe Gateway | No |
 | Evidence, transcripts, audit | `C-EVID` | WORM + SIEM | No |
 | **Model prompts & responses** | `C-MODEL` | — | **Yes — to the chosen backend** |

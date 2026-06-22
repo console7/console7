@@ -108,6 +108,7 @@ func registry() []check {
 		{Contract{"SecretsProvider", "MintEphemeral", "return long-lived or plaintext credential material to the control plane, or grant wider scope/TTL than requested"}, hasSecrets, checkSecretsMintEphemeral},
 		{Contract{"SecretsProvider", "StoreSubscriptionToken", "store under a shared key, leave a standing operator read path, or pool the token"}, hasSecrets, checkSecretsStoreSubscriptionToken},
 		{Contract{"SecretsProvider", "InjectSubscriptionToken", "return plaintext to the caller, inject into a non-owner sandbox, or back an unattended session"}, hasSecrets, checkSecretsInjectSubscriptionToken},
+		{Contract{"SecretsProvider", "InjectOrgCredential", "return plaintext to the caller, inject into a non-owner / cross-session sandbox, or run the engine unauthenticated when no org credential is configured"}, hasSecrets, checkSecretsInjectOrgCredential},
 		{Contract{"SecretsProvider", "RevokeSubject", "retain a recoverable copy of revoked material"}, hasSecrets, checkSecretsRevokeSubject},
 		{Contract{"IdentityProvider", "Authenticate", "trust client-asserted claims without cryptographic verification, or mint/persist a long-lived session secret"}, hasIdentity, checkIdentityAuthenticate},
 		{Contract{"IdentityProvider", "ResolveGroups", "let a subject self-assert or widen its own group membership"}, hasIdentity, checkIdentityResolveGroups},
@@ -387,6 +388,44 @@ func checkSecretsInjectWithRig(ctx context.Context, p ProviderUnderTest) error {
 		Subject: owner, SessionID: session, Sandbox: owned, Attended: true, Beneficiaries: 1,
 	}); err != nil {
 		return fmt.Errorf("attended single-beneficiary injection into the owner sandbox should succeed: %w", err)
+	}
+	return nil
+}
+
+// checkSecretsInjectOrgCredential upholds InjectOrgCredential's SECURITY clause: the org credential
+// is delivered ONLY into the session's own sandbox and never returned to the caller. Unlike a
+// subscription token it has NO attended/beneficiary gate (it backs any org-API-lane session), so the
+// only refusal exercised is ownership/cross-session. The org credential is configured by the
+// conformance harness out-of-band (the provider's SetOrgCredential, off-seam); an UNCONFIGURED
+// provider failing closed is asserted white-box per impl, since it is not configurable through the seam.
+func checkSecretsInjectOrgCredential(ctx context.Context, p ProviderUnderTest) error {
+	dummy := interfaces.SandboxHandle{ID: "conf-org-nonexistent-sandbox"}
+	// Must refuse injection into a sandbox that is not this subject's session sandbox (fail closed).
+	if err := p.Secrets.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{
+		Subject: confSubject, SessionID: "conf-org", Sandbox: dummy,
+	}); err == nil {
+		return errors.New("injected the org credential into a non-owned sandbox")
+	}
+	// Without a rig the above only proves "some error"; with a rig, exercise delivery against REAL
+	// owned/cross-session sandboxes and confirm the owned case succeeds.
+	if p.SecretsRig == nil {
+		return nil
+	}
+	const owner = interfaces.Subject("conf-org-owner")
+	const session = interfaces.SessionID("conf-org-inject")
+	owned := p.SecretsRig.Provision(owner, session)
+	other := p.SecretsRig.Provision("conf-org-other", "conf-org-other-session")
+	// A different session's sandbox must be refused (no cross-session delivery).
+	if err := p.Secrets.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{
+		Subject: owner, SessionID: session, Sandbox: other,
+	}); err == nil {
+		return errors.New("injected the org credential into a different session's sandbox")
+	}
+	// Injection into the session's OWN sandbox must succeed (the harness configured the org credential).
+	if err := p.Secrets.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{
+		Subject: owner, SessionID: session, Sandbox: owned,
+	}); err != nil {
+		return fmt.Errorf("org-credential injection into the session's own sandbox should succeed: %w", err)
 	}
 	return nil
 }

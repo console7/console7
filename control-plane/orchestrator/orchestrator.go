@@ -237,8 +237,8 @@ func (o *Orchestrator) prepare(ctx context.Context, req LaunchRequest) (*session
 func (o *Orchestrator) resolveInference(s *session) error {
 	// 5. Resolve inference. Subscription backs a session ONLY when it is attended AND the
 	// user opted into their vaulted subscription; an attended session without it routes the
-	// org API like any unattended session (tenet 7 — subscription is permitted, never
-	// mandatory). The resolved endpoint MUST already be on the egress allowlist — the
+	// org API like any unattended session (tenet 2 — subscription is permitted, never
+	// mandatory; orchestrated/headless work uses org API keys). The resolved endpoint MUST already be on the egress allowlist — the
 	// boundary is authoritative, so an endpoint the perimeter would deny aborts the session
 	// rather than running against an unreachable model.
 	useSubscription := s.req.Attended && s.req.UseSubscription
@@ -276,23 +276,50 @@ func (o *Orchestrator) resolveInference(s *session) error {
 		return s.abort(err, "egress-evidence")
 	}
 
-	// 6. (subscription) Inject the user's ALREADY-VAULTED subscription token into their OWN
-	// sandbox by reference — the plaintext was sealed under their key at login and never
-	// passes through the control plane. The seam enforces attended && single-beneficiary &&
-	// owning-sandbox.
+	// 6. Inject the session's inference credential into its OWN sandbox BY REFERENCE — the control
+	// plane never carries the plaintext. Either the user's already-vaulted subscription token
+	// (attended opt-in; sealed under their key at login) or the adopter's shared org API credential
+	// (every other session — unattended/orchestrated/headless, or attended without subscription;
+	// tenet 2). Each seam verifies the owning sandbox and fails closed.
 	if useSubscription {
-		if err := o.Broker.InjectSubscription(s.ctx, interfaces.SubscriptionInjection{
-			Subject:       s.subject,
-			SessionID:     s.req.SessionID,
-			Sandbox:       s.sandbox,
-			Attended:      true,
-			Beneficiaries: 1,
-		}); err != nil {
-			return s.abort(err, "inject-subscription")
-		}
-		if err := s.stamp("subscription-injected", s.sandbox.ID); err != nil {
-			return s.abort(err, "subscription-evidence")
-		}
+		return s.injectSubscription()
+	}
+	return s.injectOrgCredential()
+}
+
+// injectSubscription injects the owner's vaulted subscription token into their attended sandbox. The
+// seam enforces attended && single-beneficiary && owning-sandbox; the orchestrator only forwards the
+// facts and stamps the evidence.
+func (s *session) injectSubscription() error {
+	if err := s.o.Broker.InjectSubscription(s.ctx, interfaces.SubscriptionInjection{
+		Subject:       s.subject,
+		SessionID:     s.req.SessionID,
+		Sandbox:       s.sandbox,
+		Attended:      true,
+		Beneficiaries: 1,
+	}); err != nil {
+		return s.abort(err, "inject-subscription")
+	}
+	if err := s.stamp("subscription-injected", s.sandbox.ID); err != nil {
+		return s.abort(err, "subscription-evidence")
+	}
+	return nil
+}
+
+// injectOrgCredential injects the adopter's shared org API credential into the session's own sandbox
+// (the org-API lane). The credential is configured out-of-band on the SecretsProvider; the seam
+// verifies the sandbox belongs to this session and fails closed if none is configured, so the engine
+// never runs unauthenticated.
+func (s *session) injectOrgCredential() error {
+	if err := s.o.Broker.InjectOrgCredential(s.ctx, interfaces.OrgCredentialInjection{
+		Subject:   s.subject,
+		SessionID: s.req.SessionID,
+		Sandbox:   s.sandbox,
+	}); err != nil {
+		return s.abort(err, "inject-org-credential")
+	}
+	if err := s.stamp("org-credential-injected", s.sandbox.ID); err != nil {
+		return s.abort(err, "org-credential-evidence")
 	}
 	return nil
 }

@@ -166,6 +166,53 @@ func TestMemSecrets_Inject_Roundtrip_DeliversOnlyToOwner(t *testing.T) {
 	}
 }
 
+func TestMemSecrets_InjectOrgCredential(t *testing.T) {
+	reg := NewSandboxRegistry()
+	m := NewMemSecrets(reg)
+	ctx := context.Background()
+	owned := reg.Provision("alice", "s1")
+	other := reg.Provision("bob", "s2")
+
+	// Unconfigured ⇒ fail CLOSED (never run the engine unauthenticated), and nothing is delivered.
+	if err := m.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned}); err == nil {
+		t.Error("InjectOrgCredential should fail closed when no org credential is configured")
+	}
+	if _, ok := reg.Injected(owned); ok {
+		t.Error("delivered an org credential despite none being configured")
+	}
+
+	orgKey := []byte("org-api-key")
+	if err := m.SetOrgCredential(orgKey); err != nil {
+		t.Fatalf("SetOrgCredential: %v", err)
+	}
+
+	// A non-owned sandbox is refused even once configured (no cross-session delivery).
+	if err := m.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: other}); err == nil {
+		t.Error("InjectOrgCredential delivered into a non-owned sandbox")
+	}
+	if _, ok := reg.Injected(other); ok {
+		t.Error("org credential leaked into a non-owner sandbox")
+	}
+
+	// The owning sandbox receives EXACTLY the configured org key.
+	if err := m.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned}); err != nil {
+		t.Fatalf("InjectOrgCredential into owner: %v", err)
+	}
+	got, ok := reg.Injected(owned)
+	if !ok || !bytes.Equal(got, orgKey) {
+		t.Errorf("org credential not delivered to the owning sandbox: ok=%v got=%q", ok, got)
+	}
+
+	// Clearing it (empty key) restores fail-closed.
+	if err := m.SetOrgCredential(nil); err != nil {
+		t.Fatalf("SetOrgCredential(nil): %v", err)
+	}
+	fresh := reg.Provision("carol", "s3")
+	if err := m.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "carol", SessionID: "s3", Sandbox: fresh}); err == nil {
+		t.Error("InjectOrgCredential should fail closed after the org credential is cleared")
+	}
+}
+
 func TestMemSecrets_Inject_RefusesUnattendedOrFanoutOrNonOwner(t *testing.T) {
 	reg := NewSandboxRegistry()
 	m := NewMemSecrets(reg)

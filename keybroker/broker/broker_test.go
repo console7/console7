@@ -200,6 +200,36 @@ func TestMintSessionIdentity_RejectsDuplicateSession(t *testing.T) {
 
 // countingSecrets counts MintEphemeral calls, to prove a rejected duplicate session never
 // reaches credential issuance.
+func TestBroker_InjectOrgCredential(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	secrets := devkit.NewMemSecrets(reg)
+	orgKey := []byte("org-api-key")
+	if err := secrets.SetOrgCredential(orgKey); err != nil {
+		t.Fatalf("SetOrgCredential: %v", err)
+	}
+	ca := signing.NewDevCA()
+	b := broker.New(devkit.NewDevIdentity(nil, nil), secrets, devkit.NewMemSCM(time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	ctx := context.Background()
+	box := reg.Provision("alice", "s1")
+
+	// The broker forwards the facts; the seam delivers the org credential into the owning sandbox.
+	if err := b.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: box}); err != nil {
+		t.Fatalf("InjectOrgCredential: %v", err)
+	}
+	got, ok := reg.Injected(box)
+	if !ok || !bytes.Equal(got, orgKey) {
+		t.Errorf("org credential not injected into the owning sandbox: ok=%v", ok)
+	}
+
+	// A broker missing the secrets seam fails closed (an error, never a panic).
+	nob := broker.New(devkit.NewDevIdentity(nil, nil), nil, devkit.NewMemSCM(time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	if err := nob.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: box}); err == nil {
+		t.Error("broker missing the secrets seam should fail closed")
+	}
+}
+
 type countingSecrets struct {
 	interfaces.SecretsProvider
 	mints int
