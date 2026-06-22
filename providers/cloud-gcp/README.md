@@ -74,6 +74,11 @@ handle IDs.
   **memory** volume via `kubectl exec` over **stdin** (never argv), wiped on Destroy (the memory
   volume also dies with the pod). The engine's consumption of that credential as `ANTHROPIC_API_KEY`
   is B9.
+- **REAL (B6):** `Run` **seeds the working repo** before the engine runs — `workspaceSeedScript`
+  (pure, unit-tested) validates `EngineTask.Repo`/`Branch`, **refuses a protected branch** (tenet 6),
+  and emits an idempotent `git init` on the fresh branch + origin remote + `.git/info/exclude` (so the
+  proposed commit is the task diff only, not the engine's dotfiles). Fetching origin's **content** (an
+  SCM token via the Injector + egress to the SCM host) is the live wiring **B11** adds.
 - **DEFERRED to the egress proxy (B7):** the out-of-band forward proxy that does the FQDN
   allowlisting the `EgressController`'s allowlist feeds (a NetworkPolicy is IP-based and cannot
   match FQDNs).

@@ -255,10 +255,13 @@ func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.Sandbox
 //     engine container mounts READ-ONLY at /etc/claude-code (B4). This Run still only VERIFIES the
 //     file is present and fails closed if not — it never writes the policy itself.
 //   - renderSandboxPod pins the digest-pinned signed engine image (Config.SandboxImage, B3) and
-//     renders the non-secret ANTHROPIC_MODEL env, so `claude -p` exists in the pod. Still missing for
-//     an end-to-end run: the credential injection (below) and the workspace repo-seed (B6).
-//   - The Anthropic credential reaches the engine via the SecretsProvider injection path, not this
-//     seam (EngineTask carries no secret); the integration wiring of that injection is Tier-2 (B5/B9).
+//     renders the non-secret ANTHROPIC_MODEL env, so `claude -p` exists in the pod. Run now SEEDS the
+//     working repo (workspaceSeedScript: git init on a fresh branch, origin remote, .git/info/exclude
+//     — B6); fetching origin's CONTENT (an SCM token via the Injector + egress to the SCM host) is the
+//     live wiring B11 adds.
+//   - Credential delivery into the pod EXISTS (the Provider's Owns/DeliverIfOwned over a memory
+//     volume, B5); the EngineTask still carries no secret. Consuming the delivered material as the
+//     engine's ANTHROPIC_API_KEY / the seed's SCM token is the orchestrator wiring (B9/B11).
 type kubeEngineRunner struct {
 	run *kubeRunner
 	cfg Config
@@ -298,7 +301,22 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: locked managed-settings absent/empty at %s — refusing to run the engine without its policy (fail closed): %w", policyhelper.ManagedSettingsPath, err)
 	}
 
-	// 2. Run the genuine engine headless. The untrusted prompt is passed over STDIN, so a shell can
+	// 2. Seed the working repo at Workdir from task.Repo/task.Branch BEFORE the engine runs: establish
+	// a git repo on a FRESH working branch (never a protected ref — tenet 6), record the origin remote,
+	// and write .git/info/exclude so the proposed commit is the task diff only (not the engine's own
+	// dotfiles — the local-dogfood lesson). Without this, `git rev-parse HEAD` below errors on an empty
+	// tree. Fetching origin's CONTENT (a short-lived SCM token via the Injector + egress to the SCM
+	// host) is the live step the integration wiring adds (B11); this scaffolding is what makes the
+	// commit/HEAD read succeed and keeps the engine's scaffolding out of the proposal.
+	seed, err := workspaceSeedScript(k.cfg.Workdir, task)
+	if err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: build workspace seed: %w", err)
+	}
+	if _, err := k.execIn(ctx, h, nil, "/bin/sh", "-c", seed); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: seed workspace: %w", err)
+	}
+
+	// 3. Run the genuine engine headless. The untrusted prompt is passed over STDIN, so a shell can
 	// never re-split it into extra argv. The engine reads the locked managed-settings itself (the
 	// verified file is the authority; the conservative default permission mode is belt-and-suspenders).
 	if _, err := k.execIn(ctx, h, []byte(task.Prompt),
@@ -306,7 +324,7 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: run engine: %w", err)
 	}
 
-	// 3. Capture the proposal: stage and commit whatever the engine changed, then read the head. A
+	// 4. Capture the proposal: stage and commit whatever the engine changed, then read the head. A
 	// clean tree (the engine proposed nothing) is a no-op, not an error. NOTE (Tier-2 residual): the
 	// resulting commit is the one sanctioned outward channel (the deferred control-plane-side push →
 	// PR, under human review); `git add -A` stages broadly, so that push path MUST DLP-scan the diff
@@ -345,6 +363,67 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 // pre-populated workspace), which modern git otherwise refuses with "dubious ownership".
 func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHandle, args ...string) ([]byte, error) {
 	return k.execIn(ctx, h, nil, append([]string{"git", "-c", "safe.directory=" + k.cfg.Workdir, "-C", k.cfg.Workdir}, args...)...)
+}
+
+// engineDotfileExcludes are the engine's OWN working-dir dropfiles (per-project settings, todos,
+// transcripts, caches) that must NOT appear in the proposed commit — the commit is the task diff
+// only, not the agent's scaffolding (the local-dogfood lesson). They go in .git/info/exclude, an
+// in-repo ignore that is itself never committed and that a target repo's own .gitignore cannot undo.
+var engineDotfileExcludes = []string{".claude/", ".config/", ".cache/"}
+
+// protectedBranches are refs a session must NEVER seed onto or propose to: it works a FRESH branch
+// and the human/pipeline actuates onto a protected ref (tenet 6 — observe/propose, never actuate).
+// Case-insensitive exact match; a deployment can extend the list, never the session.
+var protectedBranches = map[string]bool{
+	"main": true, "master": true, "trunk": true, "develop": true, "production": true, "release": true,
+}
+
+func isProtectedBranch(b string) bool {
+	return protectedBranches[strings.ToLower(strings.TrimSpace(b))]
+}
+
+// shquote wraps s as a single-quoted POSIX shell word (escaping embedded single quotes), so a
+// task-supplied value composed into the seed script cannot break out of its argument — defence in
+// depth even though Repo/Branch are validated SCM identifiers.
+func shquote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// workspaceSeedScript builds the /bin/sh script that seeds the engine's working repo at workdir from
+// task.Repo/task.Branch before the engine runs. It is a PURE function (the unit-testable core of the
+// seed; the exec is integration-only): it validates the coordinates, refuses a protected branch, and
+// emits an idempotent script that git-inits the repo on the fresh branch, records the origin remote
+// (no network — the content fetch is the live B11 step), and writes .git/info/exclude. Every embedded
+// value is shell-quoted.
+func workspaceSeedScript(workdir string, task interfaces.EngineTask) (string, error) {
+	if task.Repo.Host == "" || task.Repo.Owner == "" || task.Repo.Name == "" {
+		return "", errors.New("cloudgcp: EngineTask.Repo requires Host, Owner, and Name to seed the workspace")
+	}
+	branch := strings.TrimSpace(task.Branch)
+	if branch == "" {
+		return "", errors.New("cloudgcp: EngineTask.Branch is required (the session's fresh working branch)")
+	}
+	if isProtectedBranch(branch) {
+		return "", fmt.Errorf("cloudgcp: refusing to seed onto protected branch %q — a session works a fresh branch, never a protected ref (tenet 6)", branch)
+	}
+	remote := fmt.Sprintf("https://%s/%s/%s.git", task.Repo.Host, task.Repo.Owner, task.Repo.Name)
+
+	var b strings.Builder
+	b.WriteString("set -eu\n")
+	b.WriteString("cd " + shquote(workdir) + "\n")
+	b.WriteString("if [ ! -d .git ]; then git init -q; fi\n")
+	// Set the unborn HEAD to the fresh branch (idempotent; works before any commit exists).
+	b.WriteString("git symbolic-ref HEAD " + shquote("refs/heads/"+branch) + "\n")
+	b.WriteString(`git config user.email "console7-agent@console7.dev"` + "\n")
+	b.WriteString(`git config user.name "Console7 Agent"` + "\n")
+	// Record origin without fetching (the content fetch with a short-lived SCM token + egress is B11).
+	b.WriteString("git remote add origin " + shquote(remote) + " 2>/dev/null || git remote set-url origin " + shquote(remote) + "\n")
+	// (Re)write .git/info/exclude so the engine's own dropfiles stay out of `git add -A`.
+	b.WriteString(": > .git/info/exclude\n")
+	for _, e := range engineDotfileExcludes {
+		b.WriteString("echo " + shquote(e) + " >> .git/info/exclude\n")
+	}
+	return b.String(), nil
 }
 
 // nonEmptyLines splits s into its non-blank, trimmed lines — the file paths from `git show
