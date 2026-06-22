@@ -250,12 +250,13 @@ func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.Sandbox
 // be one the agent (same uid) could overwrite — the opposite of a locked policy.
 //
 // RESIDUALS (Tier-2 / sandbox-image, tracked — this adapter is not yet proven end to end):
-//   - The provision-time render + read-only volume mount of managed-settings is not yet wired here
-//     (deploy/gcp/modules/gke + sandbox-image). Until it lands, Run fails closed (the settings file is
-//     absent), which is the correct, honest behaviour — the engine never runs without its policy.
-//   - renderSandboxPod now pins the digest-pinned signed engine image (Config.SandboxImage, B3) and
+//   - The locked managed-settings ARE now rendered at provision time: an init container runs
+//     console7-policyhelper (non-root) and writes the 0444 policy into a memory emptyDir that the
+//     engine container mounts READ-ONLY at /etc/claude-code (B4). This Run still only VERIFIES the
+//     file is present and fails closed if not — it never writes the policy itself.
+//   - renderSandboxPod pins the digest-pinned signed engine image (Config.SandboxImage, B3) and
 //     renders the non-secret ANTHROPIC_MODEL env, so `claude -p` exists in the pod. Still missing for
-//     an end-to-end run: the credential injection (below) and the managed-settings mount (above).
+//     an end-to-end run: the credential injection (below) and the workspace repo-seed (B6).
 //   - The Anthropic credential reaches the engine via the SecretsProvider injection path, not this
 //     seam (EngineTask carries no secret); the integration wiring of that injection is Tier-2 (B5/B9).
 type kubeEngineRunner struct {
@@ -372,6 +373,89 @@ func jsonScalar(s string) string {
 	return string(b)
 }
 
+// sandboxPodManifestTemplate is the ConfigMap(session-profile)+Pod manifest rendered per sandbox.
+// Kept as a package const so the renderer stays small; the %[n]s args are filled by renderSandboxPod.
+const sandboxPodManifestTemplate = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %[1]s-session-profile
+  namespace: %[1]s
+data:
+  profile.json: %[7]s
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %[1]s
+  namespace: %[1]s
+spec:
+  runtimeClassName: %[2]s
+  automountServiceAccountToken: false
+  nodeSelector:
+    cloud.google.com/gke-nodepool: %[3]s
+  activeDeadlineSeconds: %[4]d
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: managed-settings
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
+    - name: session-profile
+      configMap:
+        name: %[1]s-session-profile
+        items:
+          - key: profile.json
+            path: profile.json
+  initContainers:
+    - name: render-policy
+      image: %[5]s
+      command: ["/bin/sh", "-c", "exec console7-policyhelper < /etc/console7/session-profile/profile.json"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: managed-settings
+          mountPath: /etc/claude-code
+        - name: session-profile
+          mountPath: /etc/console7/session-profile
+          readOnly: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 128Mi
+  containers:
+    - name: sandbox
+      image: %[5]s
+%[6]s      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: managed-settings
+          mountPath: /etc/claude-code
+          readOnly: true
+      resources:
+        requests:
+          cpu: 250m
+          memory: 256Mi
+          ephemeral-storage: 1Gi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+          ephemeral-storage: 4Gi
+`
+
 // renderSandboxPod renders the gVisor Pod for one sandbox into the namespace the EgressController
 // already created. nsID is the crypto-random handle ID (a valid DNS-1123 label, safe unquoted as
 // the resource/namespace name); every other dynamic value is json-encoded.
@@ -389,40 +473,30 @@ func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec) []by
 	if cfg.AnthropicModel != "" {
 		envBlock = fmt.Sprintf("      env:\n        - name: ANTHROPIC_MODEL\n          value: %s\n", jsonScalar(cfg.AnthropicModel))
 	}
-	return fmt.Appendf(nil, `apiVersion: v1
-kind: Pod
-metadata:
-  name: %[1]s
-  namespace: %[1]s
-spec:
-  runtimeClassName: %[2]s
-  automountServiceAccountToken: false
-  nodeSelector:
-    cloud.google.com/gke-nodepool: %[3]s
-  activeDeadlineSeconds: %[4]d
-  restartPolicy: Never
-  containers:
-    - name: sandbox
-      image: %[5]s
-%[6]s      securityContext:
-        allowPrivilegeEscalation: false
-        runAsNonRoot: true
-      resources:
-        requests:
-          cpu: 250m
-          memory: 256Mi
-          ephemeral-storage: 1Gi
-        limits:
-          cpu: "2"
-          memory: 2Gi
-          ephemeral-storage: 4Gi
-`,
+
+	// The session's resolved profile (persona) the init container renders the LOCKED managed-settings
+	// from. Only Persona drives the render (policyhelper.Render switches on it); marshaling the typed
+	// struct keeps it forward-compatible. A marshal failure (cannot happen for this struct) yields
+	// empty JSON → the init's policyhelper fails to parse → fail closed (the engine never starts).
+	profileJSON, _ := json.Marshal(interfaces.SessionProfile{Persona: spec.Persona})
+
+	// The managed-settings LOCK (DESIGN.md §5.1, tenet 3): an init container runs console7-policyhelper
+	// AS A NON-ROOT user (PSA `restricted` forbids root, see renderNamespaceAndEgress), reading the
+	// SessionProfile over stdin from a read-only ConfigMap mount and writing the 0444 managed-settings
+	// into a memory emptyDir at /etc/claude-code. The MAIN container mounts that SAME volume at
+	// /etc/claude-code READ-ONLY — and the readOnly MOUNT, not the file's uid/mode, is the authoritative
+	// lock: the kernel denies writes to a readOnly mount regardless of ownership, so the non-root engine
+	// (same uid) cannot overwrite its own policy. The emptyDir is `medium: Memory` (never on disk) and
+	// deliberately SHADOWS the image's baked /etc/claude-code. The init container completes before the
+	// engine starts, so at run time the only mount of the volume is the engine's readOnly one.
+	return fmt.Appendf(nil, sandboxPodManifestTemplate,
 		nsID,
 		jsonScalar(cfg.RuntimeClass),
 		jsonScalar(cfg.NodePool),
 		ttlSeconds,
 		jsonScalar(cfg.SandboxImage),
 		envBlock,
+		jsonScalar(string(profileJSON)),
 	)
 }
 
@@ -459,6 +533,15 @@ metadata:
   name: %[1]s
   labels:
     app.kubernetes.io/managed-by: console7
+    # Pod Security Admission "restricted": forbids hostNetwork/privileged/root and requires
+    # seccomp + dropped capabilities, so a renderer that (incorrectly) set hostNetwork could not
+    # bypass GKE_METADATA node-SA concealment at the host netns. This is the admission-layer
+    # enforcement of the no-standing-credential property the sandbox pod manifest already honours
+    # (gke/README.md residual); enforce-version pinned so the policy can't silently relax.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
 ---
 apiVersion: v1
 kind: ConfigMap

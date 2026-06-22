@@ -118,6 +118,57 @@ func TestRenderSandboxPod_ImageAndModelEnv(t *testing.T) {
 	}
 }
 
+func TestRenderSandboxPod_ManagedSettingsLock(t *testing.T) {
+	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
+	m := string(renderSandboxPod("test-sb-abc", cfg, interfaces.SandboxSpec{Persona: interfaces.PersonaAuthor, MaxTTL: time.Minute}))
+
+	// The session-profile ConfigMap carries the resolved persona for the init renderer.
+	for _, want := range []string{
+		"kind: ConfigMap",
+		"name: test-sb-abc-session-profile",
+		"profile.json:",
+		"author", // the persona the init container renders the locked settings from
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("manifest missing session-profile bit %q\n%s", want, m)
+		}
+	}
+
+	// The init container renders the locked policy (non-root, PSA-restricted) into a memory emptyDir.
+	for _, want := range []string{
+		"initContainers:",
+		"name: render-policy",
+		"console7-policyhelper < /etc/console7/session-profile/profile.json",
+		"medium: Memory",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("manifest missing init-render bit %q\n%s", want, m)
+		}
+	}
+
+	// The LOCK: the ENGINE container mounts the managed-settings volume READ-ONLY (the kernel denies
+	// writes to a readOnly mount regardless of uid/mode, so the non-root engine cannot overwrite its
+	// own policy). This exact sequence is unique to the engine mount (the init mount has no readOnly).
+	lockMount := "          mountPath: /etc/claude-code\n          readOnly: true"
+	if !strings.Contains(m, lockMount) {
+		t.Errorf("engine container does not mount managed-settings READ-ONLY (the policy lock):\n%s", m)
+	}
+
+	// PSA-restricted-compliant securityContext (so the namespace's enforce:restricted admits the pod
+	// and a hostNetwork metadata-bypass is structurally impossible).
+	for _, want := range []string{
+		"seccompProfile:",
+		"type: RuntimeDefault",
+		"drop: [ALL]",
+		"fsGroup: 65532",
+		"runAsNonRoot: true",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("manifest missing PSA-restricted securityContext bit %q\n%s", want, m)
+		}
+	}
+}
+
 func TestRenderSandboxPod_TTLFloor(t *testing.T) {
 	// A sub-second MaxTTL still yields a hard deadline of at least 1 second (never 0 = unbounded).
 	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
@@ -184,6 +235,8 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 		"port: 3128", // proxy egress is port-scoped, not all-ports
 		"a.internal",
 		"namespace: sb",
+		"pod-security.kubernetes.io/enforce: restricted", // PSA closes the hostNetwork metadata-bypass
+		"pod-security.kubernetes.io/enforce-version: latest",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("namespace+egress manifest missing %q\n---\n%s", want, m)
