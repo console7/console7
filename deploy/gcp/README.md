@@ -20,7 +20,7 @@ module serves both new-project and existing-project adopters.
 | `modules/networking/` | **active** | default-deny egress floor + the narrow sandbox→proxy ALLOW rule (boundary-first) |
 | `modules/gke/` | stub | gVisor node pool + Workload Identity (binds the secrets SA) |
 | `modules/artifact-registry/` | **active** | Docker repository for the signed sandbox base-image + repo-scoped pull grant to the GKE node SA |
-| `modules/egress-proxy/` | **active** (kubectl) | Squid forward proxy (default-deny FQDN allowlist), kubectl-applied; the VPC ALLOW rule lives in `modules/networking` |
+| `modules/egress-proxy/` | reference + README | Hardened Squid shape (default-deny FQDN allowlist); the **authoritative proxy is rendered per session** by `providers/cloud-gcp` (one Squid per `<id>-proxy` namespace), not applied here; the VPC ALLOW rule lives in `modules/networking` |
 | `modules/evidence/` | stub | GCS bucket-lock WORM behind the evidence `Store` seam |
 
 ## Prerequisites (bootstrap, not this module)

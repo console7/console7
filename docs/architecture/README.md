@@ -16,9 +16,11 @@ Mermaid C4 dialect) for reliable GitHub rendering; the C4 *levels* are noted in 
 > `Cloud.RunTask`→`EngineResult` with real-commit-digest signing (#47), plus in-sandbox
 > `git`/`ca-certificates` (#48). The **sandbox base image** now also has a real
 > **signed-release pipeline** (build → SBOM → SLSA provenance → keyless cosign sign, distinct
-> identity enforced). Still **target state**: the out-of-band FQDN-allowlist egress **proxy**
-> (PR-3), **DLP**, the **Observe Gateway**, the **MCP allowlist**, the consumer-side image
-> **digest pin** (B3), and the engine's **live in-pod integration** (Tier-2). The views
+> identity enforced). The **per-session out-of-band FQDN-allowlist egress proxy** now lands too
+> (B8: a Squid per `<id>-proxy` namespace, default-deny ACLs, NetworkPolicy-pinned — rendered by
+> `providers/cloud-gcp`; the live egress/metadata-deny proof is **B11**). Still **target state**:
+> **DLP**, the **Observe Gateway**, the **MCP allowlist**, and the engine's **live in-pod
+> integration** (Tier-2, B11). The views
 > mark this explicitly — **faded + dashed = target state**. See
 > [Reviewer observations](#c-reviewer-observations).
 
@@ -97,7 +99,9 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
 
 ## (b) Residual gaps the code did not let me determine
 1. **Exact sandbox/network topology** — pod/namespace layout, NetworkPolicy rules, node-pool
-   shape, and whether egress is forward-proxy + firewall or firewall-only (modules stubbed).
+   shape. *(Resolved as of #41/#43/B8: egress is **forward-proxy + firewall** — a VPC default-deny
+   floor + Cloud NAT, a per-session NetworkPolicy pinning the sandbox to its own proxy namespace,
+   and a per-session Squid FQDN-allowlist proxy rendered by `providers/cloud-gcp`.)*
 2. **The real `IdentityProvider` and `PolicySoR` adapters** — production OIDC/JWKS rotation
    and the GRC registry integration; today only `devkit.DevIdentity` and
    `devkit.FixedPolicySoR` (fixed T3/S1) exist.
@@ -125,11 +129,12 @@ What a second-line (2LoD) reviewer should flag, roughly in priority order:
    V2), **Cloud NAT**, and **node-SA metadata concealment** (`providers/cloud-gcp`, `modules/gke`)
    — on top of the already-implemented cryptographic layers (signing, evidence chain, seam
    refusals) and — as of #47/#48 — the **engine-invocation seam** (`Cloud.RunTask`→`EngineResult`
-   with real-commit-digest signing; in-sandbox `git`/`ca-certificates`). What **remains target
-   state**: the **out-of-band FQDN-allowlist egress proxy** (PR-3), **DLP**, the **Observe
-   Gateway**, the **MCP allowlist**, the **release/signing pipeline**, and the engine's **live
-   in-pod integration** (Tier-2). The residual gap is now the *content-aware* egress
-   controls (FQDN allowlist + DLP) and the operate lane — not the coarse boundary, which is in place.
+   with real-commit-digest signing; in-sandbox `git`/`ca-certificates`) and — as of B8 — the
+   **per-session out-of-band FQDN-allowlist egress proxy** (a Squid per `<id>-proxy` namespace,
+   rendered by `providers/cloud-gcp`; live egress/metadata-deny proof is B11). What **remains target
+   state**: **DLP**, the **Observe Gateway**, the **MCP allowlist**, and the engine's **live
+   in-pod integration** (Tier-2, B11). The residual gap is now **DLP** (the other content-aware
+   egress control) and the operate lane — not the coarse boundary or the FQDN allowlist, both in place.
 2. **Evidence integrity vs the privileged provisioning identity (SoD gap).** The GCS evidence
    bucket is only **tamper-evident** until `is_locked=true` (off by default, `RISKS.md` R-2),
    and the **APPLY SA holds `roles/storage.admin`** — so the very identity that provisions

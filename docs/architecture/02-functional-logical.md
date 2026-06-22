@@ -57,7 +57,7 @@ flowchart TB
     subgraph DP["Data plane &mdash; per-session, ephemeral, UNTRUSTED (distinct base image)"]
       direction TB
       SB["✅ sandbox base-image<br/>wraps genuine Claude Code engine<br/>policyHelper: locked settings + tripwire hook"]
-      PX["◻ egress-proxy<br/>default-deny perimeter (authoritative)"]
+      PX["✅ egress proxy &mdash; per-session Squid<br/>default-deny FQDN perimeter (authoritative)<br/>rendered by cloud-gcp"]
       OG["◻ observe-gateway<br/>redacting, audited telemetry façade"]
     end
 
@@ -168,7 +168,7 @@ flowchart TB
 | Container | Status | Responsibility |
 |---|---|---|
 | `base-image` | ✅ Dockerfile + `policyhelper` | Wraps the **genuine**, pinned Claude Code engine (distinct build identity, non-root, fail-closed); `policyHelper` renders the locked managed-settings + the operate mutating-command tripwire binary per persona × tier (PR-3). Engine-invocation seam landed (`Cloud.RunTask`→`EngineResult`, #47) + in-sandbox `git`/`ca-certificates` (#48); live in-pod engine integration ◻ Tier-2; Signing/SBOM ◻. |
-| `egress-proxy` | ◻ README | Control-side helper for the **authoritative** default-deny perimeter (cloud firewall + NAT), incl. IMDS block — *not* an in-process proxy. |
+| `egress-proxy` | ✅ per-session Squid (rendered by `cloud-gcp`) | The **authoritative** default-deny FQDN perimeter: one Squid per session (`renderPerSessionProxy`/`renderSquidConf`) in its own `<id>-proxy` namespace; the sandbox NetworkPolicy pins egress to that per-session `proxy-for:<id>` proxy only, reached by IP via `HTTPS_PROXY` (no in-sandbox DNS). Node-local IMDS blocked by GKE_METADATA, *not* this proxy. The `sandbox/egress-proxy/` dir is the requirements README. Live egress/metadata-deny proof ◻ B11. |
 | `observe-gateway` | ◻ README | Operate-lane redacting, query-audited, rate-limited façade over production telemetry. |
 
 ### The nine seams (`sdk/interfaces/`) and their reference providers
@@ -190,9 +190,11 @@ flowchart TB
   deploy time, not runtime calls.
 
 ## Notes & confidence
-- The `inference-router`, `dlp`, `ui`, the sandbox egress-proxy + observe-gateway, and `policy-opa` are **scaffold/README-only** at this commit; their
+- The `inference-router`, `dlp`, `ui`, the sandbox observe-gateway, and `policy-opa` are **scaffold/README-only** at this commit; their
   behaviour is shown per the normative spec and marked ◻ (faded). `cloud-gcp` **landed**
-  (#41) — the `CloudProvider` is no longer MemCloud-only. Everything marked ✅ was read in source.
+  (#41) — the `CloudProvider` is no longer MemCloud-only — and now **renders the per-session
+  egress proxy** (B8: a Squid per `<id>-proxy` namespace, default-deny FQDN ACLs, NetworkPolicy-pinned);
+  the live egress/metadata-deny proof is ◻ B11. Everything marked ✅ was read in source.
 - `IdentityProvider` and `PolicySoR` have **real dev/in-memory** implementations
   (`devkit.DevIdentity`, `devkit.FixedPolicySoR`); their *production* references
   (OIDC/JWKS, GRC registry adapter) are **(assumed/planned)** for later phases.

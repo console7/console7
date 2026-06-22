@@ -12,6 +12,10 @@ import (
 // digest is fake but well-formed: 64 lowercase hex). SandboxImage is required + digest-pinned.
 var testImage = "ghcr.io/console7/sandbox-base@sha256:" + strings.Repeat("a", 64)
 
+// testProxyEndpoint is a sample per-session proxy URL renderSandboxPod injects as HTTPS_PROXY (the
+// real value is resolved live from the proxy Service's ClusterIP in Provision).
+const testProxyEndpoint = "http://10.0.0.5:3128"
+
 func TestConfigNormalize(t *testing.T) {
 	// Defaults are applied for the optional fields.
 	got, err := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
@@ -75,7 +79,7 @@ func TestRenderSandboxPod_SecurityFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	m := string(renderSandboxPod("test-sb-abc", cfg, spec))
+	m := string(renderSandboxPod("test-sb-abc", cfg, spec, testProxyEndpoint))
 	for _, want := range []string{
 		"kind: Pod",
 		"name: test-sb-abc",
@@ -103,7 +107,7 @@ func TestRenderSandboxPod_ImageAndModelEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: time.Minute}))
+	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: time.Minute}, testProxyEndpoint))
 	if !strings.Contains(m, "image: "+jsonScalar(testImage)) {
 		t.Errorf("pod does not pin the digest image %q:\n%s", testImage, m)
 	}
@@ -115,12 +119,21 @@ func TestRenderSandboxPod_ImageAndModelEnv(t *testing.T) {
 			t.Errorf("pod missing inference env %q:\n%s", want, m)
 		}
 	}
+	// The per-session proxy is always injected as HTTPS_PROXY (reached by IP — the sandbox has no DNS).
+	for _, want := range []string{"name: HTTPS_PROXY", "name: HTTP_PROXY", `value: "` + testProxyEndpoint + `"`} {
+		if !strings.Contains(m, want) {
+			t.Errorf("pod missing proxy env %q:\n%s", want, m)
+		}
+	}
 
-	// With no model, NO ANTHROPIC_MODEL env is rendered (never an empty-valued footgun var).
+	// With no model, the proxy env is STILL rendered (it is not model-gated) but no ANTHROPIC_MODEL.
 	cfg2, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
-	m2 := string(renderSandboxPod("sb", cfg2, interfaces.SandboxSpec{MaxTTL: time.Minute}))
-	if strings.Contains(m2, "ANTHROPIC_MODEL") || strings.Contains(m2, "env:") {
-		t.Errorf("empty AnthropicModel should render no env block:\n%s", m2)
+	m2 := string(renderSandboxPod("sb", cfg2, interfaces.SandboxSpec{MaxTTL: time.Minute}, testProxyEndpoint))
+	if strings.Contains(m2, "ANTHROPIC_MODEL") {
+		t.Errorf("empty AnthropicModel should render no ANTHROPIC_MODEL env:\n%s", m2)
+	}
+	if !strings.Contains(m2, "name: HTTPS_PROXY") {
+		t.Errorf("proxy env must be rendered even with no model:\n%s", m2)
 	}
 	// And the API key is NEVER rendered into the pod spec (it is injected at run time).
 	if strings.Contains(m, "ANTHROPIC_API_KEY") {
@@ -130,7 +143,7 @@ func TestRenderSandboxPod_ImageAndModelEnv(t *testing.T) {
 
 func TestRenderSandboxPod_ManagedSettingsLock(t *testing.T) {
 	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
-	m := string(renderSandboxPod("test-sb-abc", cfg, interfaces.SandboxSpec{Persona: interfaces.PersonaAuthor, MaxTTL: time.Minute}))
+	m := string(renderSandboxPod("test-sb-abc", cfg, interfaces.SandboxSpec{Persona: interfaces.PersonaAuthor, MaxTTL: time.Minute}, testProxyEndpoint))
 
 	// The session-profile ConfigMap carries the resolved persona for the init renderer.
 	for _, want := range []string{
@@ -182,7 +195,7 @@ func TestRenderSandboxPod_ManagedSettingsLock(t *testing.T) {
 func TestRenderSandboxPod_TTLFloor(t *testing.T) {
 	// A sub-second MaxTTL still yields a hard deadline of at least 1 second (never 0 = unbounded).
 	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
-	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: 200 * time.Millisecond}))
+	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: 200 * time.Millisecond}, testProxyEndpoint))
 	if !strings.Contains(m, "activeDeadlineSeconds: 1") {
 		t.Fatalf("sub-second TTL did not floor to 1s:\n%s", m)
 	}
@@ -226,7 +239,7 @@ func TestNodePoolMetadataConcealed(t *testing.T) {
 
 func TestRenderSandboxPod_ResourceCaps(t *testing.T) {
 	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
-	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: time.Minute}))
+	m := string(renderSandboxPod("sb", cfg, interfaces.SandboxSpec{MaxTTL: time.Minute}, testProxyEndpoint))
 	for _, want := range []string{"resources:", "requests:", "limits:", "ephemeral-storage:"} {
 		if !strings.Contains(m, want) {
 			t.Errorf("pod manifest missing resource cap %q (untrusted pod must be bounded)\n%s", want, m)
@@ -241,8 +254,9 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 		"kind: ConfigMap",
 		"kind: NetworkPolicy",
 		"policyTypes: [Egress, Ingress]", // default-deny ingress AND egress
-		"console7.dev/egress-proxy",
-		"port: 3128", // proxy egress is port-scoped, not all-ports
+		"console7.dev/session: sb",       // the per-session identity the proxy's ingress policy admits
+		"console7.dev/proxy-for: sb",     // egress pinned to THIS session's proxy ns, never a shared label
+		"port: 3128",                     // proxy egress is port-scoped, not all-ports
 		"a.internal",
 		"namespace: sb",
 		"pod-security.kubernetes.io/enforce: restricted", // PSA closes the hostNetwork metadata-bypass
@@ -314,4 +328,113 @@ func TestConfigNormalize_WorkdirDefault(t *testing.T) {
 	if got2.Workdir != "/src" {
 		t.Errorf("explicit Workdir not preserved: %q", got2.Workdir)
 	}
+}
+
+func TestRenderSquidConf(t *testing.T) {
+	// A valid allowlist becomes exact host:port ACLs above a deny-all floor.
+	conf, err := renderSquidConf([]string{"https://api.anthropic.com", "https://reg.internal:8443"})
+	if err != nil {
+		t.Fatalf("renderSquidConf valid: %v", err)
+	}
+	for _, want := range []string{
+		"http_port 3128",
+		"acl c7_dst_0 dstdomain api.anthropic.com",
+		"acl c7_port_0 port 443",
+		"http_access allow c7_dst_0 c7_port_0",
+		"acl c7_dst_1 dstdomain reg.internal",
+		"acl c7_port_1 port 8443",
+		"http_access deny all",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("squid.conf missing %q:\n%s", want, conf)
+		}
+	}
+	// The deny floor MUST be last (no allow line can follow it).
+	if idx := strings.LastIndex(conf, "http_access allow"); idx > strings.LastIndex(conf, "http_access deny all") {
+		t.Errorf("an http_access allow follows the deny floor (over-permissive):\n%s", conf)
+	}
+
+	// An empty allowlist is deny-all: the floor is present, no allow line above it.
+	empty, err := renderSquidConf(nil)
+	if err != nil {
+		t.Fatalf("renderSquidConf empty: %v", err)
+	}
+	if !strings.Contains(empty, "http_access deny all") || strings.Contains(empty, "http_access allow") {
+		t.Errorf("empty allowlist is not deny-all:\n%s", empty)
+	}
+
+	// A malformed entry FAILS CLOSED (never silently drops it into an over-broad/empty config).
+	if _, err := renderSquidConf([]string{"https://ok.internal", "ftp://nope"}); err == nil {
+		t.Error("expected renderSquidConf to fail closed on a malformed allowlist entry")
+	}
+}
+
+func TestSquidConfigHash(t *testing.T) {
+	a, _ := renderSquidConf([]string{"https://a.internal", "https://b.internal"})
+	narrowed, _ := renderSquidConf([]string{"https://a.internal"})
+	if squidConfigHash(a) == squidConfigHash(narrowed) {
+		t.Error("narrowing the allowlist must change the config hash (else the proxy pod would not roll)")
+	}
+	// Deterministic: the SAME allowlist rendered twice hashes identically (no roll on an unchanged Set).
+	again, _ := renderSquidConf([]string{"https://a.internal", "https://b.internal"})
+	if squidConfigHash(a) != squidConfigHash(again) {
+		t.Error("config hash must be deterministic for an unchanged allowlist")
+	}
+}
+
+func TestRenderPerSessionProxy(t *testing.T) {
+	conf, err := renderSquidConf([]string{"https://api.anthropic.com"})
+	if err != nil {
+		t.Fatalf("renderSquidConf: %v", err)
+	}
+	m := string(renderPerSessionProxy("sb", conf, squidConfigHash(conf)))
+	for _, want := range []string{
+		"kind: Namespace",
+		"name: sb-proxy",             // the per-session proxy lives in its OWN namespace
+		"console7.dev/proxy-for: sb", // the label the sandbox's egress policy pins to
+		"pod-security.kubernetes.io/enforce: restricted",
+		"kind: ConfigMap",
+		"squid.conf: |",
+		"    http_access deny all", // squid.conf embedded as an indented block scalar
+		"kind: Deployment",
+		"name: egress-proxy",
+		"type: Recreate",                   // a narrow tears the old broad proxy down before the new serves
+		"console7.dev/squid-config-hash: ", // rolls the pod on a narrow
+		"image: " + squidImage,             // digest-pinned Squid
+		"readOnlyRootFilesystem: true",
+		"runAsNonRoot: true",
+		`drop: ["ALL"]`,
+		"tcpSocket:", // readiness-gated (no connect-before-listen race)
+		"kind: Service",
+		"kind: NetworkPolicy",
+		"policyTypes: [Ingress]",   // the proxy admits ingress only from its sandbox
+		"console7.dev/session: sb", // ...selected by the per-session source label
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("per-session proxy manifest missing %q\n---\n%s", want, m)
+		}
+	}
+	// Defence-in-depth: the proxy must NOT carry an egress denial of its own (it needs DNS + NAT to
+	// resolve and reach the allowlisted hosts); only Ingress is restricted.
+	if strings.Contains(m, "Egress") {
+		t.Errorf("per-session proxy must not restrict its own egress (it needs DNS+NAT):\n%s", m)
+	}
+	// A narrowed config yields a different annotation value (the roll trigger).
+	confNarrow, _ := renderSquidConf(nil)
+	mNarrow := string(renderPerSessionProxy("sb", confNarrow, squidConfigHash(confNarrow)))
+	if extractHash(t, m) == extractHash(t, mNarrow) {
+		t.Error("a different squid.conf must render a different config-hash annotation")
+	}
+}
+
+// extractHash pulls the squid-config-hash annotation value out of a rendered proxy manifest.
+func extractHash(t *testing.T, manifest string) string {
+	t.Helper()
+	const key = "console7.dev/squid-config-hash: "
+	i := strings.Index(manifest, key)
+	if i < 0 {
+		t.Fatalf("no config-hash annotation in:\n%s", manifest)
+	}
+	rest := manifest[i+len(key):]
+	return strings.TrimSpace(rest[:strings.IndexByte(rest, '\n')])
 }

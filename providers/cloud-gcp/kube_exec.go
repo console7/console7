@@ -3,9 +3,12 @@ package cloudgcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -184,7 +187,16 @@ type kubeRuntime struct {
 // pushes it out past the absolute deadline) and only a backstop, so the annotation is the
 // authoritative absolute-deadline signal.
 func (k *kubeRuntime) Provision(ctx context.Context, h interfaces.SandboxHandle, spec interfaces.SandboxSpec) error {
-	if err := k.run.kubectlApply(ctx, renderSandboxPod(h.ID, k.cfg, spec)); err != nil {
+	// The EgressController.Set already created this sandbox's PER-SESSION forward proxy (its own
+	// <id>-proxy namespace + Squid Deployment/Service), so its Service ClusterIP is allocated and
+	// resolvable now. Resolve it and inject it as the sandbox's HTTPS_PROXY — the sandbox has NO DNS,
+	// so it must reach the proxy by IP. Fail closed: if the proxy has no usable ClusterIP we do NOT
+	// start a workload that has no egress path (or, worse, one that silently bypasses the proxy).
+	endpoint, err := k.run.proxyEndpoint(ctx, proxyNS(h.ID))
+	if err != nil {
+		return fmt.Errorf("cloudgcp: resolve per-session egress proxy endpoint before provision: %w", err)
+	}
+	if err := k.run.kubectlApply(ctx, renderSandboxPod(h.ID, k.cfg, spec, endpoint)); err != nil {
 		return err
 	}
 	expiresAt := nowUTC().Add(spec.MaxTTL).Format(time.RFC3339)
@@ -198,39 +210,72 @@ func (k *kubeRuntime) Destroy(ctx context.Context, h interfaces.SandboxHandle) e
 	return k.run.kubectlDeletePod(ctx, h.ID, h.ID)
 }
 
-// netpolEgressController realises EgressController: it owns the sandbox NAMESPACE and its
-// default-deny NetworkPolicy (the perimeter), plus a ConfigMap carrying the FQDN allowlist the
-// out-of-band forward proxy consumes. The NetworkPolicy is an allow-list whose ONLY permitted
-// egress is to the proxy namespace (on the proxy port) — so every other destination, INCLUDING
-// DNS and the metadata server, is denied by omission at this layer. The sandbox is granted NO
-// in-cluster DNS deliberately (docs/THREAT-MODEL.md "no in-sandbox DNS for arbitrary names"): even
-// kube-dns resolves arbitrary names and forwards them upstream, which is a DNS-tunnelling exfil
-// path that bypasses the FQDN allowlist; name resolution is the forward proxy's job, and the proxy
-// is reached by IP (the orchestrator injects its address, no lookup needed — PR-3). It also sets a
-// default-deny INGRESS so another pod that discovers the sandbox IP cannot reach the engine. This
-// in-cluster policy is defence-in-depth, NOT the authoritative metadata block: a VPC firewall
-// cannot see the node-local metadata path, so the authoritative control is the GKE metadata server
-// (GKE_METADATA mode) on the sandbox node pool, which conceals the node service account
-// (deploy/gcp/modules/networking + modules/gke, PR-2b; New preflights it).
+// netpolEgressController realises EgressController. It owns BOTH halves of one session's perimeter:
+//
+//  1. the sandbox NAMESPACE + its default-deny NetworkPolicy (the in-cluster wall) + an audit
+//     ConfigMap recording the resolved FQDN allowlist; and
+//  2. a PER-SESSION forward proxy — its OWN namespace (<id>-proxy) holding a Squid Deployment +
+//     Service + ConfigMap whose squid.conf is the session's allowlist as Squid ACLs over a deny-all
+//     floor (renderPerSessionProxy / renderSquidConf).
+//
+// PER-SESSION (not one shared proxy) is deliberate (the B7→B8 decision): a single shared Squid with
+// `dstdomain`-only allows would admit each session's hosts to EVERY client on the listener — a
+// cluster-wide UNION of allowlists (a tenet-4 / scope-follows-artefact violation). A proxy that
+// lives and dies with its one session makes the source discriminator STRUCTURAL (the proxy serves
+// exactly one sandbox), needs no in-place config reload (a re-Set rolls the pod via a config-hash
+// annotation), and scopes a proxy failure to its own session instead of the whole data plane.
+//
+// The NetworkPolicy is an allow-list whose ONLY permitted egress is to THIS session's proxy
+// namespace (selected by the per-session `console7.dev/proxy-for: <id>` label, never a shared label)
+// on the proxy port — so every other destination, INCLUDING DNS and the metadata server, is denied
+// by omission at this layer. The sandbox is granted NO in-cluster DNS deliberately
+// (docs/THREAT-MODEL.md "no in-sandbox DNS for arbitrary names"): even kube-dns resolves arbitrary
+// names and forwards them upstream, a DNS-tunnelling exfil path that bypasses the FQDN allowlist;
+// name resolution is the proxy's job, and the proxy is reached by IP (Provision injects its
+// ClusterIP as HTTPS_PROXY, no lookup needed). It also sets a default-deny INGRESS so another pod
+// that discovers the sandbox IP cannot reach the engine; symmetrically the proxy namespace admits
+// ingress ONLY from its own sandbox namespace (console7.dev/session: <id>). This in-cluster policy
+// is defence-in-depth, NOT the authoritative metadata block: a VPC firewall cannot see the
+// node-local metadata path, so the authoritative control is the GKE metadata server (GKE_METADATA
+// mode) on the sandbox node pool, which conceals the node service account (deploy/gcp/modules/
+// networking + modules/gke; New preflights it).
 type netpolEgressController struct {
 	run *kubeRunner
 	cfg Config
 }
 
-// Set creates/updates the sandbox namespace, its default-deny NetworkPolicy, and the allowlist
-// ConfigMap for handle. It is applied (idempotent upsert) so a later narrow can update the
-// allowlist in place. An empty allowlist is deny-all (egress is pinned to the proxy namespace; the
-// proxy then admits nothing).
+// Set creates/updates, for handle, BOTH the per-session forward proxy (its namespace + Squid
+// Deployment/Service rendering this allowlist as ACLs) AND the sandbox namespace + default-deny
+// NetworkPolicy (pinned to that proxy) + the audit allowlist ConfigMap. It is applied (idempotent
+// upsert) so a later narrow re-renders the proxy's ACLs in place: the squid.conf changes, its
+// config-hash annotation on the Deployment pod template changes, and the Deployment rolls a fresh
+// Squid pod with the narrowed config (a subPath ConfigMap mount does NOT hot-reload, so the
+// annotation-driven roll is how the new ACLs take effect). The proxy is rendered FIRST so its
+// Service ClusterIP exists before Provision resolves it. An empty allowlist is deny-all: the proxy's
+// squid.conf has no allow line above its `http_access deny all` floor, and egress is pinned to that
+// proxy. FAIL-CLOSED: a malformed allowlist entry aborts the whole Set (renderSquidConf errors)
+// rather than rendering a proxy that silently drops the bad entry.
 func (e *netpolEgressController) Set(ctx context.Context, h interfaces.SandboxHandle, allowlist []string) error {
+	conf, err := renderSquidConf(allowlist)
+	if err != nil {
+		// A malformed entry must never collapse into an over-broad or vacuously-empty perimeter.
+		return fmt.Errorf("cloudgcp: render per-session proxy config (fail closed): %w", err)
+	}
+	if err := e.run.kubectlApply(ctx, renderPerSessionProxy(h.ID, conf, squidConfigHash(conf))); err != nil {
+		return fmt.Errorf("cloudgcp: set per-session egress proxy: %w", err)
+	}
 	return e.run.kubectlApply(ctx, renderNamespaceAndEgress(h.ID, allowlist))
 }
 
-// Clear deletes the sandbox namespace, which reaps its NetworkPolicy, ConfigMap, and any pod still
-// in it. It is the teardown counterpart to Set (Set creates the namespace; Clear deletes it) and
-// is idempotent (--ignore-not-found), so the provider's failed-provision rollback can call it to
-// remove a perimeter whose workload never started, without leaking the namespace.
+// Clear deletes BOTH the sandbox namespace and its per-session proxy namespace, each of which reaps
+// its own NetworkPolicy/ConfigMap/Service/workload. It is the teardown counterpart to Set and is
+// idempotent (--ignore-not-found), so the provider's failed-provision rollback can call it to remove
+// a perimeter whose workload never started without leaking either namespace. Both deletes are
+// attempted (errors joined) so a failure tearing one down never orphans the other.
 func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.SandboxHandle) error {
-	return e.run.kubectlDeleteNamespace(ctx, h.ID)
+	perr := e.run.kubectlDeleteNamespace(ctx, proxyNS(h.ID))
+	serr := e.run.kubectlDeleteNamespace(ctx, h.ID)
+	return errors.Join(perr, serr)
 }
 
 // kubeEngineRunner realises EngineRunner: it runs the genuine Claude Code engine inside an
@@ -519,6 +564,15 @@ func egressAllowlistToSquidACL(allowlist []string) (string, error) {
 		if host == "" || !hostRe.MatchString(host) {
 			return "", fmt.Errorf("cloudgcp: egress allowlist URL %q has missing/invalid host %q", raw, host)
 		}
+		// Reject an IP-literal host: Squid's dstdomain matches by name, and a CONNECT to a bare IP is
+		// matched by `dst` (not dstdomain), so an IP entry would NOT reliably permit the intended
+		// traffic — it would silently fail toward the deny floor. The allowlist is FQDN-based by design
+		// (DESIGN.md §5.2: the proxy resolves names; the sandbox has no DNS), so fail CLOSED and loud
+		// here rather than render a dstdomain ACL that does not do what it says. (IPv4 literals pass
+		// hostRe — digits and dots are valid labels — so this check, not the regex, is the gate.)
+		if net.ParseIP(host) != nil {
+			return "", fmt.Errorf("cloudgcp: egress allowlist URL %q uses an IP-literal host %q — the allowlist is FQDN-based (Squid dstdomain); use a hostname", raw, host)
+		}
 		port := u.Port()
 		if port == "" {
 			if u.Scheme == "https" {
@@ -666,19 +720,32 @@ spec:
 // renderSandboxPod renders the gVisor Pod for one sandbox into the namespace the EgressController
 // already created. nsID is the crypto-random handle ID (a valid DNS-1123 label, safe unquoted as
 // the resource/namespace name); every other dynamic value is json-encoded.
-func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec) []byte {
+func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec, proxyEndpoint string) []byte {
 	ttlSeconds := int64(spec.MaxTTL.Seconds())
 	if ttlSeconds < 1 {
 		ttlSeconds = 1
 	}
-	// Render only the NON-SECRET inference env at provision time: ANTHROPIC_MODEL (the org-API model
-	// pin; the engine's default 404s, so a real run needs it). The Anthropic API KEY is deliberately
-	// NOT in the pod spec — a secret in the manifest would persist in etcd; it is injected into the
-	// running pod at run time by the SecretsProvider injection path (B5/B9). When AnthropicModel is
-	// empty (e.g. a lifecycle-only provision) no env block is rendered.
-	envBlock := ""
+	// Render only NON-SECRET env at provision time. The Anthropic API KEY is deliberately NOT in the
+	// pod spec — a secret in the manifest would persist in etcd; it is injected into the running pod at
+	// run time by the SecretsProvider injection path (B5/B9).
+	//   - HTTPS_PROXY/HTTP_PROXY (both cases) point the engine + git/curl at THIS session's forward
+	//     proxy by IP (the sandbox has no DNS). This is CONVENIENCE for well-behaved clients only — the
+	//     NetworkPolicy that pins egress to the proxy is the AUTHORITATIVE perimeter; a hostile client
+	//     that ignores the env var still has nowhere else to go (DESIGN.md §5.2).
+	//   - ANTHROPIC_MODEL is the org-API model pin (the engine's default 404s, so a real run needs it);
+	//     empty when not configured (e.g. a lifecycle-only provision).
+	var env strings.Builder
+	if proxyEndpoint != "" {
+		for _, name := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
+			fmt.Fprintf(&env, "        - name: %s\n          value: %s\n", name, jsonScalar(proxyEndpoint))
+		}
+	}
 	if cfg.AnthropicModel != "" {
-		envBlock = fmt.Sprintf("      env:\n        - name: ANTHROPIC_MODEL\n          value: %s\n", jsonScalar(cfg.AnthropicModel))
+		fmt.Fprintf(&env, "        - name: ANTHROPIC_MODEL\n          value: %s\n", jsonScalar(cfg.AnthropicModel))
+	}
+	envBlock := ""
+	if env.Len() > 0 {
+		envBlock = "      env:\n" + env.String()
 	}
 
 	// The session's resolved profile (persona) the init container renders the LOCKED managed-settings
@@ -712,9 +779,252 @@ func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec) []by
 var nowUTC = func() time.Time { return time.Now().UTC() }
 
 // proxyPort is the forward-proxy listener the sandbox is allowed to reach. It is the conventional
-// Squid/forward-proxy port; sandbox/egress-proxy (PR-3) sets the authoritative value when it ships
-// the proxy workload, at which point this rule is reconciled to match.
+// Squid/forward-proxy port; it MUST stay in sync with deploy/gcp/modules/networking's
+// var.egress_proxy_port (the VPC sandbox→pod-range ALLOW rule) and the readiness/Service port below.
 const proxyPort = 3128
+
+// proxyNamespaceSuffix derives a sandbox's per-session proxy namespace from its handle id. The id is
+// a DNS-1123 label ("<prefix>-sb-<32 hex>"); appending "-proxy" stays a valid label and is unique
+// per session, so the proxy namespace is never shared and Set/Provision/Clear all derive it
+// identically from h.ID.
+const proxyNamespaceSuffix = "-proxy"
+
+func proxyNS(id string) string { return id + proxyNamespaceSuffix }
+
+// proxyServiceName is the per-session Squid Service/Deployment name (within its own namespace, so a
+// constant name is unambiguous). Provision resolves <proxyServiceName>.<id>-proxy's ClusterIP to
+// inject HTTPS_PROXY.
+const proxyServiceName = "egress-proxy"
+
+// squidImage is the digest-pinned forward-proxy image (Squid 6.x on Ubuntu 24.04, Canonical-
+// maintained, content-addressed — the bytes can't change under us). It is the same hardened image
+// the sandbox runs behind; an adopter MAY mirror it into their in-tenancy Artifact Registry (the
+// sandbox-image model). Pinned here in code (the per-session proxy is rendered by this provider, not
+// a static manifest), so a registry-trust scanner heuristic does not apply.
+const squidImage = "ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+
+// proxyEndpoint resolves the per-session proxy Service's ClusterIP and returns the HTTPS_PROXY URL
+// (http://<ip>:<port>) the sandbox reaches it by. The Service exists as soon as Set applied it (the
+// API server allocates the ClusterIP synchronously), so this read succeeds before the Squid pod is
+// even Ready. FAIL-CLOSED: a missing/headless/unparseable ClusterIP errors rather than yielding a
+// broken proxy URL — the sandbox has no DNS, so a bad address means no egress, and provisioning must
+// not proceed believing a proxy is reachable when it is not.
+func (r *kubeRunner) proxyEndpoint(ctx context.Context, proxyNamespace string) (string, error) {
+	out, err := r.run(ctx, "kubectl", nil,
+		"get", "svc", proxyServiceName, "-n", proxyNamespace, "-o", "jsonpath={.spec.clusterIP}")
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(out))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("cloudgcp: per-session proxy Service %s/%s has no usable ClusterIP (got %q) — refusing to provision a sandbox with no resolvable egress proxy (fail closed)", proxyNamespace, proxyServiceName, ip)
+	}
+	return fmt.Sprintf("http://%s:%d", ip, proxyPort), nil
+}
+
+// renderSquidConf builds the full per-session squid.conf: the stateless policy-gateway preamble, the
+// session's allowlist as exact host:port ACLs (egressAllowlistToSquidACL — fail-closed on any
+// malformed entry), then the `http_access deny all` floor. An EMPTY allowlist yields a config with
+// no allow line above the floor = deny-all (the correct default). The preamble mirrors the reviewed
+// reference Squid shape (no cache, no identity/forwarded-for leakage).
+func renderSquidConf(allowlist []string) (string, error) {
+	acls, err := egressAllowlistToSquidACL(allowlist)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("http_port 3128\n")
+	// No caching: this is a policy gateway, not a cache — keep it stateless and memory-light.
+	b.WriteString("cache deny all\n")
+	// Do not leak the proxy's identity or the client's address downstream.
+	b.WriteString("via off\n")
+	b.WriteString("forwarded_for delete\n")
+	// The per-session allowlist (empty ⇒ no allow line ⇒ everything hits the deny floor below).
+	b.WriteString(acls)
+	b.WriteString("http_access deny all\n")
+	b.WriteString("coredump_dir /var/spool/squid\n")
+	return b.String(), nil
+}
+
+// squidConfigHash is the content hash of a rendered squid.conf, stamped as a pod-template annotation
+// so a re-Set with a NARROWED allowlist changes the Deployment's pod template and rolls a fresh Squid
+// pod that reads the new ConfigMap (a subPath ConfigMap mount is frozen at pod creation and does not
+// hot-reload, so the roll — not an in-place edit — is how new ACLs take effect).
+func squidConfigHash(conf string) string {
+	sum := sha256.Sum256([]byte(conf))
+	return hex.EncodeToString(sum[:])
+}
+
+// indentLines prefixes every non-empty line of s with indent (empty lines stay truly empty so a YAML
+// block scalar reads them as blank, not as indent-only whitespace). Used to embed squid.conf as a
+// `|` block scalar in the ConfigMap.
+func indentLines(s, indent string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, ln := range lines {
+		if ln != "" {
+			lines[i] = indent + ln
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// perSessionProxyTemplate is the per-session forward-proxy manifest: its own PSA-restricted
+// Namespace, the squid.conf ConfigMap, the hardened Squid Deployment (non-root uid 65532, read-only
+// root FS, dropped caps, RuntimeDefault seccomp, readiness-gated, config-hash annotation), the
+// Service, and an ingress NetworkPolicy admitting ONLY this session's sandbox namespace. Args:
+// 1=proxy namespace, 2=session id (the proxy-for + ingress session-selector value), 3=indented
+// squid.conf, 4=config hash, 5=image, 6=proxy port.
+const perSessionProxyTemplate = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: %[1]s
+  labels:
+    app.kubernetes.io/managed-by: console7
+    # The PER-SESSION label the sandbox NetworkPolicy's egress namespaceSelector pins to — so a
+    # sandbox can reach ONLY its own session's proxy, never another session's (no allowlist union).
+    console7.dev/proxy-for: %[2]s
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: squid-config
+  namespace: %[1]s
+data:
+  squid.conf: |
+%[3]s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-proxy
+  namespace: %[1]s
+  labels:
+    app: egress-proxy
+spec:
+  replicas: 1
+  # Recreate (not the default RollingUpdate): on a NARROW the config-hash annotation rolls the pod,
+  # and Recreate tears the OLD (broader) Squid down BEFORE the new one serves — so narrowing fails
+  # CLOSED (a brief no-egress gap) instead of load-balancing across an old pod that still admits a
+  # just-removed destination. A momentary egress gap is the correct trade for never serving stale reach.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: egress-proxy
+  template:
+    metadata:
+      labels:
+        app: egress-proxy
+      annotations:
+        # Rolls the pod when the allowlist narrows (subPath ConfigMap mounts don't hot-reload).
+        console7.dev/squid-config-hash: "%[4]s"
+    spec:
+      # No nodeSelector: the gVisor sandbox pool's structural taint keeps this untolerating
+      # Deployment off it, so it schedules on the control pool (which has the sanctioned NAT egress).
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: squid
+          image: %[5]s
+          ports:
+            - name: proxy
+              containerPort: %[6]d
+          # Gate Service Endpoints on Squid actually listening (no connect-before-listen race).
+          readinessProbe:
+            tcpSocket:
+              port: %[6]d
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: squid-config
+              mountPath: /etc/squid/squid.conf
+              subPath: squid.conf
+              readOnly: true
+            - name: spool
+              mountPath: /var/spool/squid
+            - name: logs
+              mountPath: /var/log/squid
+            - name: run
+              mountPath: /var/run
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: squid-config
+          configMap:
+            name: squid-config
+        - name: spool
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-proxy
+  namespace: %[1]s
+spec:
+  selector:
+    app: egress-proxy
+  ports:
+    - name: proxy
+      port: %[6]d
+      targetPort: %[6]d
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console7-proxy-ingress
+  namespace: %[1]s
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              console7.dev/session: %[2]s
+      ports:
+        - protocol: TCP
+          port: %[6]d
+`
+
+// renderPerSessionProxy renders the per-session forward proxy for one sandbox. nsID is the sandbox's
+// crypto-random handle id (a valid DNS-1123 label, safe unquoted as a name/label value); the proxy
+// lives in nsID+"-proxy". squidConf is the rendered config (embedded as an indented block scalar);
+// configHash rolls the pod on a narrow.
+func renderPerSessionProxy(nsID string, squidConf, configHash string) []byte {
+	return fmt.Appendf(nil, perSessionProxyTemplate,
+		proxyNS(nsID),
+		nsID,
+		indentLines(squidConf, "    "),
+		configHash,
+		squidImage,
+		proxyPort,
+	)
+}
 
 // renderNamespaceAndEgress renders the sandbox Namespace + the default-deny NetworkPolicy + the
 // allowlist ConfigMap. The NetworkPolicy denies ALL ingress (no ingress rules), and its ONLY
@@ -740,6 +1050,10 @@ metadata:
   name: %[1]s
   labels:
     app.kubernetes.io/managed-by: console7
+    # The PER-SESSION identity this sandbox namespace carries — the per-session proxy's ingress
+    # NetworkPolicy admits ONLY a source namespace bearing this exact label, so a sandbox can talk to
+    # its own proxy and nothing else can.
+    console7.dev/session: %[1]s
     # Pod Security Admission "restricted": forbids hostNetwork/privileged/root and requires
     # seccomp + dropped capabilities, so a renderer that (incorrectly) set hostNetwork could not
     # bypass GKE_METADATA node-SA concealment at the host netns. This is the admission-layer
@@ -770,7 +1084,9 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              console7.dev/egress-proxy: "true"
+              # THIS session's proxy namespace only (per-session, never a shared label) — so the
+              # sandbox's one egress path is its own forward proxy, which enforces the FQDN allowlist.
+              console7.dev/proxy-for: %[1]s
       ports:
         - protocol: TCP
           port: %[3]d

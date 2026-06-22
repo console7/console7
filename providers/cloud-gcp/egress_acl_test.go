@@ -53,6 +53,8 @@ func TestEgressAllowlistToSquidACL_FailsClosedOnMalformed(t *testing.T) {
 		{"port out of range", "https://api.anthropic.com:99999"},
 		{"non-numeric port", "https://api.anthropic.com:https"},
 		{"empty string", ""},
+		{"IPv4-literal host (dstdomain mishandles it)", "https://10.0.0.5"},
+		{"IPv4-literal host with port", "https://10.0.0.5:8443"},
 	} {
 		if _, err := egressAllowlistToSquidACL([]string{tc.entry}); err == nil {
 			t.Errorf("%s: expected fail-closed error for %q, got none", tc.name, tc.entry)
