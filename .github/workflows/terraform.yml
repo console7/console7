@@ -69,3 +69,7 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           exit-code: "1"
           hide-progress: true
+          # Path-scoped misconfig ignores (mirrored in docs/RISKS.md). YAML form (not the line-based
+          # .trivyignore) so a suppression is bound to a specific file, never a blanket ID — trivy does
+          # not auto-load the .yaml variant, so it is named explicitly. Terraform findings stay inline.
+          trivyignores: .trivyignore.yaml

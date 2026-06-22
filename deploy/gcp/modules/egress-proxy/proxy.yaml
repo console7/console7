@@ -1,0 +1,140 @@
+# Console7 egress forward proxy (Squid) — the out-of-band FQDN-allowlist enforcement point every
+# sandbox pod reaches for ALL egress. It is the authoritative content-aware perimeter that a
+# NetworkPolicy (IP-based) cannot be: the per-pod NetworkPolicy pins a sandbox to THIS proxy, and the
+# proxy decides which FQDNs:port the session may reach.
+#
+# kubectl-applied (kept OUT of Terraform so the deploy stays google-provider-only, exactly like
+# modules/gke/reaper.yaml): `kubectl apply -f proxy.yaml`.
+#
+# DEFAULT-DENY: this base config admits NOTHING — no maintainer destinations, adopter-composed only
+# (GOAL.md tenet 1). The orchestrator injects the per-session allowlist ACLs (B8); until then the
+# proxy denies every request. It runs on the NON-sandbox (control) node pool — the gVisor sandbox
+# pool's structural taint keeps this untainted Deployment off it, and the control pool has the
+# sanctioned NAT egress the sandbox pool is denied. The sandbox->proxy path is the VPC ALLOW rule
+# (modules/networking, port 3128) + the per-session NetworkPolicy (providers/cloud-gcp).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: console7-egress-proxy
+  labels:
+    app.kubernetes.io/managed-by: console7
+    # Selected by the sandbox NetworkPolicy's namespaceSelector (providers/cloud-gcp): the ONLY
+    # egress destination a sandbox pod is permitted at the K8s layer. Keep this key/value in sync.
+    console7.dev/egress-proxy: "true"
+    # Trusted infra (not untrusted agent code): PSA `baseline` forbids privileged/host namespaces.
+    # `restricted` (non-root + dropped caps) is a hardening follow-up once the Squid image is
+    # confirmed to run non-root cleanly (it sets up as root then drops to the squid user).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: squid-config
+  namespace: console7-egress-proxy
+data:
+  squid.conf: |
+    # DEFAULT-DENY forward proxy. The per-session allowlist (dstdomain/port ACLs + matching
+    # http_access allow lines) is injected ABOVE the final deny by the orchestrator (B8); until then
+    # the proxy admits NOTHING.
+    http_port 3128
+    acl CONNECT method CONNECT
+    # No caching: this is a policy gateway, not a cache — keep it stateless and memory-light.
+    cache deny all
+    # Do not leak the proxy's identity or the client's address downstream.
+    via off
+    forwarded_for delete
+    # >>> B8 inserts per-session `acl allowed_dst dstdomain ...` + `http_access allow ...` here <<<
+    # The deny floor: with no allow rule above it, every request is refused.
+    http_access deny all
+    coredump_dir /var/spool/squid
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: squid
+  namespace: console7-egress-proxy
+  labels:
+    app: squid
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: squid
+  template:
+    metadata:
+      labels:
+        app: squid
+    spec:
+      # No nodeSelector needed: the gVisor sandbox pool carries a structural taint (modules/gke), so
+      # this untolerating Deployment schedules on the control pool, which has NAT egress.
+      automountServiceAccountToken: false
+      # Hardened per the modules/gke/reaper.yaml pattern: force a non-root uid (the image declares no
+      # USER), a read-only root filesystem with writable emptyDirs for Squid's runtime dirs, dropped
+      # capabilities, and RuntimeDefault seccomp. The exact writable-dir set is the standard Squid set;
+      # it (and that Squid starts cleanly as uid 65532 with a read-only root) is confirmed LIVE in B11.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: squid
+          # ubuntu/squid (Squid 6.x on Ubuntu 24.04), DIGEST-PINNED (content-addressed, not a tag).
+          # trivy KSV-0125 flags docker.io as not on its default trusted-registry allowlist — a
+          # registry-trust heuristic, not a vulnerability: the image is content-addressed + Canonical-
+          # maintained, and an adopter may mirror it into their in-tenancy AR (the sandbox-image
+          # model). The suppression is path-scoped in .trivyignore.yaml (docs/RISKS.md R-6).
+          image: ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+          ports:
+            - name: proxy
+              containerPort: 3128
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: squid-config
+              mountPath: /etc/squid/squid.conf
+              subPath: squid.conf
+              readOnly: true
+            - name: spool
+              mountPath: /var/spool/squid
+            - name: logs
+              mountPath: /var/log/squid
+            - name: run
+              mountPath: /var/run
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: squid-config
+          configMap:
+            name: squid-config
+        - name: spool
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: squid
+  namespace: console7-egress-proxy
+spec:
+  selector:
+    app: squid
+  ports:
+    - name: proxy
+      port: 3128
+      targetPort: 3128
+      protocol: TCP

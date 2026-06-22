@@ -1,0 +1,10 @@
+# Trivy ignore directives, auto-loaded by `trivy config` (the deploy IaC gate, .github/workflows/
+# terraform.yml). PATH-SCOPED and mirrored in docs/RISKS.md — never a blanket ID suppression.
+# (Kubernetes-manifest inline `#trivy:ignore` directives are placement-fragile across resources, so
+# image/container-level k8s findings are scoped here instead; Terraform findings stay inline, e.g.
+# evidence/main.tf AVD-GCP-0077, R-2.)
+misconfigurations:
+  - id: AVD-KSV-0125
+    paths:
+      - "modules/egress-proxy/proxy.yaml"
+    statement: "RISKS R-6: the Squid image is DIGEST-PINNED ubuntu/squid (Canonical-maintained); docker.io is not on trivy's default trusted-registry allowlist (a registry-trust heuristic, not a vulnerability). Adopters may mirror it into their in-tenancy Artifact Registry. All other Squid hardening (non-root, read-only root FS, dropped caps, seccomp) is applied, not suppressed."

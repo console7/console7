@@ -79,9 +79,11 @@ handle IDs.
   and emits an idempotent `git init` on the fresh branch + origin remote + `.git/info/exclude` (so the
   proposed commit is the task diff only, not the engine's dotfiles). Fetching origin's **content** (an
   SCM token via the Injector + egress to the SCM host) is the live wiring **B11** adds.
-- **DEFERRED to the egress proxy (B7):** the out-of-band forward proxy that does the FQDN
-  allowlisting the `EgressController`'s allowlist feeds (a NetworkPolicy is IP-based and cannot
-  match FQDNs).
+- **The egress proxy workload now exists (B7):** the out-of-band Squid forward proxy
+  (`deploy/gcp/modules/egress-proxy`) + the sandbox→proxy VPC ALLOW rule (`modules/networking`). What
+  remains on the cloud-gcp side (**B8**): transform the `EgressController` allowlist (URLs) into the
+  proxy's `host:port` ACLs, and inject the proxy IP + `HTTPS_PROXY` into the pod (a NetworkPolicy is
+  IP-based and cannot match FQDNs, so the proxy does the FQDN allowlisting).
 
 > **Metadata posture (corrects an earlier inversion).** The node SA is concealed by running the
 > GKE metadata server (**`GKE_METADATA` mode = Workload Identity**) on the sandbox node pool, with
