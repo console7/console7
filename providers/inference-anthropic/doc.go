@@ -54,7 +54,10 @@
 //
 //   - REAL: the attended/unattended routing decision, fail-closed mode handling, the
 //     first-party subscription pin, and the optional org-API gateway override.
-//   - DEFERRED: the org-API-key fetch/injection path (a SecretsProvider follow-up); the
-//     engine-invocation config (CLI+OAuth vs Agent SDK+API key) emitted to the sandbox; and
-//     all live inference traffic — gated behind the not-yet-built sandbox/egress boundary.
+//   - REAL (as of B9b): the org-API-key fetch/injection path — the SecretsProvider now seals an
+//     adopter org credential (SetOrgCredential) and injects it into a session's sandbox by reference
+//     (InjectOrgCredential), and the orchestrator's org-API lane delivers it; the runner exports it
+//     as the engine's ANTHROPIC_API_KEY (providers/cloud-gcp, B9).
+//   - DEFERRED: the engine-invocation config (CLI+OAuth vs Agent SDK+API key) emitted to the
+//     sandbox; and live inference traffic over the egress boundary (proven by the B11 integration test).
 package inferenceanthropic

@@ -36,6 +36,7 @@ type MemSecrets struct {
 	sealed     map[interfaces.Subject]sealedBlob // subscription token, sealed under the user's DEK.
 	revoked    map[interfaces.Subject]bool       // tombstones: a store after revoke must refuse.
 	leases     map[string]lease                  // ephemeral credential leases by Ref.
+	orgSealed  sealedBlob                        // adopter ORG API credential, sealed under rootKey (org-wide; nil = unconfigured ⇒ inject fails closed).
 	sandboxes  *SandboxRegistry                  // ownership oracle for injection.
 	now        func() time.Time                  // injectable clock; defaults to time.Now.
 }
@@ -107,6 +108,62 @@ func (m *MemSecrets) MintEphemeral(ctx context.Context, req interfaces.Ephemeral
 	ref := "lease-" + randHex(12) // opaque; carries no material and no scope.
 	m.leases[ref] = lease{subject: req.Subject, session: req.SessionID, scopes: scopes, expiry: expiry}
 	return interfaces.CredentialRef{Ref: ref, Expiry: expiry}, nil
+}
+
+// SetOrgCredential configures the adopter's shared ORG API credential (the org-API-lane
+// ANTHROPIC_API_KEY), sealing it under the root key. It is provider CONFIGURATION supplied
+// out-of-band at wiring time (modelling the real provider reading it from the secrets manager) — it
+// is deliberately NOT on the SecretsProvider seam, so the control plane never carries the plaintext
+// through the seam. An empty key clears it (injection then fails closed).
+func (m *MemSecrets) SetOrgCredential(key []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(key) == 0 {
+		m.orgSealed = nil
+		return nil
+	}
+	sealed, err := seal(m.rootKey, key)
+	if err != nil {
+		return err
+	}
+	m.orgSealed = sealed
+	return nil
+}
+
+// InjectOrgCredential delivers the configured org API credential ONLY into the session's own
+// sandbox. It returns nil on success and never the plaintext; it fails CLOSED if no org credential
+// is configured (rather than run the engine unauthenticated). There is no attended/beneficiary gate
+// — the org credential backs any org-API-lane session (GOAL.md tenet 2).
+func (m *MemSecrets) InjectOrgCredential(ctx context.Context, in interfaces.OrgCredentialInjection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Ownership gate (cheap fail-fast before the decrypt): the sandbox must belong to this subject's
+	// session. The authoritative check is re-done atomically with delivery below.
+	if !m.sandboxes.Owns(in.Sandbox, in.Subject, in.SessionID) {
+		return errors.New("devkit: sandbox does not belong to the subject's session")
+	}
+	m.mu.Lock()
+	sealed := m.orgSealed
+	m.mu.Unlock()
+	// NOTE (dev-double only): the snapshot is read under the lock then released, so a concurrent
+	// SetOrgCredential(nil) racing this deliver could still deliver a just-cleared credential. This is
+	// a benign CONFIG race for a non-production double — NOT the load-bearing per-subject revocation
+	// guarantee (org-credential rotation is org-wide and out-of-band; see SetOrgCredential).
+	if sealed == nil {
+		return errors.New("devkit: no org credential configured (the org-API lane requires SetOrgCredential)")
+	}
+	key, err := open(m.rootKey, sealed)
+	if err != nil {
+		return err
+	}
+	defer zero(key)
+	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery
+	// so a concurrent Destroy cannot let the credential land in a torn-down sandbox.
+	if !m.sandboxes.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, key) {
+		return errors.New("devkit: sandbox no longer belongs to the subject's session")
+	}
+	return nil
 }
 
 // StoreSubscriptionToken seals a user's subscription token under that user's own DEK and
