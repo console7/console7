@@ -192,6 +192,28 @@ func TestRenderSandboxPod_ManagedSettingsLock(t *testing.T) {
 	}
 }
 
+func TestRenderSandboxPod_IdlesForGovernedExec(t *testing.T) {
+	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()
+	m := string(renderSandboxPod("test-sb-abc", cfg, interfaces.SandboxSpec{MaxTTL: time.Minute}, testProxyEndpoint))
+
+	// The GKE model EXECs the engine per task (RunTask runs `kubectl exec ... claude -p`), so the
+	// main container must OVERRIDE the image entrypoint (which runs claude once and exits) and idle —
+	// otherwise the pod completes immediately and never reaches Ready, so no engine exec can land.
+	if !strings.Contains(m, "exec sleep infinity") {
+		t.Errorf("sandbox container must idle (override the run-once entrypoint) awaiting the governed exec:\n%s", m)
+	}
+	// ...but it must still FAIL CLOSED at startup if the locked managed-settings the init container
+	// renders are absent — the engine must never idle (and so never be exec'd) without its policy lock.
+	for _, want := range []string{
+		"test -f /etc/claude-code/managed-settings.json",
+		"exit 1",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("sandbox container missing fail-closed managed-settings guard %q\n%s", want, m)
+		}
+	}
+}
+
 func TestRenderSandboxPod_TTLFloor(t *testing.T) {
 	// A sub-second MaxTTL still yields a hard deadline of at least 1 second (never 0 = unbounded).
 	cfg, _ := Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}.normalize()

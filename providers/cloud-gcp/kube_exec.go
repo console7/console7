@@ -101,8 +101,12 @@ func (r *kubeRunner) kubectlAnnotate(ctx context.Context, kind, name, kv string)
 	return err
 }
 
-// readyTimeout bounds the pod/proxy-readiness wait before the first engine exec.
-const readyTimeout = 90 * time.Second
+// readyTimeout bounds the pod/proxy-readiness wait before the first engine exec. It must tolerate a
+// COLD scale-up of the gVisor sandbox pool: when the autoscaler has scaled the pool to ~0, the first
+// sandbox pod triggers a node boot + gVisor-runtime init + kubelet registration, which routinely
+// takes 2-4 minutes — far longer than a warm-node schedule. 90s was too short (caught by the live
+// PoC dogfood: pods sat Pending awaiting a node). 5 minutes covers a cold scale-from-zero.
+const readyTimeout = 5 * time.Minute
 
 // waitReady blocks until target (e.g. "pod/<id>" or "deployment/egress-proxy") in namespace ns meets
 // condition (e.g. "condition=Ready" / "condition=Available"), or timeout elapses. It is the readiness
@@ -768,7 +772,12 @@ spec:
   containers:
     - name: sandbox
       image: %[5]s
-%[6]s      securityContext:
+%[6]s      # The GKE model EXECs the engine per task (RunTask runs 'kubectl exec claude -p'), so the
+      # pod's main container must stay alive and IDLE — overriding the image entrypoint (which would
+      # run claude once and exit). Fail closed at startup if the locked managed-settings the init
+      # container renders are absent, then idle awaiting the governed exec.
+      command: ["/bin/sh", "-c", "test -f /etc/claude-code/managed-settings.json || { echo 'console7: locked managed-settings absent (fail closed)' >&2; exit 1; }; exec sleep infinity"]
+      securityContext:
         allowPrivilegeEscalation: false
         capabilities:
           drop: [ALL]
