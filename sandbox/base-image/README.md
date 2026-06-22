@@ -81,8 +81,9 @@ triggered by an operator pushing a `sandbox-image/v*` tag.
   identity overrides the pinned anchors via `COSIGN_IDENTITY_REGEXP`/`COSIGN_OIDC_ISSUER`.
 - **SBOM + SLSA provenance** are attached as OCI attestations by BuildKit (`--sbom`,
   `--provenance=mode=max`).
-- The consumer-side **digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, rejecting
-  a tag-only reference) is the next PR (B3); `verify-sandbox-image.sh` already refuses a tag-only ref.
+- The consumer-side **digest pin** is enforced by `providers/cloud-gcp` `Config.SandboxImage` (B3):
+  it **rejects a tag-only reference** at provider construction, so the kubelet content-addresses the
+  exact `@sha256` bytes; `verify-sandbox-image.sh` performs the same check for the adopter's mirror.
 
 ## Real vs deferred
 

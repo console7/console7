@@ -253,10 +253,11 @@ func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.Sandbox
 //   - The provision-time render + read-only volume mount of managed-settings is not yet wired here
 //     (deploy/gcp/modules/gke + sandbox-image). Until it lands, Run fails closed (the settings file is
 //     absent), which is the correct, honest behaviour — the engine never runs without its policy.
-//   - renderSandboxPod still pins the pause placeholder image; the real engine image (PR-3's signed
-//     base image) must be wired before `claude -p` exists in the pod.
+//   - renderSandboxPod now pins the digest-pinned signed engine image (Config.SandboxImage, B3) and
+//     renders the non-secret ANTHROPIC_MODEL env, so `claude -p` exists in the pod. Still missing for
+//     an end-to-end run: the credential injection (below) and the managed-settings mount (above).
 //   - The Anthropic credential reaches the engine via the SecretsProvider injection path, not this
-//     seam (EngineTask carries no secret); the integration wiring of that injection is Tier-2.
+//     seam (EngineTask carries no secret); the integration wiring of that injection is Tier-2 (B5/B9).
 type kubeEngineRunner struct {
 	run *kubeRunner
 	cfg Config
@@ -379,6 +380,15 @@ func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec) []by
 	if ttlSeconds < 1 {
 		ttlSeconds = 1
 	}
+	// Render only the NON-SECRET inference env at provision time: ANTHROPIC_MODEL (the org-API model
+	// pin; the engine's default 404s, so a real run needs it). The Anthropic API KEY is deliberately
+	// NOT in the pod spec — a secret in the manifest would persist in etcd; it is injected into the
+	// running pod at run time by the SecretsProvider injection path (B5/B9). When AnthropicModel is
+	// empty (e.g. a lifecycle-only provision) no env block is rendered.
+	envBlock := ""
+	if cfg.AnthropicModel != "" {
+		envBlock = fmt.Sprintf("      env:\n        - name: ANTHROPIC_MODEL\n          value: %s\n", jsonScalar(cfg.AnthropicModel))
+	}
 	return fmt.Appendf(nil, `apiVersion: v1
 kind: Pod
 metadata:
@@ -394,7 +404,7 @@ spec:
   containers:
     - name: sandbox
       image: %[5]s
-      securityContext:
+%[6]s      securityContext:
         allowPrivilegeEscalation: false
         runAsNonRoot: true
       resources:
@@ -411,18 +421,14 @@ spec:
 		jsonScalar(cfg.RuntimeClass),
 		jsonScalar(cfg.NodePool),
 		ttlSeconds,
-		jsonScalar(sandboxImagePlaceholder),
+		jsonScalar(cfg.SandboxImage),
+		envBlock,
 	)
 }
 
 // nowUTC is the wall clock the adapter stamps absolute-deadline annotations from. A package var so
 // it is unambiguous (and stubbable) though the adapter is exercised only by the integration test.
 var nowUTC = func() time.Time { return time.Now().UTC() }
-
-// sandboxImagePlaceholder is a stand-in until sandbox/base-image (PR-3) publishes the signed
-// engine image; the integration test asserts lifecycle, not engine behaviour, so the pod runs the
-// placeholder only to exercise provision/destroy.
-const sandboxImagePlaceholder = "gcr.io/google-containers/pause:3.9"
 
 // proxyPort is the forward-proxy listener the sandbox is allowed to reach. It is the conventional
 // Squid/forward-proxy port; sandbox/egress-proxy (PR-3) sets the authoritative value when it ships

@@ -16,12 +16,12 @@
 // Requires `kubectl` + `gcloud` on PATH and ambient credentials (gcloud ADC / Workload Identity).
 //
 // NOTE: the authoritative egress + metadata-block ASSERTIONS (a non-allowlisted host and every
-// metadata endpoint are unreachable from inside the sandbox) need both modules/gke (PR-2b) and a
-// sandbox image with a shell (PR-3); until those land this test asserts the lifecycle only.
-// RunTask (the genuine `claude -p` run) is likewise exercised here only once renderSandboxPod pins
-// the real signed engine image instead of the pause placeholder — the placeholder has no engine,
-// git, or shell — so it is not called below; the seam's logic is proven by the in-memory
-// InMemoryEngineRunner conformance + white-box tests (Tier-2 residual, see kube_exec.go).
+// metadata endpoint are unreachable from inside the sandbox) need both modules/gke (PR-2b) and the
+// signed sandbox image (now wired — Config.SandboxImage, B3). RunTask (the genuine `claude -p` run)
+// is still NOT called below: it additionally needs the run-time credential injection (B5/B9) and the
+// managed-settings render+mount (B4), so until those land the seam's logic is proven by the in-memory
+// InMemoryEngineRunner conformance + white-box tests (Tier-2 residual, see kube_exec.go). The B11
+// extensions add the through-the-proxy egress/metadata assertions and the genuine RunTask run.
 package cloudgcp
 
 import (
@@ -38,12 +38,13 @@ func TestIntegration_ProvisionNarrowDestroy(t *testing.T) {
 	project := os.Getenv("C7_GKE_PROJECT")
 	location := os.Getenv("C7_GKE_LOCATION")
 	cluster := os.Getenv("C7_GKE_CLUSTER")
-	if project == "" || location == "" || cluster == "" {
-		t.Skip("set C7_GKE_PROJECT, C7_GKE_LOCATION, C7_GKE_CLUSTER to run the live integration test")
+	image := os.Getenv("C7_SANDBOX_IMAGE")
+	if project == "" || location == "" || cluster == "" || image == "" {
+		t.Skip("set C7_GKE_PROJECT, C7_GKE_LOCATION, C7_GKE_CLUSTER, and C7_SANDBOX_IMAGE (digest-pinned) to run the live integration test")
 	}
 
 	ctx := context.Background()
-	p, err := New(ctx, Config{ProjectID: project, Location: location, Cluster: cluster})
+	p, err := New(ctx, Config{ProjectID: project, Location: location, Cluster: cluster, SandboxImage: image})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

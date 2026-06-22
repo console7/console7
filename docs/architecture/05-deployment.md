@@ -168,8 +168,9 @@ For the **sandbox base image** this is now real: the **release pipeline**
 **enforced** via an always-on wrong-identity-rejection test), publishing the reference to
 `ghcr.io`. The adopter verifies (`scripts/verify-sandbox-image.sh`) and mirrors it into their
 in-tenancy `modules/artifact-registry` (✅, `immutable_tags` + repo-scoped node-SA pull) — the node
-pulls in-region (tenet 1). The control-plane / key-broker image pipelines and the consumer-side
-**digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, B3) remain **(planned)** (see
+pulls in-region (tenet 1). The consumer-side **digest pin** is enforced: `providers/cloud-gcp`
+`Config.SandboxImage` (✅, B3) **rejects a tag-only reference** so the pod runs the content-addressed
+`@sha256` bytes. The control-plane / key-broker image pipelines remain **(planned)** (see
 view [08](08-dependency-supply-chain.md)).
 
 ## Local / cloudless target (`console7-cloud-local`)

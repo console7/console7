@@ -104,9 +104,9 @@ adopter **verifies** (`scripts/verify-sandbox-image.sh`, pinned identity) and **
 image into their own **Artifact Registry** (`deploy/gcp/modules/artifact-registry`, ✅, `immutable_
 tags` + repo-scoped node-SA pull); the node pulls in-region, so no adopter artifact leaves the
 tenancy (ghcr is OSS distribution, not a runtime path — `GOAL.md` tenet 1). The **consumer-side
-digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, the authoritative content-
-address that rejects a tag-only reference) is the one remaining leg, **(planned)** for B3;
-`verify-sandbox-image.sh` already refuses a tag-only ref.
+digest pin** is enforced: `providers/cloud-gcp` `Config.SandboxImage` (✅, B3) **rejects a tag-only
+reference** at provider construction, the authoritative content-address that makes the kubelet run
+the exact signed `@sha256` bytes; `verify-sandbox-image.sh` applies the same check to the mirror.
 
 ## `console7-cloud-local` dependency posture
 Out-of-tree, **consume-by-pin**: `go.mod` requires `github.com/console7/console7` at a

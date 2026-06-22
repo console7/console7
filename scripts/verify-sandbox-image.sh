@@ -7,7 +7,8 @@
 #
 # The reference is required to be DIGEST-pinned (@sha256:...): a tag is mutable and not what the
 # kubelet content-addresses, so verifying a tag would prove nothing about the bytes that run. This
-# mirrors the consumer-side rule providers/cloud-gcp Config.SandboxImage will enforce (B3).
+# mirrors the consumer-side rule providers/cloud-gcp Config.SandboxImage enforces (B3): it rejects a
+# tag-only reference at provider construction.
 #
 # Usage: scripts/verify-sandbox-image.sh <registry/image@sha256:...>
 # Requires: cosign >= 3.0 on PATH (the release pipeline signs with cosign 3.x via the

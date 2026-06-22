@@ -30,10 +30,10 @@ Creates the one Artifact Registry **Docker** repository the signed **sandbox bas
 
 Root `deploy/gcp` instantiates it after `gke` (it consumes `module.gke.node_service_account_email`).
 The published image path is `<region>-docker.pkg.dev/<project>/<name_prefix>/<image>`; the
-digest-pinned reference (`…/<image>@sha256:…`) will flow into `providers/cloud-gcp`
-`Config.SandboxImage` when the engine-image wiring lands. That field — which will reject a tag-only
-reference, the intended authoritative consumer-side supply-chain control — does **not exist yet**;
-the registry's `immutable_tags` is the integrity control in place today.
+digest-pinned reference (`…/<image>@sha256:…`) flows into `providers/cloud-gcp`
+`Config.SandboxImage` (B3) — which **rejects a tag-only reference**, the authoritative consumer-side
+supply-chain control (content-addressed at the kubelet). The registry's `immutable_tags` is the
+complementary registry-side control.
 
 ## Prerequisite (human bootstrap)
 

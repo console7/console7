@@ -111,8 +111,8 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
    Dockerfile (#45, now digest-pinned bases), the AR publish destination (`modules/artifact-
    registry`, `immutable_tags`), and the **release workflow** (`sandbox-image-release.yml`: SBOM +
    SLSA provenance + keyless cosign sign + an enforced identity pin). Still open: the **control-
-   plane / key-broker** image pipelines, **SLSA-L3** + admission-time verification, and the
-   consumer-side **digest pin** (`Config.SandboxImage` `@sha256`, B3).
+   plane / key-broker** image pipelines, **SLSA-L3**, and **admission-time** signature verification.
+   The consumer-side **digest pin** is now enforced (`Config.SandboxImage` rejects a tag-only ref, B3).
 7. **Break-glass actuation mechanism** and **closed-loop remediation bounds** — design-level
    only.
 

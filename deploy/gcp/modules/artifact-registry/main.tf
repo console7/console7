@@ -11,9 +11,9 @@
 #
 # Supply chain: the repo enforces IMMUTABLE TAGS, so a pushed tag can never be moved to different
 # bytes — this is the integrity control THIS module provides. It is a defence-in-depth complement to
-# the FORTHCOMING consumer-side digest pin (providers/cloud-gcp Config.SandboxImage, to be content-
-# addressed @sha256 at the kubelet when the engine-image wiring lands — that field does NOT exist
-# yet). The image's signing identity, SBOM, and SLSA provenance come from the release pipeline
+# the consumer-side digest pin (providers/cloud-gcp Config.SandboxImage, which rejects a tag-only
+# reference so the kubelet content-addresses the exact @sha256 bytes — B3). The image's signing
+# identity, SBOM, and SLSA provenance come from the release pipeline
 # (.github/workflows/sandbox-image-release.yml), which keyless-signs the REFERENCE image on ghcr; an
 # adopter VERIFIES it (scripts/verify-sandbox-image.sh) and MIRRORS the signed image into THIS repo
 # at deploy time. This module owns only the repository + the pull grant.
@@ -42,9 +42,9 @@ resource "google_artifact_registry_repository" "sandbox" {
 
   # Immutable tags: a tag, once pushed, cannot be reassigned to different bytes. This closes the
   # tag-mutation window at the registry — an attacker who can push cannot silently swap the image a
-  # floating reference resolves to. It is the integrity control available today; a content-addressed
-  # consumer-side digest pin (Config.SandboxImage @sha256) is the INTENDED authoritative control and
-  # lands later with the engine-image wiring (not yet built).
+  # floating reference resolves to. It is the registry-side integrity control; the authoritative
+  # consumer-side control is the content-addressed digest pin (Config.SandboxImage @sha256, which
+  # rejects a tag-only reference — B3).
   docker_config {
     immutable_tags = true
   }
