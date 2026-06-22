@@ -77,11 +77,13 @@ resource "google_compute_network" "sandbox" {
 
 # The sandbox subnet. private_ip_google_access lets in-tenancy nodes reach Google APIs over
 # private routing WITHOUT external IPs — a ROUTING capability, not an authorization: the egress
-# firewall still governs which tagged workloads may use it. For SANDBOX-tagged nodes it is inert
-# by design (the default-deny floor drops the private-access path too); it is here for the
-# non-sandbox node pool's operational pulls (modules/gke, PR-2), where a narrow ALLOW to the
-# Google API range opens it. VPC flow logs are on so denied/allowed flows are auditable (the
-# perimeter's "the attempt is visible" requirement — DESIGN.md §5.2 — and trivy AVD-GCP-0029).
+# firewall still governs which tagged workloads may use it. For SANDBOX-tagged NODES it is opened
+# NARROWLY by modules/gke (finding #8): a priority-900 ALLOW to the private.googleapis.com VIP /30
+# only, so the NODE can register with the apiserver and pull its image — everything else still hits
+# the default-deny floor, and the untrusted POD is confined to its proxy by the per-session
+# NetworkPolicy regardless (the node's PGA path is unreachable from the pod). The non-sandbox node
+# pool uses it for operational pulls too. VPC flow logs are on so denied/allowed flows are auditable
+# (the perimeter's "the attempt is visible" requirement — DESIGN.md §5.2 — and trivy AVD-GCP-0029).
 resource "google_compute_subnetwork" "sandbox" {
   project                  = var.project_id
   name                     = "${var.name_prefix}-sandbox-subnet"

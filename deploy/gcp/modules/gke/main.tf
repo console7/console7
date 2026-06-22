@@ -258,10 +258,15 @@ resource "google_service_account_iam_member" "control_plane_wi" {
 
 # --- Cloud Router + NAT: the sanctioned egress path (deferred from modules/networking, PR-1) ---
 
-# NAT provides source translation ONLY for traffic the firewall already permits. The sandbox pool
-# is default-deny (networking module), so sandbox pods never use this NAT; it serves the
+# NAT provides source translation ONLY for traffic the firewall already permits. It serves the
 # control-plane pool's node image pulls and the egress proxy's allowlisted outbound reach. NAT does
 # not widen egress — the firewall is the gate. Logging on for auditability.
+#
+# NB (finding #8, live PoC 2026-06-22): the sandbox NODES do NOT use this NAT — their two sanctioned
+# paths (control-plane + Google APIs, below) are internal/PGA, not SNAT. Earlier this comment claimed
+# "sandbox pods never use this NAT" as if the sandbox pool needed NO egress at all; that conflated the
+# untrusted POD (default-deny, NetworkPolicy-confined to the proxy) with the NODE (which MUST reach
+# the apiserver to register and Artifact Registry to pull, or it never becomes Ready). See below.
 resource "google_compute_router" "sandbox" {
   project = var.project_id
   name    = "${var.name_prefix}-sandbox-router"
@@ -286,4 +291,143 @@ resource "google_compute_router_nat" "sandbox" {
     enable = true
     filter = "ALL"
   }
+}
+
+# --- Sandbox NODE egress: the minimal SANCTIONED paths a gVisor node needs to EXIST (finding #8) ---
+#
+# The default-deny egress floor (modules/networking) is scoped to the sandbox NODE TAG. A Kubernetes
+# node, however, cannot REGISTER (kubelet -> apiserver CSR/lease) or PULL its images (Artifact
+# Registry / GCR) under all-egress-deny — it never reaches Ready, so NO sandbox pod can ever schedule
+# (live PoC 2026-06-22: nodes sat unregistered, serial log "dial tcp 172.16.0.2:443: i/o timeout").
+#
+# The control of record for the UNTRUSTED workload is the per-session NetworkPolicy on Dataplane V2
+# (providers/cloud-gcp), which drops the POD's non-proxy egress at the veth BEFORE SNAT. So only the
+# node-system traffic (kubelet/containerd) can reach the two narrow rules below; the agent's pod still
+# egresses only through its per-session proxy. These rules give the NODE exactly what it needs and
+# nothing more — both higher-priority (900) than the deny floor (1000) and tightly destination-scoped,
+# never 0.0.0.0/0. This is Google's documented private-cluster Private-Google-Access egress pattern:
+#
+#   (1) node -> control-plane: tcp:443 to the private master CIDR (kubelet registration).
+#   (2) node -> Google APIs: tcp:443 to the private.googleapis.com VIP (199.36.153.8/30) ONLY, paired
+#       with a VPC-scoped private DNS that pins *.googleapis.com / pkg.dev / gcr.io to that VIP and a
+#       route to it — so image pulls + node API calls take the in-tenancy private path and the firewall
+#       surface stays a /30. The deny floor remains the backstop for every other destination.
+#
+# Why private.googleapis.com (.8/30), NOT restricted.googleapis.com (.4/30): the restricted VIP serves
+# only VPC-SC-supported APIs and does NOT route Artifact Registry (*.pkg.dev) or Container Registry
+# (*.gcr.io) — the node's image pull would blackhole on it. private.googleapis.com serves the full
+# Google API set incl. AR/GCR AND everything the control-plane pool needs over the same VPC-wide DNS
+# (KMS, Secret Manager, GCS evidence sink). We do not run a VPC-SC perimeter, so restricted buys nothing.
+
+resource "google_project_service" "dns" {
+  project            = var.project_id
+  service            = "dns.googleapis.com"
+  disable_on_destroy = false
+}
+
+# (1) node -> private control-plane endpoint, so the kubelet can register the node.
+resource "google_compute_firewall" "allow_sandbox_to_master" {
+  project     = var.project_id
+  name        = "${var.name_prefix}-sandbox-allow-master"
+  network     = var.network_self_link
+  description = "Narrow ALLOW (finding #8): sandbox-tagged NODES may egress tcp:443 to the private control-plane CIDR so the kubelet can register/lease. Priority 900 (above the deny floor). The untrusted POD cannot use it — NetworkPolicy confines pod egress to the per-session proxy."
+  direction   = "EGRESS"
+  priority    = 900
+
+  target_tags        = [var.sandbox_node_tag]
+  destination_ranges = [var.master_ipv4_cidr]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
+# (2) node -> Google APIs (Artifact Registry image pulls, node API calls) via the private VIP ONLY.
+resource "google_compute_firewall" "allow_sandbox_google_apis" {
+  project     = var.project_id
+  name        = "${var.name_prefix}-sandbox-allow-google-apis"
+  network     = var.network_self_link
+  description = "Narrow ALLOW (finding #8): sandbox-tagged NODES may egress tcp:443 to the private.googleapis.com VIP (199.36.153.8/30) ONLY — image pulls (Artifact Registry/GCR) + node API calls over the in-tenancy private path. Priority 900. The untrusted POD cannot use it (NetworkPolicy). Paired with the private DNS + route below that pin Google/registry domains to this /30."
+  direction   = "EGRESS"
+  priority    = 900
+
+  target_tags        = [var.sandbox_node_tag]
+  destination_ranges = ["199.36.153.8/30"]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
+# Route the private VIP via the default internet gateway; Private Google Access carries it over
+# Google's internal fabric (no external hop, no NAT). Without this route the /30 has nowhere to go.
+# (priority is immaterial here: a /30 always wins longest-prefix-match over 0.0.0.0/0 regardless.)
+resource "google_compute_route" "google_apis_private_vip" {
+  project          = var.project_id
+  name             = "${var.name_prefix}-gapis-private-vip"
+  network          = var.network_self_link
+  dest_range       = "199.36.153.8/30"
+  next_hop_gateway = "default-internet-gateway"
+  priority         = 900
+}
+
+# VPC-scoped private DNS: pin the Google API + registry domains to the private.googleapis.com VIP so
+# the node's resolver returns the in-tenancy path the firewall allows (a /30), never a public Google IP.
+# One managed zone per apex domain (googleapis.com, pkg.dev, gcr.io); apex A (all four VIP IPs, per
+# Google's guidance) + a wildcard CNAME to the apex, each.
+locals {
+  # private.googleapis.com occupies 199.36.153.8/30 = .8 .9 .10 .11; list all four on the apex A record.
+  private_google_vips = ["199.36.153.8", "199.36.153.9", "199.36.153.10", "199.36.153.11"]
+  private_dns_apex = {
+    googleapis = "googleapis.com."
+    pkgdev     = "pkg.dev."
+    gcrio      = "gcr.io."
+  }
+}
+
+resource "google_dns_managed_zone" "private_apis" {
+  for_each    = local.private_dns_apex
+  project     = var.project_id
+  name        = "${var.name_prefix}-${each.key}"
+  dns_name    = each.value
+  description = "Private-Google-Access egress (finding #8): resolve ${each.value} to the private.googleapis.com VIP for the sandbox VPC."
+  visibility  = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = var.network_self_link
+    }
+  }
+
+  depends_on = [google_project_service.dns]
+}
+
+resource "google_dns_record_set" "private_apis_apex" {
+  for_each     = local.private_dns_apex
+  project      = var.project_id
+  managed_zone = google_dns_managed_zone.private_apis[each.key].name
+  name         = each.value
+  type         = "A"
+  ttl          = 300
+  rrdatas      = local.private_google_vips
+}
+
+resource "google_dns_record_set" "private_apis_wildcard" {
+  for_each     = local.private_dns_apex
+  project      = var.project_id
+  managed_zone = google_dns_managed_zone.private_apis[each.key].name
+  name         = "*.${each.value}"
+  type         = "CNAME"
+  ttl          = 300
+  rrdatas      = [each.value] # CNAME -> the apex (which A-resolves to the VIP)
 }
