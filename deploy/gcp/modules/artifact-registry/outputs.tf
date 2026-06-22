@@ -1,5 +1,5 @@
 output "repository_id" {
-  description = "The Artifact Registry repository_id (= name_prefix). The release pipeline pushes \"<repository_url>/<image>:<tag>\" here."
+  description = "The Artifact Registry repository_id (= name_prefix). The adopter's deploy-time mirror of the verified, signed sandbox image lands at \"<repository_url>/<image>:<tag>\" here."
   value       = google_artifact_registry_repository.sandbox.repository_id
 }
 

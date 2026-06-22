@@ -8,9 +8,10 @@
 # runs as a non-root user, and refuses to start without its locked policy.
 
 # ---- Stage 1: build the policyhelper renderer + the tripwire hook (Go) ----
-# Pinned to the module's toolchain patch (go.mod `go 1.25.11`). Production SHOULD pin this and the
-# runtime base below by DIGEST.
-FROM golang:1.25.11-bookworm AS build
+# Pinned to the module's toolchain patch (go.mod `go 1.25.11`) AND by DIGEST (content-addressed, so
+# the tag cannot be moved under us). Bump the tag and the digest together; the signed-release
+# pipeline (.github/workflows/sandbox-image-release.yml) is what publishes/attests the result.
+FROM golang:1.25.11-bookworm@sha256:bbb255b0e131db500cf0520adc97441d2260cf629c7fa7e39e025ddf53995a24 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -20,7 +21,8 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/console7-policyhelper ./sandbox/pol
     && CGO_ENABLED=0 go build -trimpath -o /out/console7-tripwire ./sandbox/policyhelper/cmd/tripwire
 
 # ---- Stage 2: the runtime (the wrapped engine) ----
-FROM node:22-bookworm-slim AS runtime
+# Digest-pinned (content-addressed) alongside the tag; bump both together.
+FROM node:22-bookworm-slim@sha256:d9f850096136edbc402debdd8729579a288aac64574ada0ff4db26b6ae58b0b2 AS runtime
 
 # git: the genuine engine works on repositories, and the orchestrator's RunTask adapters
 # (providers/cloud-gcp kubeEngineRunner; console7-cloud-local Docker) capture the engine's commit via
@@ -35,8 +37,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # The genuine Claude Code engine, PINNED. Upgrades MUST be canaried before fleet rollout (DESIGN.md
-# §1.4) — bump this deliberately, never float to latest. Production SHOULD additionally pin the
-# base images above by digest.
+# §1.4) — bump this deliberately, never float to latest. (The base images above are digest-pinned.)
 ARG CLAUDE_CODE_VERSION=1.0.44
 # DL3016: the engine is version-pinned (the load-bearing pin); its transitive npm tree is resolved
 # at build without a lockfile. Vendoring a lockfile + generating an SBOM over it is part of the

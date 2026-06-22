@@ -10,12 +10,13 @@
 # can pull the sandbox image and no other repo's images.
 #
 # Supply chain: the repo enforces IMMUTABLE TAGS, so a pushed tag can never be moved to different
-# bytes — this is the integrity control THIS module provides today. It is a defence-in-depth
-# complement to the FORTHCOMING consumer-side digest pin (providers/cloud-gcp Config.SandboxImage,
-# to be content-addressed @sha256 at the kubelet when the engine-image wiring lands — that field
-# does NOT exist yet). The image's signing identity and SBOM/provenance will likewise live in a
-# forthcoming release pipeline (.github/workflows/sandbox-image-release.yml, not yet built); this
-# module owns only the repository + the pull grant.
+# bytes — this is the integrity control THIS module provides. It is a defence-in-depth complement to
+# the FORTHCOMING consumer-side digest pin (providers/cloud-gcp Config.SandboxImage, to be content-
+# addressed @sha256 at the kubelet when the engine-image wiring lands — that field does NOT exist
+# yet). The image's signing identity, SBOM, and SLSA provenance come from the release pipeline
+# (.github/workflows/sandbox-image-release.yml), which keyless-signs the REFERENCE image on ghcr; an
+# adopter VERIFIES it (scripts/verify-sandbox-image.sh) and MIRRORS the signed image into THIS repo
+# at deploy time. This module owns only the repository + the pull grant.
 #
 # Prerequisite (human bootstrap, not this module): the project + billing exist, and the APPLY
 # identity holds roles/artifactregistry.admin (repo create + repo IAM) — bootstrap.sh grants it.

@@ -17,11 +17,14 @@ Creates the one Artifact Registry **Docker** repository the signed **sandbox bas
 
 ## What it does NOT own
 
-- **Signing, SBOM, provenance** — those will live in the **forthcoming** release pipeline
-  (`.github/workflows/sandbox-image-release.yml`, not yet built). The image's distinct signing
-  identity is a separate artifact from this repository (CLAUDE.md trust-tier separation).
-- **Push credentials** — the (forthcoming) release pipeline authenticates via WIF keyless; this
-  module grants no writer.
+- **Signing, SBOM, provenance** — those live in the release pipeline
+  (`.github/workflows/sandbox-image-release.yml`), which keyless-signs the reference image on ghcr.
+  The image's distinct signing identity is a separate artifact from this repository (CLAUDE.md
+  trust-tier separation), and is enforced (not asserted) by that pipeline's wrong-identity-rejection
+  test.
+- **Push credentials** — this module grants no writer. The adopter mirrors the verified, signed
+  image into this repo at deploy time (`scripts/verify-sandbox-image.sh` first); the release
+  pipeline itself publishes only to ghcr.
 
 ## Wiring
 

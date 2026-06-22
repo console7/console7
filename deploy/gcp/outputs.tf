@@ -54,7 +54,7 @@ output "gke_sandbox_node_pool" {
 }
 
 output "sandbox_image_repository_url" {
-  description = "Base path of the sandbox-image Artifact Registry repository, \"<region>-docker.pkg.dev/<project>/<name_prefix>\". The (forthcoming) release pipeline pushes \"<this>/<image>:<tag>\" here; append \"/<image>@sha256:...\" to form the digest-pinned reference the (forthcoming) providers/cloud-gcp Config.SandboxImage will consume."
+  description = "Base path of the sandbox-image Artifact Registry repository, \"<region>-docker.pkg.dev/<project>/<name_prefix>\". The adopter mirrors the verified, signed sandbox image (published by the release pipeline to ghcr) to \"<this>/<image>:<tag>\" here; append \"/<image>@sha256:...\" to form the digest-pinned reference the (forthcoming) providers/cloud-gcp Config.SandboxImage will consume."
   value       = module.artifact_registry.repository_url
 }
 

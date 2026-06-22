@@ -1,0 +1,7 @@
+# Build-context exclusions for the sandbox base image (sandbox/base-image/Dockerfile, built from the
+# repo root by .github/workflows/sandbox-image-release.yml). Kept deliberately minimal: the build
+# stage does `COPY . .` and compiles the Go helpers, so we exclude ONLY things that can never be a
+# build input — never source trees. `.git` is the history (large, and irrelevant to the build); the
+# multi-stage build discards the build stage, so this is purely context hygiene + speed.
+.git
+.gitignore

@@ -162,11 +162,15 @@ repo federate to GCP via WIF and assume one of two split service accounts (see v
 Per `ARCHITECTURE.md` §6.4 / `DESIGN.md` §8, four artifacts ship with **distinct signing
 identities**: control-plane image, **key-broker image**, **sandbox base image** (runs
 untrusted code — must not share a build identity with the key holder), and the SDK packages.
-The **registry** the sandbox base-image is published to is now in tree (`modules/artifact-registry`,
-✅ — `immutable_tags` repository + repo-scoped node-SA pull). The **signing/SBOM/provenance build
-pipeline** that populates it (`.github/workflows/sandbox-image-release.yml`) and the consumer-side
-**digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`) remain **(planned)** — not
-in tree at this commit (see view [08](08-dependency-supply-chain.md)).
+For the **sandbox base image** this is now real: the **release pipeline**
+(`.github/workflows/sandbox-image-release.yml`, ✅) builds it (digest-pinned bases), attaches an
+**SBOM** + **SLSA provenance**, and **keyless-signs** it (GitHub OIDC → Sigstore; distinct identity
+**enforced** via an always-on wrong-identity-rejection test), publishing the reference to
+`ghcr.io`. The adopter verifies (`scripts/verify-sandbox-image.sh`) and mirrors it into their
+in-tenancy `modules/artifact-registry` (✅, `immutable_tags` + repo-scoped node-SA pull) — the node
+pulls in-region (tenet 1). The control-plane / key-broker image pipelines and the consumer-side
+**digest pin** (`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, B3) remain **(planned)** (see
+view [08](08-dependency-supply-chain.md)).
 
 ## Local / cloudless target (`console7-cloud-local`)
 A dogfood topology with **no cloud**: a Docker/Podman-backed `CloudProvider` runs each
