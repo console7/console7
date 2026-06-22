@@ -21,9 +21,11 @@ name: sandbox base image release
 on:
   push:
     tags: ['sandbox-image/v*']   # the operator-triggered release
-    branches: [main]             # + the always-on enforcement test
-  pull_request:
-    branches: [main]
+    branches: [main]             # + the identity-pin enforcement self-test (post-merge canary)
+  # NB: deliberately NOT on pull_request. The self-test needs id-token: write to mint a keyless
+  # OIDC identity; running it on PRs would hand a usable console7/console7 OIDC token to PR-authored
+  # workflow code (a branch-ref cert the release pin already rejects, but still an org identity).
+  # So it runs only on push (main + release tags). Workflow changes are still reviewed in the PR.
 
 # Least privilege by default; jobs elevate only what they need.
 permissions:
@@ -108,17 +110,23 @@ jobs:
           IMAGE_REF: ${{ steps.build.outputs.ref }}
         run: |
           set -euo pipefail
-          # Positive: the pinned release identity must verify.
+          # Positive: the pinned release identity must verify (full tlog + SCT — this is a real release).
           scripts/verify-sandbox-image.sh "$IMAGE_REF"
-          # Negative: a WRONG identity must be rejected (the distinct-identity guarantee, enforced).
-          if cosign verify \
+          # Negative: a WRONG identity must be rejected, AND rejected for the IDENTITY (not some
+          # unrelated cosign error that would otherwise read as a false "rejected"). Fail closed.
+          if out="$(cosign verify \
               --certificate-identity 'https://github.com/evil/repo/.github/workflows/pwn.yml@refs/heads/main' \
               --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-              "$IMAGE_REF" >/dev/null 2>&1; then
-            echo "::error::cosign verify accepted a WRONG signing identity — identity pin not enforced"
+              "$IMAGE_REF" 2>&1)"; then
+            echo "::error::cosign verify ACCEPTED a wrong signing identity — identity pin not enforced"
             exit 1
           fi
-          echo "signature verified against the pinned release identity; wrong identity rejected"
+          if ! grep -qi 'none of the expected identities matched' <<<"$out"; then
+            echo "::error::wrong-identity verify failed, but NOT for an identity mismatch — inconclusive:"
+            echo "$out"
+            exit 1
+          fi
+          echo "signature verified against the pinned release identity; wrong identity rejected for identity mismatch"
 
       - name: Publish the digest
         env:
@@ -135,13 +143,10 @@ jobs:
             echo "Verify first: \`scripts/verify-sandbox-image.sh $IMAGE_REF\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # --- Always-on (PR/push): prove the keyless IDENTITY PIN is enforced, with no release needed. ---
+  # --- push-only: prove the keyless IDENTITY PIN is enforced, with no release needed. ---
   identity-enforcement:
     name: cosign identity-pin enforcement (self-test)
-    # Skip fork PRs: they have no OIDC id-token, so keyless signing is unavailable there.
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+    if: github.event_name == 'push'   # see the on: note — not on PRs (no id-token to PR-authored code)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -153,34 +158,53 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign a throwaway blob, then prove wrong identity is rejected
+      - name: Sign a throwaway blob, then prove wrong identities are rejected
         run: |
           set -euo pipefail
           blob="$(mktemp)"
           bundle="$(mktemp)"
           printf 'console7 sandbox-image identity-pin enforcement self-test %s\n' "$GITHUB_SHA" > "$blob"
 
-          # Keyless sign with THIS job's OIDC identity. tlog upload off: the identity pin we are
-          # testing lives in the Fulcio certificate, not the transparency log, so we keep the public
-          # Rekor log free of per-CI-run test entries and verify with --insecure-ignore-tlog.
+          # Keyless sign with THIS job's OIDC identity. The pin we test lives in the Fulcio
+          # CERTIFICATE, not the transparency log or the SCT, so we sign without a Rekor entry
+          # (--tlog-upload=false) and verify ignoring BOTH tlog and SCT (cosign 3.x verifies the SCT
+          # by default, which --insecure-ignore-tlog does NOT cover). This isolates the test to the
+          # cert identity — the actual thing under test — and keeps it offline-of-Rekor and robust.
           cosign sign-blob --yes --tlog-upload=false --bundle "$bundle" "$blob"
 
-          # Positive: our real identity matches the org's workflow-identity pattern.
-          cosign verify-blob \
-            --insecure-ignore-tlog \
-            --bundle "$bundle" \
-            --certificate-identity-regexp '^https://github\.com/${{ github.repository }}/\.github/workflows/' \
-            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-            "$blob"
+          verify_blob() {  # usage: verify_blob <identity-flag> <value>
+            cosign verify-blob --insecure-ignore-tlog --insecure-ignore-sct --bundle "$bundle" \
+              "$1" "$2" --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" "$blob"
+          }
+          assert_rejected() {  # usage: assert_rejected <desc> <identity-flag> <value>
+            local desc="$1" out
+            if out="$(verify_blob "$2" "$3" 2>&1)"; then
+              echo "::error::$desc — cosign ACCEPTED a wrong identity (pin NOT enforced)"; exit 1
+            fi
+            if ! grep -qi 'none of the expected identities matched' <<<"$out"; then
+              echo "::error::$desc — verify failed, but NOT for an identity mismatch (inconclusive):"
+              echo "$out"; exit 1
+            fi
+            echo "ok (rejected for identity mismatch): $desc"
+          }
 
-          # Negative: a wrong identity MUST fail (else the "distinct signing identity" is unenforced).
-          if cosign verify-blob \
-              --insecure-ignore-tlog \
-              --bundle "$bundle" \
-              --certificate-identity 'https://github.com/evil/repo/.github/workflows/pwn.yml@refs/heads/main' \
-              --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-              "$blob" >/dev/null 2>&1; then
-            echo "::error::cosign accepted a WRONG signing identity — identity pinning is NOT enforced"
-            exit 1
+          # Positive: our real identity — THIS workflow file in THIS repo — must verify.
+          verify_blob --certificate-identity-regexp \
+            '^https://github\.com/${{ github.repository }}/\.github/workflows/sandbox-image-release\.yml@'
+          echo "ok (accepted): the real signing identity"
+
+          # Negative 1 — a foreign org/repo must be rejected.
+          assert_rejected "foreign org/repo" --certificate-identity \
+            'https://github.com/evil/repo/.github/workflows/pwn.yml@refs/heads/main'
+          # Negative 2 — SAME repo but a DIFFERENT workflow file must be rejected (proves the pin
+          # binds the workflow path, not just the org — the distinct-build-identity class).
+          assert_rejected "same repo, wrong workflow" --certificate-identity-regexp \
+            '^https://github\.com/${{ github.repository }}/\.github/workflows/pwn\.yml@'
+          # Negative 3 — on a NON-release ref, the RELEASE pin (which requires @refs/tags/
+          # sandbox-image/v...) must reject this ref, proving it discriminates ref TYPE not just org.
+          if [[ "$GITHUB_REF" != refs/tags/sandbox-image/* ]]; then
+            assert_rejected "release pin rejects a non-release ref" \
+              --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"
           fi
-          echo "identity-pin enforcement verified: correct identity passes, wrong identity rejected"
+
+          echo "identity-pin enforcement verified: real identity accepted; org/workflow/ref lookalikes rejected"
