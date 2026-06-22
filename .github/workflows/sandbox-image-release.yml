@@ -61,6 +61,12 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign BINARY to the 2.x line. cosign 3.x replaced the service-URL flags with a
+          # bundled "signing config" and REJECTS `--tlog-upload=false` ("cannot specify service URLs
+          # and use signing config") — which broke the first real release. The sign/verify flags here
+          # target 2.x semantics; pin to match. (Tracked: migrate to the cosign-3.x signing-config.)
+          cosign-release: 'v2.6.3'
 
       - name: Derive image tag from the git tag
         id: ref
@@ -157,6 +163,12 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign BINARY to the 2.x line. cosign 3.x replaced the service-URL flags with a
+          # bundled "signing config" and REJECTS `--tlog-upload=false` ("cannot specify service URLs
+          # and use signing config") — which broke the first real release. The sign/verify flags here
+          # target 2.x semantics; pin to match. (Tracked: migrate to the cosign-3.x signing-config.)
+          cosign-release: 'v2.6.3'
 
       - name: Sign a throwaway blob, then prove wrong identities are rejected
         run: |
