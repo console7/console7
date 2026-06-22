@@ -141,7 +141,7 @@ What a second-line (2LoD) reviewer should flag, roughly in priority order:
    bypass branch protection / self-merge. Automated gates + AI review compensate, but this is
    the top governance risk until a second independent reviewer exists.
 4. **`DevCA` is a dev-only trust root.** All lineage/commit/checkpoint signatures currently
-   chain to an in-process Ed25519 root. "Evidence over attestation" (tenet 6) is bench-grade
+   chain to an in-process Ed25519 root. "Evidence over attestation" (tenet 7) is bench-grade
    until Sigstore-keyless/org-CA lands; ensure `DevCA` can **never** reach a release build.
 5. **First distinct-signing-identity artifact landed; others still aspirational.** The
    **sandbox base image** now has a real signed-release pipeline (`sandbox-image-release.yml`:

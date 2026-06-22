@@ -7,10 +7,13 @@
 #
 # The reference is required to be DIGEST-pinned (@sha256:...): a tag is mutable and not what the
 # kubelet content-addresses, so verifying a tag would prove nothing about the bytes that run. This
-# mirrors the consumer-side rule providers/cloud-gcp Config.SandboxImage enforces (B3).
+# mirrors the consumer-side rule providers/cloud-gcp Config.SandboxImage will enforce (B3).
 #
 # Usage: scripts/verify-sandbox-image.sh <registry/image@sha256:...>
-# Requires: cosign (https://github.com/sigstore/cosign) on PATH. Network reach to Sigstore + registry.
+# Requires: cosign >= 3.0 on PATH (the release pipeline signs with cosign 3.x via the
+# sigstore/cosign-installer v4.1.2 action) — https://github.com/sigstore/cosign. Network reach to
+# Sigstore (Fulcio/Rekor/TUF) + the registry. Unlike the in-CI identity self-test, this performs
+# FULL verification (tlog + SCT): an adopter wants the complete transparency proof, not just the pin.
 #
 # The pinned trust anchors below match the workflow env (COSIGN_IDENTITY_REGEXP/COSIGN_OIDC_ISSUER).
 # An adopter who rebuilds + re-signs the image under THEIR OWN identity overrides them via the env

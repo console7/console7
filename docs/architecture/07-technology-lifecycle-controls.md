@@ -66,7 +66,7 @@ flowchart LR
 | `terraform.yml` | PR, push | `terraform fmt`/`validate` + **trivy** config scan | CO-9, CO-7.1 | trivy report |
 | `shellcheck.yml` | PR, push | shell lint of `deploy/**/*.sh` | CO-17 | shellcheck report |
 | `dockerfile-lint.yml` | PR, push | hadolint (digest-pinned image) of the sandbox base image | CO-17, CO-5 | hadolint report |
-| `sandbox-image-release.yml` | tag `sandbox-image/v*`; PR/push (self-test) | build → SBOM + SLSA provenance → **cosign keyless sign** → verify; always-on **identity-pin enforcement** (wrong identity rejected) | CO-5.2/5.3/5.4, CO-8 | SBOM + provenance attestations · cosign sigs · enforcement-test log |
+| `sandbox-image-release.yml` | tag `sandbox-image/v*`; push (self-test) | build → SBOM + provenance → **cosign keyless sign** → verify; **identity-pin enforcement** self-test (org/workflow/ref lookalikes rejected) | CO-5.2/5.4, CO-8 *(5.3 L3 partial — BuildKit provenance, not the hardened SLSA-L3 builder)* | SBOM + provenance attestations · cosign sigs · enforcement-test log |
 | `governance-gate.yml` | PR, push | `audit-skill-provenance.sh` — `.claude/` skills/agents/hooks first-party only (**blocking**) | CO-12.7/12.8 | provenance audit |
 | `architecture-docs.yml` | PR, push | `validate-architecture-mermaid.py` — Mermaid soundness of `docs/architecture/` (**blocking**) + non-blocking drift `::warning::` | CO-14, CO-17 | validator result; drift annotation |
 | `dast-zap.yml` | manual | ZAP baseline (report-only) | CO-7.2 | ZAP report ◻ |
@@ -88,10 +88,11 @@ Keyless, split-identity, observe-before-actuate:
   (no secrets at rest), CO-12 (AI/agentic: provenance gate, human merge, no agent
   self-merge), CO-14 (evidence: git + signed history + **PR maps each change to its CO**),
   CO-15/CO-17 (QA + code quality), CO-1/CO-2/CO-11/CO-18.
-- **Partially adopted (first signed artifact landed):** **SBOM** (CO-5.2), **SLSA provenance**
-  (CO-5.3), **keyless-signed release with a distinct, enforced identity** (CO-5.4) are **live for
-  the sandbox base image** (`sandbox-image-release.yml`); the control-plane/key-broker images,
-  SLSA **L3** attestation, and admission-time signature verification remain tracked.
+- **Partially adopted (first signed artifact landed):** an **SBOM** (CO-5.2) and a **keyless-signed
+  release with a distinct, enforced identity** (CO-5.4) are **live for the sandbox base image**
+  (`sandbox-image-release.yml`), plus **build provenance** (a step toward CO-5.3). Still tracked:
+  the control-plane/key-broker images, **full SLSA-L3** attestation (CO-5.3 needs the hardened
+  ephemeral builder, not stock BuildKit provenance), and admission-time signature verification.
 - **Tracked targets (dated, with interim slices in `RISKS.md`/standard §5):** independent
   human reviewer + `enforce_admins` (single-maintainer gap), the remaining image pipelines +
   SLSA-L3 + admission (CO-5.2–5.4), DAST/IAST (CO-7.2), independent pentest (CO-7.4), fuzzing,
