@@ -307,8 +307,10 @@ func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.Sandbox
 //     — B6); fetching origin's CONTENT (an SCM token via the Injector + egress to the SCM host) is the
 //     live wiring B11 adds.
 //   - Credential delivery into the pod EXISTS (the Provider's Owns/DeliverIfOwned over a memory
-//     volume, B5); the EngineTask still carries no secret. Consuming the delivered material as the
-//     engine's ANTHROPIC_API_KEY / the seed's SCM token is the orchestrator wiring (B9/B11).
+//     volume, B5) and Run now CONSUMES it: engineRunScript reads credentialPath and exports it as the
+//     engine's ANTHROPIC_API_KEY for the `claude -p` process only (the B9 file→env bridge), failing
+//     closed if absent. STILL the orchestrator wiring: resolving the minted org-API CredentialRef and
+//     DeliverIfOwned'ing it to credentialPath before RunTask (the next rung), and the seed's SCM token.
 type kubeEngineRunner struct {
 	run *kubeRunner
 	cfg Config
@@ -363,11 +365,16 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: seed workspace: %w", err)
 	}
 
-	// 3. Run the genuine engine headless. The untrusted prompt is passed over STDIN, so a shell can
-	// never re-split it into extra argv. The engine reads the locked managed-settings itself (the
-	// verified file is the authority; the conservative default permission mode is belt-and-suspenders).
+	// 3. Run the genuine engine headless UNDER THE DELIVERED CREDENTIAL (the B9 file→env bridge). The
+	// CredentialDeliverer (B5) wrote the short-lived org-API key to credentialPath; engineRunScript
+	// reads it FROM THAT IN-POD FILE and exports it as ANTHROPIC_API_KEY for the claude process only —
+	// so the secret value is never in the kubectl argv (control side), the pod spec (etcd), claude's
+	// own argv, or this adapter's logs. It fails CLOSED if the credential is absent/empty (the engine
+	// must not run unauthenticated). The untrusted prompt is still passed over STDIN (claude inherits
+	// fd 0), so a shell can never re-split it into extra argv; the engine reads the locked
+	// managed-settings itself (the verified file is the authority; default permission mode belt-and-braces).
 	if _, err := k.execIn(ctx, h, []byte(task.Prompt),
-		"claude", "-p", "--permission-mode", "default"); err != nil {
+		"/bin/sh", "-c", engineRunScript(credentialPath)); err != nil {
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: run engine: %w", err)
 	}
 
@@ -493,11 +500,41 @@ func nonEmptyLines(s string) []string {
 // (renderSandboxPod) — so the secret is tmpfs-only (never on disk) and dies with the pod. The value
 // is a filesystem PATH, not a credential, so gosec G101 is a false positive here (RISKS R-5).
 //
-// FILE→ENV BRIDGE (B9): B5 only DELIVERS the material to this file. B9 reads it and injects it as the
-// engine's ANTHROPIC_API_KEY on the Run-controlled `kubectl exec … claude -p` (kubeEngineRunner.Run) —
-// set at exec time on that invocation, never baked into the pod spec (no secret in etcd) and never in
-// argv. The two seams agree on this path as the contract.
+// FILE→ENV BRIDGE (B9): B5 DELIVERS the material to this file; the runner (engineRunScript, below)
+// reads it FROM THE IN-POD FILE and exports it as the engine's ANTHROPIC_API_KEY on the Run-controlled
+// `claude -p` invocation — set at exec time on that one process, never baked into the pod spec (no
+// secret in etcd) and never in argv. The two seams agree on this path as the contract. (The ORCHESTRATOR
+// side — resolving the minted org-API CredentialRef and DeliverIfOwned'ing it to this file before
+// RunTask — is the next rung; until it lands, a live Run fails closed here, by design.)
 const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
+
+// engineRunScript builds the in-pod `/bin/sh -c` program kubeEngineRunner.Run executes to run the
+// genuine engine under the delivered credential (the B9 file→env bridge). It:
+//  1. fails CLOSED unless the credential the CredentialDeliverer wrote (credPath) is present AND
+//     non-empty — the engine must never run unauthenticated; and
+//  2. runs `claude -p` with the credential exported as ANTHROPIC_API_KEY for THAT PROCESS ONLY, read
+//     from the in-pod file by the in-pod shell. A prefix assignment (VAR="$ref" cmd) puts the value in
+//     claude's ENVIRONMENT, not its argv, so the secret is never in /proc/<pid>/cmdline, the kubectl
+//     argv (control side), the pod spec, or this adapter's logs — only the prompt (STDIN) and this fixed
+//     command shape cross the wire.
+//
+// The credential is read ONCE into a shell variable as a STANDALONE assignment (not a prefix
+// command-substitution): under `set -e` a standalone failed `$(cat …)` aborts the script, whereas a
+// FAILED substitution in a prefix assignment (`VAR="$(cat …)" cmd`) does NOT abort on dash — it would
+// run the engine with an empty key. The explicit `[ -n ]` then closes the TOCTOU window between the
+// `test -s` check and the read (a racing Wipe/refresh/eviction). Both together make fail-closed real,
+// not just asserted (the unit test exercises it under the actual shell).
+//
+// A function (not a const) so the fail-closed behaviour is testable against a temp path without a
+// cluster (the runner is integration-only). The prompt arrives on STDIN, which claude inherits (the
+// cat/test read the file, not STDIN). credPath is a trusted no-space constant (credentialPath).
+func engineRunScript(credPath string) string {
+	return `set -eu
+test -s ` + credPath + ` || { echo "cloudgcp: engine credential absent/empty at ` + credPath + ` (fail closed)" >&2; exit 1; }
+_c7cred="$(cat ` + credPath + `)"
+[ -n "$_c7cred" ] || { echo "cloudgcp: engine credential empty at ` + credPath + ` (fail closed)" >&2; exit 1; }
+ANTHROPIC_API_KEY="$_c7cred" claude -p --permission-mode default`
+}
 
 // kubeCredentialDeliverer realises CredentialDeliverer: it writes credential material into a live
 // sandbox pod's memory volume via `kubectl exec`, feeding the material over STDIN (never argv) so it
