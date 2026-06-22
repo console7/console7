@@ -56,10 +56,34 @@ handle IDs.
   session deadline regardless of scheduling/image-pull latency. **`New` preflights both the
   Dataplane-V2 NetworkPolicy enforcement and the `GKE_METADATA` node-pool concealment, failing
   closed** — so a misconfigured cluster cannot construct a usable provider.
-- **DEFERRED to the egress proxy + base image (PR-3):** the out-of-band forward proxy that does
-  the FQDN allowlisting the `EgressController`'s allowlist feeds (a NetworkPolicy is IP-based and
-  cannot match FQDNs); and the signed engine image the sandbox pod runs (this provider does not
-  wrap the agent — Console7 orchestrates the genuine engine, it does not reimplement it).
+- **REAL (B3):** the sandbox pod now runs the **signed engine image** — `Config.SandboxImage` is
+  required and **digest-pinned** (`New` rejects a tag-only reference, so the kubelet content-
+  addresses the exact `@sha256` bytes the release pipeline signed), and `renderSandboxPod` renders
+  the non-secret `ANTHROPIC_MODEL` env. This provider still **orchestrates** the genuine engine; it
+  does not reimplement it. The Anthropic API key is NOT in the pod spec — it is injected at run time
+  (B5/B9). *(Digest-pinning is content-addressed at the kubelet, not admission-enforced; a binding
+  admission policy requiring the signature is Phase-2 hardening.)*
+- **REAL (B4):** the LOCKED managed-settings are rendered at provision time — an init container runs
+  `console7-policyhelper` (non-root) and writes the `0444` policy into a memory `emptyDir` the engine
+  mounts **read-only** at `/etc/claude-code` (the readOnly mount is the authoritative lock). The
+  namespace is admitted under **Pod Security Admission `restricted`** (closes the `hostNetwork`
+  metadata-bypass).
+- **REAL (B5):** the data-plane **credential Injector** — the Provider satisfies the
+  `providers/secrets-gcp` `Injector` seam (`Owns`/`DeliverIfOwned`): an ownership-checked
+  (subject+session, atomic under the lock), fail-closed write of credential material into the pod's
+  **memory** volume via `kubectl exec` over **stdin** (never argv), wiped on Destroy (the memory
+  volume also dies with the pod). The engine's consumption of that credential as `ANTHROPIC_API_KEY`
+  is B9.
+- **REAL (B6):** `Run` **seeds the working repo** before the engine runs — `workspaceSeedScript`
+  (pure, unit-tested) validates `EngineTask.Repo`/`Branch`, **refuses a protected branch** (tenet 6),
+  and emits an idempotent `git init` on the fresh branch + origin remote + `.git/info/exclude` (so the
+  proposed commit is the task diff only, not the engine's dotfiles). Fetching origin's **content** (an
+  SCM token via the Injector + egress to the SCM host) is the live wiring **B11** adds.
+- **The egress proxy workload now exists (B7):** the out-of-band Squid forward proxy
+  (`deploy/gcp/modules/egress-proxy`) + the sandbox→proxy VPC ALLOW rule (`modules/networking`). What
+  remains on the cloud-gcp side (**B8**): transform the `EgressController` allowlist (URLs) into the
+  proxy's `host:port` ACLs, and inject the proxy IP + `HTTPS_PROXY` into the pod (a NetworkPolicy is
+  IP-based and cannot match FQDNs, so the proxy does the FQDN allowlisting).
 
 > **Metadata posture (corrects an earlier inversion).** The node SA is concealed by running the
 > GKE metadata server (**`GKE_METADATA` mode = Workload Identity**) on the sandbox node pool, with

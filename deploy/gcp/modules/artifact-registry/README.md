@@ -17,20 +17,23 @@ Creates the one Artifact Registry **Docker** repository the signed **sandbox bas
 
 ## What it does NOT own
 
-- **Signing, SBOM, provenance** — those will live in the **forthcoming** release pipeline
-  (`.github/workflows/sandbox-image-release.yml`, not yet built). The image's distinct signing
-  identity is a separate artifact from this repository (CLAUDE.md trust-tier separation).
-- **Push credentials** — the (forthcoming) release pipeline authenticates via WIF keyless; this
-  module grants no writer.
+- **Signing, SBOM, provenance** — those live in the release pipeline
+  (`.github/workflows/sandbox-image-release.yml`), which keyless-signs the reference image on ghcr.
+  The image's distinct signing identity is a separate artifact from this repository (CLAUDE.md
+  trust-tier separation), and is enforced (not asserted) by that pipeline's wrong-identity-rejection
+  test.
+- **Push credentials** — this module grants no writer. The adopter mirrors the verified, signed
+  image into this repo at deploy time (`scripts/verify-sandbox-image.sh` first); the release
+  pipeline itself publishes only to ghcr.
 
 ## Wiring
 
 Root `deploy/gcp` instantiates it after `gke` (it consumes `module.gke.node_service_account_email`).
 The published image path is `<region>-docker.pkg.dev/<project>/<name_prefix>/<image>`; the
-digest-pinned reference (`…/<image>@sha256:…`) will flow into `providers/cloud-gcp`
-`Config.SandboxImage` when the engine-image wiring lands. That field — which will reject a tag-only
-reference, the intended authoritative consumer-side supply-chain control — does **not exist yet**;
-the registry's `immutable_tags` is the integrity control in place today.
+digest-pinned reference (`…/<image>@sha256:…`) flows into `providers/cloud-gcp`
+`Config.SandboxImage` (B3) — which **rejects a tag-only reference**, the authoritative consumer-side
+supply-chain control (content-addressed at the kubelet). The registry's `immutable_tags` is the
+complementary registry-side control.
 
 ## Prerequisite (human bootstrap)
 

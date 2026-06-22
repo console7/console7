@@ -250,13 +250,18 @@ func (e *netpolEgressController) Clear(ctx context.Context, h interfaces.Sandbox
 // be one the agent (same uid) could overwrite — the opposite of a locked policy.
 //
 // RESIDUALS (Tier-2 / sandbox-image, tracked — this adapter is not yet proven end to end):
-//   - The provision-time render + read-only volume mount of managed-settings is not yet wired here
-//     (deploy/gcp/modules/gke + sandbox-image). Until it lands, Run fails closed (the settings file is
-//     absent), which is the correct, honest behaviour — the engine never runs without its policy.
-//   - renderSandboxPod still pins the pause placeholder image; the real engine image (PR-3's signed
-//     base image) must be wired before `claude -p` exists in the pod.
-//   - The Anthropic credential reaches the engine via the SecretsProvider injection path, not this
-//     seam (EngineTask carries no secret); the integration wiring of that injection is Tier-2.
+//   - The locked managed-settings ARE now rendered at provision time: an init container runs
+//     console7-policyhelper (non-root) and writes the 0444 policy into a memory emptyDir that the
+//     engine container mounts READ-ONLY at /etc/claude-code (B4). This Run still only VERIFIES the
+//     file is present and fails closed if not — it never writes the policy itself.
+//   - renderSandboxPod pins the digest-pinned signed engine image (Config.SandboxImage, B3) and
+//     renders the non-secret ANTHROPIC_MODEL env, so `claude -p` exists in the pod. Run now SEEDS the
+//     working repo (workspaceSeedScript: git init on a fresh branch, origin remote, .git/info/exclude
+//     — B6); fetching origin's CONTENT (an SCM token via the Injector + egress to the SCM host) is the
+//     live wiring B11 adds.
+//   - Credential delivery into the pod EXISTS (the Provider's Owns/DeliverIfOwned over a memory
+//     volume, B5); the EngineTask still carries no secret. Consuming the delivered material as the
+//     engine's ANTHROPIC_API_KEY / the seed's SCM token is the orchestrator wiring (B9/B11).
 type kubeEngineRunner struct {
 	run *kubeRunner
 	cfg Config
@@ -296,7 +301,22 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: locked managed-settings absent/empty at %s — refusing to run the engine without its policy (fail closed): %w", policyhelper.ManagedSettingsPath, err)
 	}
 
-	// 2. Run the genuine engine headless. The untrusted prompt is passed over STDIN, so a shell can
+	// 2. Seed the working repo at Workdir from task.Repo/task.Branch BEFORE the engine runs: establish
+	// a git repo on a FRESH working branch (never a protected ref — tenet 6), record the origin remote,
+	// and write .git/info/exclude so the proposed commit is the task diff only (not the engine's own
+	// dotfiles — the local-dogfood lesson). Without this, `git rev-parse HEAD` below errors on an empty
+	// tree. Fetching origin's CONTENT (a short-lived SCM token via the Injector + egress to the SCM
+	// host) is the live step the integration wiring adds (B11); this scaffolding is what makes the
+	// commit/HEAD read succeed and keeps the engine's scaffolding out of the proposal.
+	seed, err := workspaceSeedScript(k.cfg.Workdir, task)
+	if err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: build workspace seed: %w", err)
+	}
+	if _, err := k.execIn(ctx, h, nil, "/bin/sh", "-c", seed); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: seed workspace: %w", err)
+	}
+
+	// 3. Run the genuine engine headless. The untrusted prompt is passed over STDIN, so a shell can
 	// never re-split it into extra argv. The engine reads the locked managed-settings itself (the
 	// verified file is the authority; the conservative default permission mode is belt-and-suspenders).
 	if _, err := k.execIn(ctx, h, []byte(task.Prompt),
@@ -304,7 +324,7 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: run engine: %w", err)
 	}
 
-	// 3. Capture the proposal: stage and commit whatever the engine changed, then read the head. A
+	// 4. Capture the proposal: stage and commit whatever the engine changed, then read the head. A
 	// clean tree (the engine proposed nothing) is a no-op, not an error. NOTE (Tier-2 residual): the
 	// resulting commit is the one sanctioned outward channel (the deferred control-plane-side push →
 	// PR, under human review); `git add -A` stages broadly, so that push path MUST DLP-scan the diff
@@ -345,6 +365,70 @@ func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHand
 	return k.execIn(ctx, h, nil, append([]string{"git", "-c", "safe.directory=" + k.cfg.Workdir, "-C", k.cfg.Workdir}, args...)...)
 }
 
+// engineDotfileExcludes are the engine's OWN working-dir dropfiles (per-project settings, todos,
+// transcripts, caches) that must NOT appear in the proposed commit — the commit is the task diff
+// only, not the agent's scaffolding (the local-dogfood lesson). They go in .git/info/exclude, an
+// in-repo ignore that is itself never committed and that a target repo's own .gitignore cannot undo.
+var engineDotfileExcludes = []string{".claude/", ".config/", ".cache/"}
+
+// protectedBranches is a DEFENCE-IN-DEPTH seed-time pre-check, NOT the control of record: the
+// authoritative tenet-6 (observe/propose, never actuate) enforcement is the SCMProvider seam, which
+// refuses a push to the ADOPTER-configured protected set (scm-github). This is a deliberately small,
+// non-configurable denylist of common defaults — it can DIVERGE from the adopter's real set both
+// ways, so it never stands alone; the seed also does no push (content fetch/push is B11), and
+// task.Branch is orchestrator-set, not agent-set. Case-insensitive exact match.
+var protectedBranches = map[string]bool{
+	"main": true, "master": true, "trunk": true, "develop": true, "production": true, "release": true,
+}
+
+func isProtectedBranch(b string) bool {
+	return protectedBranches[strings.ToLower(strings.TrimSpace(b))]
+}
+
+// shquote wraps s as a single-quoted POSIX shell word (escaping embedded single quotes), so a
+// task-supplied value composed into the seed script cannot break out of its argument — defence in
+// depth even though Repo/Branch are validated SCM identifiers.
+func shquote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// workspaceSeedScript builds the /bin/sh script that seeds the engine's working repo at workdir from
+// task.Repo/task.Branch before the engine runs. It is a PURE function (the unit-testable core of the
+// seed; the exec is integration-only): it validates the coordinates, refuses a protected branch, and
+// emits an idempotent script that git-inits the repo on the fresh branch, records the origin remote
+// (no network — the content fetch is the live B11 step), and writes .git/info/exclude. Every embedded
+// value is shell-quoted.
+func workspaceSeedScript(workdir string, task interfaces.EngineTask) (string, error) {
+	if task.Repo.Host == "" || task.Repo.Owner == "" || task.Repo.Name == "" {
+		return "", errors.New("cloudgcp: EngineTask.Repo requires Host, Owner, and Name to seed the workspace")
+	}
+	branch := strings.TrimSpace(task.Branch)
+	if branch == "" {
+		return "", errors.New("cloudgcp: EngineTask.Branch is required (the session's fresh working branch)")
+	}
+	if isProtectedBranch(branch) {
+		return "", fmt.Errorf("cloudgcp: refusing to seed onto protected branch %q — a session works a fresh branch (defence-in-depth; the SCM seam enforces the adopter's protected set authoritatively, tenet 6)", branch)
+	}
+	remote := fmt.Sprintf("https://%s/%s/%s.git", task.Repo.Host, task.Repo.Owner, task.Repo.Name)
+
+	var b strings.Builder
+	b.WriteString("set -eu\n")
+	b.WriteString("cd " + shquote(workdir) + "\n")
+	b.WriteString("if [ ! -d .git ]; then git init -q; fi\n")
+	// Set the unborn HEAD to the fresh branch (idempotent; works before any commit exists).
+	b.WriteString("git symbolic-ref HEAD " + shquote("refs/heads/"+branch) + "\n")
+	b.WriteString(`git config user.email "console7-agent@console7.dev"` + "\n")
+	b.WriteString(`git config user.name "Console7 Agent"` + "\n")
+	// Record origin without fetching (the content fetch with a short-lived SCM token + egress is B11).
+	b.WriteString("git remote add origin " + shquote(remote) + " 2>/dev/null || git remote set-url origin " + shquote(remote) + "\n")
+	// (Re)write .git/info/exclude so the engine's own dropfiles stay out of `git add -A`.
+	b.WriteString(": > .git/info/exclude\n")
+	for _, e := range engineDotfileExcludes {
+		b.WriteString("echo " + shquote(e) + " >> .git/info/exclude\n")
+	}
+	return b.String(), nil
+}
+
 // nonEmptyLines splits s into its non-blank, trimmed lines — the file paths from `git show
 // --name-only` — for the auditable FilesChanged summary (paths only, never file contents).
 func nonEmptyLines(s string) []string {
@@ -357,29 +441,79 @@ func nonEmptyLines(s string) []string {
 	return out
 }
 
+// credentialPath is the in-pod file the CredentialDeliverer writes short-lived credential material
+// to. It lives under /run/console7 — a `medium: Memory` emptyDir mounted into the sandbox container
+// (renderSandboxPod) — so the secret is tmpfs-only (never on disk) and dies with the pod. The value
+// is a filesystem PATH, not a credential, so gosec G101 is a false positive here (RISKS R-5).
+//
+// FILE→ENV BRIDGE (B9): B5 only DELIVERS the material to this file. B9 reads it and injects it as the
+// engine's ANTHROPIC_API_KEY on the Run-controlled `kubectl exec … claude -p` (kubeEngineRunner.Run) —
+// set at exec time on that invocation, never baked into the pod spec (no secret in etcd) and never in
+// argv. The two seams agree on this path as the contract.
+const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
+
+// kubeCredentialDeliverer realises CredentialDeliverer: it writes credential material into a live
+// sandbox pod's memory volume via `kubectl exec`, feeding the material over STDIN (never argv) so it
+// cannot leak into a process table, shell history, or this adapter's logs. The provider only calls
+// Deliver after re-verifying ownership under its lock (DeliverIfOwned). Like the rest of this file it
+// is exercised live only by the integration test; CI drives the provider over the in-memory fake.
+type kubeCredentialDeliverer struct {
+	run *kubeRunner
+}
+
+// Deliver writes material to credentialPath in the sandbox container. `umask 077` makes the file
+// 0600 (owner-only); the engine runs as that same non-root uid and reads its own credential. The
+// material is the exec's STDIN, so it is never an argument. cat truncates+rewrites, so a re-deliver
+// (a refreshed token) replaces the prior bytes.
+func (d *kubeCredentialDeliverer) Deliver(ctx context.Context, h interfaces.SandboxHandle, material []byte) error {
+	_, err := d.run.run(ctx, "kubectl", material,
+		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "-i", "--",
+		"/bin/sh", "-c", "umask 077; cat > "+credentialPath)
+	return err
+}
+
+// Wipe best-effort shreds the credential file. The authoritative wipe is the pod's deletion (the
+// volume is medium: Memory), so an exec failure here (e.g. the pod is already gone) is tolerated by
+// the caller; `rm -f` is idempotent.
+func (d *kubeCredentialDeliverer) Wipe(ctx context.Context, h interfaces.SandboxHandle) error {
+	_, err := d.run.run(ctx, "kubectl", nil,
+		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--",
+		"/bin/sh", "-c", "rm -f "+credentialPath)
+	return err
+}
+
 // jsonScalar encodes s as a double-quoted YAML scalar via encoding/json (a JSON string is a valid
 // YAML double-quoted scalar, with the YAML-structural characters — quote, backslash, newline,
-// colon, etc. — escaped). For the validated values this adapter renders (the persona enum,
-// RuntimeClass/NodePool config, policy-sourced FQDNs) this removes any field-breakout path.
-// CAVEAT: encoding/json does not escape U+2028/U+2029/U+0085, which YAML 1.1 can read as line
-// breaks; do not feed jsonScalar a value that could carry those without escaping them first.
+// colon, etc. — escaped), then escapes U+2028/U+2029/U+0085 itself (encoding/json does NOT, yet
+// YAML 1.1 can read them as line breaks). The result is UNCONDITIONALLY field-breakout-safe for any
+// input — so a future caller feeding policy- or agent-influenced text (e.g. the B8 host:port ACLs)
+// cannot inject a YAML structure, with no per-caller reasoning required.
 func jsonScalar(s string) string {
 	b, err := json.Marshal(s)
 	if err != nil {
 		return `""`
 	}
-	return string(b)
+	out := string(b)
+	// json.Marshal emits these code points literally; replace each with its 6-char \u escape (valid
+	// inside the already double-quoted JSON/YAML scalar) so YAML 1.1 cannot read them as line breaks
+	// that escape the field.
+	out = strings.ReplaceAll(out, "\u2028", `\u2028`)
+	out = strings.ReplaceAll(out, "\u2029", `\u2029`)
+	out = strings.ReplaceAll(out, "\u0085", `\u0085`)
+	return out
 }
 
-// renderSandboxPod renders the gVisor Pod for one sandbox into the namespace the EgressController
-// already created. nsID is the crypto-random handle ID (a valid DNS-1123 label, safe unquoted as
-// the resource/namespace name); every other dynamic value is json-encoded.
-func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec) []byte {
-	ttlSeconds := int64(spec.MaxTTL.Seconds())
-	if ttlSeconds < 1 {
-		ttlSeconds = 1
-	}
-	return fmt.Appendf(nil, `apiVersion: v1
+// sandboxPodManifestTemplate is the ConfigMap(session-profile)+Pod manifest rendered per sandbox.
+// Kept as a package const so the renderer stays small; the %[n]s args are filled by renderSandboxPod.
+const sandboxPodManifestTemplate = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %[1]s-session-profile
+  namespace: %[1]s
+data:
+  profile.json: %[7]s
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: %[1]s
@@ -391,12 +525,62 @@ spec:
     cloud.google.com/gke-nodepool: %[3]s
   activeDeadlineSeconds: %[4]d
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: managed-settings
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
+    - name: credentials
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
+    - name: session-profile
+      configMap:
+        name: %[1]s-session-profile
+        items:
+          - key: profile.json
+            path: profile.json
+  initContainers:
+    - name: render-policy
+      image: %[5]s
+      command: ["/bin/sh", "-c", "exec console7-policyhelper < /etc/console7/session-profile/profile.json"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: managed-settings
+          mountPath: /etc/claude-code
+        - name: session-profile
+          mountPath: /etc/console7/session-profile
+          readOnly: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 128Mi
   containers:
     - name: sandbox
       image: %[5]s
-      securityContext:
+%[6]s      securityContext:
         allowPrivilegeEscalation: false
-        runAsNonRoot: true
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: managed-settings
+          mountPath: /etc/claude-code
+          readOnly: true
+        - name: credentials
+          mountPath: /run/console7
       resources:
         requests:
           cpu: 250m
@@ -406,23 +590,55 @@ spec:
           cpu: "2"
           memory: 2Gi
           ephemeral-storage: 4Gi
-`,
+`
+
+// renderSandboxPod renders the gVisor Pod for one sandbox into the namespace the EgressController
+// already created. nsID is the crypto-random handle ID (a valid DNS-1123 label, safe unquoted as
+// the resource/namespace name); every other dynamic value is json-encoded.
+func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec) []byte {
+	ttlSeconds := int64(spec.MaxTTL.Seconds())
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
+	// Render only the NON-SECRET inference env at provision time: ANTHROPIC_MODEL (the org-API model
+	// pin; the engine's default 404s, so a real run needs it). The Anthropic API KEY is deliberately
+	// NOT in the pod spec — a secret in the manifest would persist in etcd; it is injected into the
+	// running pod at run time by the SecretsProvider injection path (B5/B9). When AnthropicModel is
+	// empty (e.g. a lifecycle-only provision) no env block is rendered.
+	envBlock := ""
+	if cfg.AnthropicModel != "" {
+		envBlock = fmt.Sprintf("      env:\n        - name: ANTHROPIC_MODEL\n          value: %s\n", jsonScalar(cfg.AnthropicModel))
+	}
+
+	// The session's resolved profile (persona) the init container renders the LOCKED managed-settings
+	// from. Only Persona drives the render (policyhelper.Render switches on it); marshaling the typed
+	// struct keeps it forward-compatible. A marshal failure (cannot happen for this struct) yields
+	// empty JSON → the init's policyhelper fails to parse → fail closed (the engine never starts).
+	profileJSON, _ := json.Marshal(interfaces.SessionProfile{Persona: spec.Persona})
+
+	// The managed-settings LOCK (DESIGN.md §5.1, tenet 3): an init container runs console7-policyhelper
+	// AS A NON-ROOT user (PSA `restricted` forbids root, see renderNamespaceAndEgress), reading the
+	// SessionProfile over stdin from a read-only ConfigMap mount and writing the 0444 managed-settings
+	// into a memory emptyDir at /etc/claude-code. The MAIN container mounts that SAME volume at
+	// /etc/claude-code READ-ONLY — and the readOnly MOUNT, not the file's uid/mode, is the authoritative
+	// lock: the kernel denies writes to a readOnly mount regardless of ownership, so the non-root engine
+	// (same uid) cannot overwrite its own policy. The emptyDir is `medium: Memory` (never on disk) and
+	// deliberately SHADOWS the image's baked /etc/claude-code. The init container completes before the
+	// engine starts, so at run time the only mount of the volume is the engine's readOnly one.
+	return fmt.Appendf(nil, sandboxPodManifestTemplate,
 		nsID,
 		jsonScalar(cfg.RuntimeClass),
 		jsonScalar(cfg.NodePool),
 		ttlSeconds,
-		jsonScalar(sandboxImagePlaceholder),
+		jsonScalar(cfg.SandboxImage),
+		envBlock,
+		jsonScalar(string(profileJSON)),
 	)
 }
 
 // nowUTC is the wall clock the adapter stamps absolute-deadline annotations from. A package var so
 // it is unambiguous (and stubbable) though the adapter is exercised only by the integration test.
 var nowUTC = func() time.Time { return time.Now().UTC() }
-
-// sandboxImagePlaceholder is a stand-in until sandbox/base-image (PR-3) publishes the signed
-// engine image; the integration test asserts lifecycle, not engine behaviour, so the pod runs the
-// placeholder only to exercise provision/destroy.
-const sandboxImagePlaceholder = "gcr.io/google-containers/pause:3.9"
 
 // proxyPort is the forward-proxy listener the sandbox is allowed to reach. It is the conventional
 // Squid/forward-proxy port; sandbox/egress-proxy (PR-3) sets the authoritative value when it ships
@@ -453,6 +669,15 @@ metadata:
   name: %[1]s
   labels:
     app.kubernetes.io/managed-by: console7
+    # Pod Security Admission "restricted": forbids hostNetwork/privileged/root and requires
+    # seccomp + dropped capabilities, so a renderer that (incorrectly) set hostNetwork could not
+    # bypass GKE_METADATA node-SA concealment at the host netns. This is the admission-layer
+    # enforcement of the no-standing-credential property the sandbox pod manifest already honours
+    # (gke/README.md residual); enforce-version pinned so the policy can't silently relax.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
 ---
 apiVersion: v1
 kind: ConfigMap

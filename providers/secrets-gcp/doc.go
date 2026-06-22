@@ -54,9 +54,12 @@
 //   - REAL: per-user DEK envelope, KMS wrap/unwrap with owner-bound AAD, Secret Manager
 //     storage, attended/single-beneficiary + ownership injection gates, expiry-capped
 //     ephemeral leases, crypto-shred on revoke.
-//   - DEFERRED: the production Injector (real data-plane sandbox delivery) — until the
-//     sandbox PR lands, New wires a fail-closed Injector so a production injection refuses
-//     rather than delivering into an unverified sandbox (docs/THREAT-MODEL.md §1).
+//   - The production Injector (real data-plane sandbox delivery) is SATISFIED STRUCTURALLY and
+//     fail-closed — the providers/cloud-gcp Provider implements the Injector seam (Owns/
+//     DeliverIfOwned, B5) — but is NOT YET WIRED into a running session: this convenience New still
+//     defaults to a fail-closed denyInjector, and no landed path delivers a real credential into a
+//     real pod. The ORCHESTRATOR wires the cloud-gcp Provider in via NewWithPorts, proven live at
+//     B11/PART-A (docs/THREAT-MODEL.md §1).
 //   - DEFERRED: the GCP-native MintEphemeral backing (IAM Credentials GenerateAccessToken).
 //     MintEphemeral is a real, expiry-capped lease bookkeeper today (as in MemSecrets); the
 //     SA-impersonation token mint lands with the orchestrator/identity seam.

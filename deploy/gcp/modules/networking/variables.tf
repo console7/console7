@@ -28,6 +28,17 @@ variable "sandbox_node_tag" {
   }
 }
 
+variable "egress_proxy_port" {
+  type        = number
+  default     = 3128
+  description = "TCP port the in-cluster forward proxy (Squid; deploy/gcp/modules/egress-proxy) listens on. The sandbox->proxy ALLOW firewall rule pins to it; it MUST match the per-session NetworkPolicy port and providers/cloud-gcp proxyPort (3128). Default 3128."
+
+  validation {
+    condition     = var.egress_proxy_port > 1024 && var.egress_proxy_port <= 65535
+    error_message = "egress_proxy_port must be an unprivileged TCP port (1025-65535)."
+  }
+}
+
 variable "subnet_cidr_range" {
   type        = string
   description = "Primary CIDR for the sandbox subnet (node IPs)."

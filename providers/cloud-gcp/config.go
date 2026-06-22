@@ -2,7 +2,9 @@ package cloudgcp
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
+	"strings"
 )
 
 // DefaultNamePrefix matches deploy/gcp/modules/networking + modules/gke name_prefix default,
@@ -44,11 +46,37 @@ type Config struct {
 	// in (the base image's workspace). RunTask reads the produced commit from here. Defaults to
 	// DefaultWorkdir.
 	Workdir string
+	// SandboxImage is the reference to the signed sandbox base image the pod runs (e.g.
+	// "ghcr.io/console7/sandbox-base@sha256:..."). It MUST be DIGEST-PINNED: normalize rejects a
+	// tag-only reference, because a tag is mutable and is NOT what the kubelet content-addresses —
+	// pinning the digest is the supply-chain gate that the bytes which run are the bytes the release
+	// pipeline signed (.github/workflows/sandbox-image-release.yml; verify it first with
+	// scripts/verify-sandbox-image.sh). NOTE: this guarantees the digest is content-addressed at the
+	// kubelet; it is NOT admission-enforced — a binding admission policy that REQUIRES a valid
+	// signature (so an actor with cluster-write cannot schedule a different image) is Phase-2
+	// hardening, not this field. Required.
+	SandboxImage string
+	// AnthropicModel pins the engine's ANTHROPIC_MODEL (the org-API lane). It is rendered into the
+	// sandbox container's env. The pinned engine's DEFAULT model id 404s on the API, so a known-good
+	// id MUST be supplied for a working run — but it is optional at construction (lifecycle
+	// provision/destroy needs no model), and when empty no ANTHROPIC_MODEL is rendered (the engine
+	// falls back to its default, which currently 404s). The Anthropic API KEY is NOT set here: it is
+	// a secret injected into the pod at run time (the SecretsProvider injection path), never rendered
+	// into the pod spec. Vertex routing env is a separate lane (B12).
+	AnthropicModel string
 }
 
 // namePrefixRe bounds the prefix so derived Kubernetes object names ("<prefix>-sb-<32 hex>")
 // are valid DNS-1123 labels and match the deploy modules' name_prefix validation.
 var namePrefixRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,17}[a-z0-9])?$`)
+
+// sandboxImageRe requires a digest-pinned image reference: a non-empty repository part with NO
+// embedded "@" (so a malformed double-digest "repo@sha256:…@sha256:…" is rejected at construction,
+// not deferred to a confusing kubelet pull error), then a single "@sha256:" digest of 64 lowercase
+// hex at the end. It rejects a tag-only ("repo:tag") reference — only the digest content-addresses
+// the bytes the kubelet runs. A ref MAY carry both a tag and a digest ("repo:tag@sha256:…"); the
+// digest is always last, so anchoring it at the end is sufficient.
+var sandboxImageRe = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
 // normalize applies defaults and validates. It returns the effective config so New does not
 // mutate the caller's value.
@@ -77,5 +105,13 @@ func (c Config) normalize() (Config, error) {
 	if !namePrefixRe.MatchString(c.NamePrefix) {
 		return Config{}, errors.New("cloudgcp: Config.NamePrefix must be 1-19 chars, lowercase, start with a letter, no trailing hyphen")
 	}
+	c.SandboxImage = strings.TrimSpace(c.SandboxImage)
+	if c.SandboxImage == "" {
+		return Config{}, errors.New("cloudgcp: Config.SandboxImage is required — the digest-pinned signed sandbox base image (…@sha256:…); build/sign it with .github/workflows/sandbox-image-release.yml and verify with scripts/verify-sandbox-image.sh")
+	}
+	if !sandboxImageRe.MatchString(c.SandboxImage) {
+		return Config{}, fmt.Errorf("cloudgcp: Config.SandboxImage must be digest-pinned (…@sha256:<64 hex>), not tag-only — a tag is mutable and is not what the kubelet content-addresses; got %q", c.SandboxImage)
+	}
+	c.AnthropicModel = strings.TrimSpace(c.AnthropicModel)
 	return c, nil
 }

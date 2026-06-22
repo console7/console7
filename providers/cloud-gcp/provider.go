@@ -16,6 +16,10 @@ import (
 // a namespace delete to be accepted, short enough not to wedge teardown on an unresponsive API.
 const rollbackTimeout = 30 * time.Second
 
+// deliverTimeout bounds a single credential delivery/wipe exec. The Injector seam (Owns /
+// DeliverIfOwned) carries no context, so DeliverIfOwned derives a bounded one for the port I/O.
+const deliverTimeout = 30 * time.Second
+
 // errWidenRefused is the sentinel an ApplyEgressPolicy returns when a policy would widen the
 // allowlist beyond what was provisioned (narrow-only; GOAL.md tenet 4 — a permissive origin must
 // not confer a stricter target's reach).
@@ -37,6 +41,7 @@ type Provider struct {
 	runtime   SandboxRuntime
 	egress    EgressController
 	runner    EngineRunner
+	deliverer CredentialDeliverer
 	prefix    string
 	now       func() time.Time
 	newID     func() (string, error)
@@ -78,14 +83,31 @@ func NewWithPorts(runtime SandboxRuntime, egress EgressController, runner Engine
 		now = time.Now
 	}
 	return &Provider{
-		runtime:   runtime,
-		egress:    egress,
-		runner:    runner,
+		runtime: runtime,
+		egress:  egress,
+		runner:  runner,
+		// Fail-closed default: a Provider with no real deliverer wired refuses every injection
+		// (DeliverIfOwned returns false) rather than silently dropping or mis-delivering material.
+		// New wires the kube deliverer; tests/orchestrator call SetCredentialDeliverer.
+		deliverer: denyDeliverer{},
 		prefix:    prefix,
 		now:       now,
 		newID:     randomID(prefix),
 		sandboxes: make(map[string]*sandboxState),
 	}, nil
+}
+
+// SetCredentialDeliverer wires the port that DeliverIfOwned uses to write credential material into a
+// pod. It MUST be called before the provider is used concurrently (at construction/wiring time);
+// New sets the real kube deliverer, tests/orchestrator a fake or the cloud-gcp-backed one. A nil
+// argument is ignored (the fail-closed default is kept).
+func (p *Provider) SetCredentialDeliverer(d CredentialDeliverer) {
+	if d == nil {
+		return
+	}
+	p.mu.Lock()
+	p.deliverer = d
+	p.mu.Unlock()
 }
 
 // randomID returns a generator of DNS-1123-label-safe handle IDs ("<prefix>-sb-<32 hex>"),
@@ -244,6 +266,14 @@ func (p *Provider) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 		// expired sandbox was already marked dead by lookup.)
 		return errors.New("cloudgcp: cannot destroy an unknown, already-destroyed, or expired sandbox")
 	}
+	// Best-effort shred of any injected credential before tearing the pod down. The AUTHORITATIVE
+	// wipe is the pod deletion below (the credential lives in a medium: Memory volume that dies with
+	// the pod), so a failure here — nothing was injected, or the exec is refused — is ignored; this
+	// is defence in depth that shreds the secret a moment sooner. (Held under p.mu like the rest of
+	// Destroy — the same atomicity-over-throughput tradeoff DeliverIfOwned documents; RISKS R-7.)
+	wipeCtx, wipeCancel := context.WithTimeout(ctx, deliverTimeout)
+	_ = p.deliverer.Wipe(wipeCtx, h)
+	wipeCancel()
 	// Tear the workload down FIRST (stop the thing that could act), then clear its perimeter. A
 	// runtime-destroy failure is fatal and is NOT marked dead — the sandbox may still be live, so
 	// the caller (and a retry) must see it as live, exactly as the orchestrator's abort path
@@ -304,6 +334,45 @@ func (p *Provider) RunTask(ctx context.Context, h interfaces.SandboxHandle, task
 	}
 	p.mu.Unlock()
 	return p.runner.Run(ctx, h, task)
+}
+
+// Owns reports whether h is a sandbox owned by EXACTLY this subject and session — the ownership
+// oracle half of the data-plane Injector seam (providers/secrets-gcp Injector, which this Provider
+// satisfies structurally). An unknown, destroyed, expired, or tainted sandbox, or a subject/session
+// mismatch, is not owned (fail closed). This is the binding the provider attested at
+// ProvisionSandbox (spec.Subject/SessionID -> handle), so an injection reaches only its owner's
+// sandbox — no pooling (DESIGN.md §2.2; cloud.go SandboxSpec.Subject SECURITY).
+func (p *Provider) Owns(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.owns(h, subject, session)
+}
+
+// owns is the lock-held ownership predicate shared by Owns and DeliverIfOwned. The caller holds p.mu.
+func (p *Provider) owns(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID) bool {
+	sb, ok := p.lookup(h)
+	return ok && sb.live && !sb.tainted && sb.subject == subject && sb.session == session
+}
+
+// DeliverIfOwned atomically RE-CHECKS ownership under the lock and, only if it still holds, writes a
+// copy of material into the owning sandbox's memory volume, returning whether it delivered. The
+// single-step check-and-deliver closes the race where a teardown between a separate Owns and the
+// write would let a credential land in a sandbox that is already gone. Any delivery error reports
+// non-delivery (fail closed). The seam carries no context, so a bounded one is derived for the I/O.
+//
+// CONCURRENCY: like the package default (see the Provider struct doc), this holds p.mu across the
+// Deliver I/O (bounded by deliverTimeout) — the atomic check-and-deliver REQUIRES the lock not be
+// released mid-flight, so a stuck delivery head-of-line-blocks other sessions for up to that bound.
+// Atomicity over throughput; per-handle lock sharding is the production fix (docs/RISKS.md R-7).
+func (p *Provider) DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.owns(h, subject, session) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
+	defer cancel()
+	return p.deliverer.Deliver(ctx, h, material) == nil
 }
 
 // lookup returns the state for h, marking it dead first if it has aged past its MaxTTL so a

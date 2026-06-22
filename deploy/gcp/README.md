@@ -17,9 +17,10 @@ module serves both new-project and existing-project adopters.
 | Path | Status | Provisions |
 |---|---|---|
 | `modules/secrets/` | **active** | KMS key ring + KEK + least-privilege workload SA (`SecretsProvider` substrate) |
-| `modules/networking/` | stub | default-deny egress perimeter (boundary-first sandbox PR) |
+| `modules/networking/` | **active** | default-deny egress floor + the narrow sandbox→proxy ALLOW rule (boundary-first) |
 | `modules/gke/` | stub | gVisor node pool + Workload Identity (binds the secrets SA) |
 | `modules/artifact-registry/` | **active** | Docker repository for the signed sandbox base-image + repo-scoped pull grant to the GKE node SA |
+| `modules/egress-proxy/` | **active** (kubectl) | Squid forward proxy (default-deny FQDN allowlist), kubectl-applied; the VPC ALLOW rule lives in `modules/networking` |
 | `modules/evidence/` | stub | GCS bucket-lock WORM behind the evidence `Store` seam |
 
 ## Prerequisites (bootstrap, not this module)

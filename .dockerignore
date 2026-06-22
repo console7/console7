@@ -1,0 +1,23 @@
+# Build-context exclusions for the sandbox base image (sandbox/base-image/Dockerfile, built from the
+# repo root by .github/workflows/sandbox-image-release.yml).
+#
+# TRUST-TIER HYGIENE: this image runs UNTRUSTED agent code; its build stage (`COPY . .` then
+# `go build ./sandbox/...`) must not ingest the OTHER tiers' source. The build only compiles
+# `sandbox/policyhelper/...`, which imports `sdk/interfaces` and nothing else (verified), so we keep
+# `sandbox/`, `sdk/`, `go.mod`, `go.sum` and exclude everything that is neither imported nor a build
+# input — notably the key-broker and control-plane source. That source is public OSS (no secret
+# leak either way), but keeping it out of the build context also keeps it out of the public
+# `--provenance=mode=max` attestation, and honours the distinct-build-identity separation the image
+# itself advertises. (If a future sandbox import reaches into another tier, the build fails loudly —
+# the intended signal to reconsider that dependency.)
+.git
+.gitignore
+control-plane
+keybroker
+providers
+conformance
+deploy
+docs
+scripts
+.github
+.claude

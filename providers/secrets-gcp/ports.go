@@ -51,8 +51,9 @@ type SecretStore interface {
 // Injector is the ownership oracle and delivery sink for subscription-token injection. Its
 // method set matches what sdk/devkit.SandboxRegistry already exposes, so the registry
 // satisfies it directly in tests and conformance. In production it is implemented by the
-// data-plane sandbox attestation path (the CloudProvider), which does not exist yet — until
-// then New wires a fail-closed implementation (see denyInjector).
+// data-plane sandbox attestation path — the providers/cloud-gcp Provider (Owns/DeliverIfOwned,
+// B5) — which the orchestrator wires in via NewWithPorts. This convenience New still defaults to a
+// fail-closed implementation (see denyInjector) until that wiring lands.
 type Injector interface {
 	// Owns reports whether h is a sandbox owned by exactly this subject and session. An
 	// unknown, mismatched, or expired handle is not owned (fail closed).

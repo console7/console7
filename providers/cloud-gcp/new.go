@@ -67,6 +67,9 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		_ = os.Remove(kubeconfigPath)
 		return nil, err
 	}
+	// Wire the real data-plane credential deliverer (kubectl exec into the pod's memory volume).
+	// NewWithPorts defaulted it fail-closed; the production provider can deliver.
+	p.SetCredentialDeliverer(&kubeCredentialDeliverer{run: rc})
 	p.kubeconfigPath = kubeconfigPath
 	return p, nil
 }

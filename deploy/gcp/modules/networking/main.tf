@@ -8,15 +8,19 @@
 # WHAT THIS MODULE OWNS (the static DENY floor):
 #   - enabling the Compute Engine API (the resources below need it on a fresh project);
 #   - a custom-mode VPC + a sandbox subnet (primary + pod/service secondary ranges, flow logs);
-#   - a single, effective EGRESS default-DENY firewall rule (IPv4) scoped to the sandbox node tag.
+#   - a single, effective EGRESS default-DENY firewall rule (IPv4) scoped to the sandbox node tag;
+#   - one narrow EGRESS ALLOW rule: sandbox-tag -> proxy pod range on the proxy port (B7), the only
+#     sanctioned escape from the floor (priority 900, above the deny).
 #
 # WHAT IT DELIBERATELY DOES NOT OWN (deferred to modules/gke + providers/cloud-gcp, PR-2 —
 # every item here is an ALLOW/escape path, needs the cluster, or cannot be enforced at the VPC
 # layer at all, so it lands with the thing that can actually enforce it):
-#   - the SANCTIONED egress path (Cloud Router + NAT, and the narrow ALLOW rules to the egress
-#     proxy / Google APIs for node image pulls). NAT is SNAT for *permitted* flows; landing it
+#   - the SANCTIONED egress path's NAT (Cloud Router + Cloud NAT) and the narrow ALLOW to Google APIs
+#     for node image pulls — both land in modules/gke (NAT is SNAT for *permitted* flows; landing it
 #     here, where the only routable range is the sandbox's own (denied) range, would point
-#     translation at the ranges the floor denies and rest the guarantee on tag fidelity.
+#     translation at the ranges the floor denies and rest the guarantee on tag fidelity). NOTE: the
+#     one ALLOW rule that DOES live here is the narrow sandbox->forward-proxy escape (B7, below) —
+#     it is a destination INSIDE the cluster (the proxy pod range), not an SNAT/external path.
 #   - the per-session egress ALLOWLIST (dynamic; programmed at the out-of-band proxy by the
 #     orchestrator's ApplyEgressPolicy narrow step — orchestrator.go narrow-egress);
 #   - the per-pod NetworkPolicy routing sandbox pods to the proxy only;
@@ -128,6 +132,39 @@ resource "google_compute_firewall" "deny_egress_all" {
 
   deny {
     protocol = "all"
+  }
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
+# --- Firewall: the narrow ALLOW to the egress proxy (the one sanctioned escape from the floor) ---
+
+# Permit a sandbox-tagged node to reach the in-cluster forward proxy on the proxy port, and NOTHING
+# else. Priority 900 (< the 1000 deny floor) so this one flow is allowed while every other
+# destination still hits the floor. The destination is the POD range — the proxy runs as a pod — so
+# at the VPC layer this is necessarily coarse (it permits :3128 to any pod). It is therefore the
+# NODE-layer HALF of the path; the AUTHORITATIVE per-pod restriction is the per-session NetworkPolicy
+# (providers/cloud-gcp renderNamespaceAndEgress), which pins sandbox egress to the
+# console7.dev/egress-proxy namespace ONLY, and only the proxy listens on this port. The proxy itself
+# (on the non-sandbox control pool, NAT egress) enforces the per-session FQDN allowlist
+# (modules/egress-proxy + the orchestrator, B8). Keep var.egress_proxy_port in sync with the
+# providers/cloud-gcp proxyPort (3128). Logged.
+resource "google_compute_firewall" "allow_egress_proxy" {
+  project     = var.project_id
+  name        = "${var.name_prefix}-sandbox-allow-egress-proxy"
+  network     = google_compute_network.sandbox.id
+  description = "Narrow ALLOW: sandbox-tagged workloads may egress to the in-cluster forward proxy (pod range) on the proxy port ONLY (priority 900, above the deny floor). The per-pod NetworkPolicy restricts this to the egress-proxy namespace; the proxy enforces the per-session FQDN allowlist. Every other destination stays denied."
+  direction   = "EGRESS"
+  priority    = 900
+
+  target_tags        = [var.sandbox_node_tag]
+  destination_ranges = [var.pod_cidr_range]
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.egress_proxy_port)]
   }
 
   log_config {

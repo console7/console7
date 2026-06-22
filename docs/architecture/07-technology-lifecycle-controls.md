@@ -10,7 +10,7 @@ bound to an OpenSSF posture (Scorecard, OSPS Baseline L3, Best-Practices Badge s
 gates below are **as-code and CI-enforced**; the in-band hooks are defence-in-depth (tenet
 2) that front-run the authoritative CI + branch-protection controls.
 
-Legend: ✅ live · ◻ tracked target (no artifact/service yet). **Faded + dashed** node = wholly target state (here the Release gate/evidence).
+Legend: ✅ live · ◻ tracked target (no artifact/service yet). The Release gate is now **partially live** — the sandbox base image is signed (keyless) / SBOM'd / provenanced; the other images + SLSA-L3 attestation remain target.
 
 ```mermaid
 flowchart LR
@@ -24,7 +24,7 @@ flowchart LR
     G2["✅ go build/vet/gofmt<br/>✅ golangci-lint · shellcheck<br/>✅ terraform fmt/validate"]
     G3["✅ go test + coverage floor<br/>✅ conformance suite<br/>✅ CodeQL · trivy · govulncheck · gitleaks<br/>◻ DAST (ZAP, manual)"]
     G4["✅ CODEOWNERS + branch protection<br/>✅ required review · no self-approve<br/>AI (Codex) review · ✅ human merge"]
-    G5["◻ SBOM · ◻ SLSA L3 provenance<br/>◻ signed images (distinct identities)"]
+    G5["✅ SBOM · ✅ SLSA provenance · ✅ cosign keyless<br/>(sandbox image; identity-pin enforced) · ◻ other images / SLSA L3"]
     G6["✅ WIF/OIDC keyless · PLAN(ro)/APPLY split<br/>◻ protected env · ✅ trivy IaC"]
     G7["✅ default-deny egress · ✅ ephemeral sandbox<br/>✅ WORM evidence + ◻ SIEM · ✅ Dependabot · ✅ vuln SLAs"]
   end
@@ -48,15 +48,11 @@ flowchart LR
 
   classDef stage fill:#cfe3f7,stroke:#1168bd,color:#11304a;
   classDef gate fill:#d8f0dd,stroke:#27ae60,color:#13502a;
-  classDef gatePlan fill:#eef8f1,stroke:#abd7ba,color:#8aa896,stroke-dasharray:5 4;
   classDef evid fill:#fff3cd,stroke:#b8860b,color:#5c4500;
-  classDef evidPlan fill:#fbf6e6,stroke:#ddc99c,color:#a89a78,stroke-dasharray:5 4;
-  %% faded + dashed = target state (not yet coded & landed); solid = implemented & landed
+  %% solid = implemented & landed (Release gate now partially live — see legend)
   class A1,A2,A3,A4,A5,A6,A7 stage;
-  class G1,G2,G3,G4,G6,G7 gate;
-  class G5 gatePlan;
-  class E1,E2,E3,E4,E6,E7 evid;
-  class E5 evidPlan;
+  class G1,G2,G3,G4,G5,G6,G7 gate;
+  class E1,E2,E3,E4,E5,E6,E7 evid;
 ```
 
 ## CI gates (each is a `.github/workflows/*` job — actions SHA-pinned)
@@ -69,6 +65,8 @@ flowchart LR
 | `codeql.yml` | PR, push, weekly | Go SAST (security-extended) | CO-7.1 | CodeQL alerts |
 | `terraform.yml` | PR, push | `terraform fmt`/`validate` + **trivy** config scan | CO-9, CO-7.1 | trivy report |
 | `shellcheck.yml` | PR, push | shell lint of `deploy/**/*.sh` | CO-17 | shellcheck report |
+| `dockerfile-lint.yml` | PR, push | hadolint (digest-pinned image) of the sandbox base image | CO-17, CO-5 | hadolint report |
+| `sandbox-image-release.yml` | tag `sandbox-image/v*`; push (self-test) | build → SBOM + provenance → **cosign keyless sign** → verify; **identity-pin enforcement** self-test (org/workflow/ref lookalikes rejected) | CO-5.2/5.4, CO-8 *(5.3 L3 partial — BuildKit provenance, not the hardened SLSA-L3 builder)* | SBOM + provenance attestations · cosign sigs · enforcement-test log |
 | `governance-gate.yml` | PR, push | `audit-skill-provenance.sh` — `.claude/` skills/agents/hooks first-party only (**blocking**) | CO-12.7/12.8 | provenance audit |
 | `architecture-docs.yml` | PR, push | `validate-architecture-mermaid.py` — Mermaid soundness of `docs/architecture/` (**blocking**) + non-blocking drift `::warning::` | CO-14, CO-17 | validator result; drift annotation |
 | `dast-zap.yml` | manual | ZAP baseline (report-only) | CO-7.2 | ZAP report ◻ |
@@ -90,10 +88,15 @@ Keyless, split-identity, observe-before-actuate:
   (no secrets at rest), CO-12 (AI/agentic: provenance gate, human merge, no agent
   self-merge), CO-14 (evidence: git + signed history + **PR maps each change to its CO**),
   CO-15/CO-17 (QA + code quality), CO-1/CO-2/CO-11/CO-18.
+- **Partially adopted (first signed artifact landed):** an **SBOM** (CO-5.2) and a **keyless-signed
+  release with a distinct, enforced identity** (CO-5.4) are **live for the sandbox base image**
+  (`sandbox-image-release.yml`), plus **build provenance** (a step toward CO-5.3). Still tracked:
+  the control-plane/key-broker images, **full SLSA-L3** attestation (CO-5.3 needs the hardened
+  ephemeral builder, not stock BuildKit provenance), and admission-time signature verification.
 - **Tracked targets (dated, with interim slices in `RISKS.md`/standard §5):** independent
-  human reviewer + `enforce_admins` (single-maintainer gap), **SBOM** (CO-5.2), **SLSA L3
-  provenance** (CO-5.3), **signed releases + admission** (CO-5.4), DAST/IAST (CO-7.2),
-  independent pentest (CO-7.4), fuzzing, agent behavioural-eval suite (CO-12.10).
+  human reviewer + `enforce_admins` (single-maintainer gap), the remaining image pipelines +
+  SLSA-L3 + admission (CO-5.2–5.4), DAST/IAST (CO-7.2), independent pentest (CO-7.4), fuzzing,
+  agent behavioural-eval suite (CO-12.10).
 - **Dropped (reasoned N/A):** CO-10 (nothing deployed *from this repo*), CO-13 (no
   low-code), CO-19 (no regulated trading systems).
 
@@ -109,10 +112,12 @@ Keyless, split-identity, observe-before-actuate:
 
 ## Notes & confidence
 - Stages 1–4 and 6 are **live** (hooks, all CI workflows, branch protection, the deploy
-  repos' plan/apply workflows were read in source). **Stage 5 (Release)** is entirely a
-  **tracked target** — there is no release artifact yet, so SBOM/provenance/signing are
-  specified but not produced. **Stage 7 (Run)** mixes live evidence (WORM hash chain) with
-  planned runtime controls (default-deny egress wall, live SIEM webhook).
+  repos' plan/apply workflows were read in source). **Stage 5 (Release)** is now **partially
+  live**: the sandbox base image has a real build → SBOM → SLSA-provenance → keyless-sign →
+  verify pipeline with an enforced distinct identity (`sandbox-image-release.yml`); the
+  control-plane/key-broker image pipelines, SLSA-L3, and admission-time verification are still
+  tracked. **Stage 7 (Run)** mixes live evidence (WORM hash chain) with planned runtime controls
+  (out-of-band egress proxy, live SIEM webhook).
 - The "AI (Codex) review" leg in stage 4 reflects the project's stated authoritative
   external review gate (CLAUDE.md tenet 2); it is **(assumed)** from process docs, not a
   workflow file in-tree.

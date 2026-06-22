@@ -14,9 +14,11 @@ Mermaid C4 dialect) for reliable GitHub rendering; the C4 *levels* are noted in 
 > (NetworkPolicy on Dataplane V2), Cloud NAT, and node-SA metadata concealment
 > (`providers/cloud-gcp` #41, `modules/gke` #43), and the **engine-invocation seam** —
 > `Cloud.RunTask`→`EngineResult` with real-commit-digest signing (#47), plus in-sandbox
-> `git`/`ca-certificates` (#48). Still **target state**: the out-of-band FQDN-allowlist
-> egress **proxy** (PR-3), **DLP**, the **Observe Gateway**, the **MCP allowlist**, the
-> **release/signing pipeline**, and the engine's **live in-pod integration** (Tier-2). The views
+> `git`/`ca-certificates` (#48). The **sandbox base image** now also has a real
+> **signed-release pipeline** (build → SBOM → SLSA provenance → keyless cosign sign, distinct
+> identity enforced). Still **target state**: the out-of-band FQDN-allowlist egress **proxy**
+> (PR-3), **DLP**, the **Observe Gateway**, the **MCP allowlist**, the consumer-side image
+> **digest pin** (B3), and the engine's **live in-pod integration** (Tier-2). The views
 > mark this explicitly — **faded + dashed = target state**. See
 > [Reviewer observations](#c-reviewer-observations).
 
@@ -105,10 +107,12 @@ Elements drawn from the normative spec/process but **not confirmed in code** (ma
    + the backends; whether it becomes a distinct process is undetermined.
 5. **Checkpoint durability + SIEM webhook** — signed checkpoints are in-memory in the Sink;
    the SIEM `Stream` is a ref-integrity check, not a wired, authenticated webhook.
-6. **Image build/sign/SBOM/provenance pipeline** — the sandbox base-image Dockerfile (#45) and
-   its publish destination (`modules/artifact-registry`, `immutable_tags`) now exist, but the
-   **release workflow** that signs/SBOMs/provenances the image, and the consumer-side **digest
-   pin** (`Config.SandboxImage` `@sha256`), are not in tree yet.
+6. **Image build/sign/SBOM/provenance pipeline** — landed for the **sandbox base image**: the
+   Dockerfile (#45, now digest-pinned bases), the AR publish destination (`modules/artifact-
+   registry`, `immutable_tags`), and the **release workflow** (`sandbox-image-release.yml`: SBOM +
+   SLSA provenance + keyless cosign sign + an enforced identity pin). Still open: the **control-
+   plane / key-broker** image pipelines, **SLSA-L3**, and **admission-time** signature verification.
+   The consumer-side **digest pin** is now enforced (`Config.SandboxImage` rejects a tag-only ref, B3).
 7. **Break-glass actuation mechanism** and **closed-loop remediation bounds** — design-level
    only.
 
@@ -137,11 +141,15 @@ What a second-line (2LoD) reviewer should flag, roughly in priority order:
    bypass branch protection / self-merge. Automated gates + AI review compensate, but this is
    the top governance risk until a second independent reviewer exists.
 4. **`DevCA` is a dev-only trust root.** All lineage/commit/checkpoint signatures currently
-   chain to an in-process Ed25519 root. "Evidence over attestation" (tenet 6) is bench-grade
+   chain to an in-process Ed25519 root. "Evidence over attestation" (tenet 7) is bench-grade
    until Sigstore-keyless/org-CA lands; ensure `DevCA` can **never** reach a release build.
-5. **No release artifacts ⇒ the distinct-signing-identity guarantee is unrealized.**
-   SBOM/SLSA-L3/signed images (CO-5.2–5.4) are tracked targets; "distinct trust tiers ship as
-   distinct signed artifacts" (a core tenet) is aspirational until the image pipeline exists.
+5. **First distinct-signing-identity artifact landed; others still aspirational.** The
+   **sandbox base image** now has a real signed-release pipeline (`sandbox-image-release.yml`:
+   SBOM + SLSA provenance + keyless cosign sign, with the distinct identity **enforced** by an
+   always-on wrong-identity-rejection test) — so "distinct trust tiers ship as distinct signed
+   artifacts" is realized for the one image that runs untrusted code. The **control-plane and
+   key-broker** images have no pipeline yet, and **SLSA-L3** + **admission-time** signature
+   verification (CO-5.3/5.4) remain tracked, so the guarantee is partial, not complete.
 6. **Provider co-location discipline.** `scm-github` handles short-lived **token material**
    and belongs in the **key-broker** artifact; a deployment that folds it into the control
    plane would breach key isolation (TB2). The build/deploy split that enforces this is not

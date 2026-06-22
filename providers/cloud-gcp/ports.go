@@ -77,3 +77,24 @@ type EngineRunner interface {
 	// never transcripts or secret material (cloud.go EngineResult SECURITY; GOAL.md tenets 1/3/6).
 	Run(ctx context.Context, handle interfaces.SandboxHandle, task interfaces.EngineTask) (interfaces.EngineResult, error)
 }
+
+// CredentialDeliverer writes short-lived credential material into a live sandbox pod's MEMORY
+// volume and shreds it. It is a SEPARATE port (like EngineRunner) because delivery is an EXEC INTO a
+// live pod, not a lifecycle op: it lets the provider gate delivery on the ownership check under the
+// lock before any exec, and lets a deployment swap the mechanism (kubectl exec vs a typed client).
+// The real adapter (kube_exec.go) shells `kubectl exec` and feeds material over STDIN (never argv, so
+// it cannot leak into a process table or shell history); the in-memory fake records it.
+//
+// SECURITY: the material is a secret. The adapter MUST write it only to a memory-backed
+// (medium: Memory) volume so it never reaches disk, MUST pass it over stdin (not as an argument),
+// and MUST NOT log it. The provider only ever calls Deliver after DeliverIfOwned has re-verified,
+// under the lock, that the handle is owned by exactly the target subject+session.
+type CredentialDeliverer interface {
+	// Deliver writes material into handle's in-pod credential file (memory-backed). It returns an
+	// error if the write could not be confirmed; the provider then reports non-delivery (fail closed).
+	Deliver(ctx context.Context, handle interfaces.SandboxHandle, material []byte) error
+	// Wipe best-effort shreds the in-pod credential file at teardown. The authoritative wipe is the
+	// pod's deletion (the volume is medium: Memory, so it dies with the pod); Wipe is defence in
+	// depth, so it tolerates an already-absent file/pod as success.
+	Wipe(ctx context.Context, handle interfaces.SandboxHandle) error
+}
