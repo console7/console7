@@ -24,7 +24,7 @@ flowchart TB
     %% ---------- Control plane (Tier-1, holds no keys at rest) ----------
     subgraph CP["Control plane &mdash; Tier-1 modular monolith (no keys at rest)"]
       direction TB
-      UI["◻ ui<br/>Web-CLI + API gateway<br/>SSO; SSE live stream; launch"]
+      UI["✅ ui &mdash; thin c7 CLI<br/>launch/watch/review one session<br/>SSO + SSE browser gateway ◻"]
       ORCH["✅ orchestrator<br/>session lifecycle; <b>stamps lineage</b><br/>human&rarr;NHI&rarr;action; cross-repo coord"]
       PDP["✅ pdp<br/>tier&times;stratum &rarr; SessionProfile<br/>take-the-max + step-up (◻ P3)"]
       IR["◻ inference-router<br/>subscription vs org-API selection<br/>(logic lives in broker + backends)"]
@@ -151,7 +151,7 @@ flowchart TB
 ### Control plane (Tier-1, `control-plane/`) — holds no keys at rest
 | Container | Status | Responsibility |
 |---|---|---|
-| `ui` | ◻ README | Web-CLI front + API gateway: authenticate against IdP, accept launch requests, **SSE-stream** the live session to the browser. Thin; holds no secrets. |
+| `ui` | ✅ `cli.go` + `cmd/c7` (thin CLI) | The thin `c7 launch` client: build a `LaunchRequest` → `orchestrator.Run` → render the proposed PR + evidence-chain verdict (B10). The SSO login + **SSE**-stream browser gateway is ◻ deferred. Thin; holds no secrets. |
 | `orchestrator` | ✅ `orchestrator.go` | Owns the session lifecycle; calls PDP, broker, cloud, evidence **in order**; **stamps the human→NHI→action lineage** (the engine's sub-agent lineage is leaky); fully **synchronous** `Run()`. |
 | `pdp` | ✅ `pdp.go` | Resolves the **target's** `TierStratum` (via `PolicySoR`) into a `SessionProfile` (egress allowlist, autonomy ceiling, human-gate). P1 enforces only the Author × T3/S1 lane, fail-closed on anything else; cross-repo take-the-max is P3. |
 | `inference-router` | ◻ README | Logical home of subscription-vs-org-API selection; the **decision** is implemented in `broker.ResolveInference` + the `InferenceBackend` reference providers today. |
@@ -190,7 +190,7 @@ flowchart TB
   deploy time, not runtime calls.
 
 ## Notes & confidence
-- The `inference-router`, `dlp`, `ui`, the sandbox observe-gateway, and `policy-opa` are **scaffold/README-only** at this commit; their
+- The `inference-router`, `dlp`, the sandbox observe-gateway, and `policy-opa` are **scaffold/README-only** at this commit (`ui` now has a real thin `c7` CLI — B10 — with the browser/SSE gateway still deferred); their
   behaviour is shown per the normative spec and marked ◻ (faded). `cloud-gcp` **landed**
   (#41) — the `CloudProvider` is no longer MemCloud-only — and now **renders the per-session
   egress proxy** (B8: a Squid per `<id>-proxy` namespace, default-deny FQDN ACLs, NetworkPolicy-pinned);
