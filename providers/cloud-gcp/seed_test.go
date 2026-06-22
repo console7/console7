@@ -72,6 +72,36 @@ func TestIsProtectedBranch(t *testing.T) {
 	}
 }
 
+func TestEngineRunScript_Shape(t *testing.T) {
+	s := engineRunScript(credentialPath)
+	for _, want := range []string{
+		"test -s /run/console7/credential",          // fail CLOSED unless the credential is present + non-empty
+		`_c7cred="$(cat /run/console7/credential)"`, // read ONCE, standalone (set -e aborts a failed read)
+		`[ -n "$_c7cred" ]`,                         // ...and explicitly reject an empty value (TOCTOU close)
+		"exit 1",                                    // never runs the engine unauthenticated
+		`ANTHROPIC_API_KEY="$_c7cred" claude -p --permission-mode default`, // injected by NAME, not argv
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("engineRunScript missing %q\n---\n%s", want, s)
+		}
+	}
+	// The value must be injected by NAME on the claude process, NOT a `--`-flag (which would land in
+	// /proc/<pid>/cmdline), and the credential must not be re-read AFTER `claude` (the env carries it).
+	claudeAt := strings.Index(s, "claude -p")
+	if claudeAt < 0 || strings.Contains(s[claudeAt:], "$(cat") || strings.Contains(s, "--api-key") {
+		t.Errorf("credential must reach claude only via the prefix env var, never argv/flag/re-read:\n%s", s)
+	}
+	// The fail-closed structure is what makes it safe under dash (where a FAILED prefix command-
+	// substitution does NOT trip set -e): assert the credential is read as a STANDALONE assignment
+	// (set -e aborts a failed standalone read) followed by an explicit non-empty guard BEFORE the
+	// engine line — so an absent/empty/raced credential can never reach a running engine.
+	readAt := strings.Index(s, `_c7cred="$(cat`)
+	guardAt := strings.Index(s, `[ -n "$_c7cred" ]`)
+	if readAt < 0 || guardAt < 0 || readAt >= guardAt || guardAt >= claudeAt {
+		t.Errorf("fail-closed order must be: standalone read -> non-empty guard -> engine:\n%s", s)
+	}
+}
+
 func TestShquote_EscapesInjection(t *testing.T) {
 	// A value carrying a single quote (or shell metacharacters) is wrapped so it cannot break out of
 	// its argument.
