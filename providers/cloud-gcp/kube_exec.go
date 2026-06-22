@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -480,6 +482,75 @@ func (d *kubeCredentialDeliverer) Wipe(ctx context.Context, h interfaces.Sandbox
 		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--",
 		"/bin/sh", "-c", "rm -f "+credentialPath)
 	return err
+}
+
+// hostRe bounds an egress-allowlist host to a DNS hostname (labels of alphanumerics/hyphens, dot-
+// separated) so a crafted allowlist entry cannot inject a Squid directive (newline/space/control) or
+// a wildcard. It is an EXACT host — never a leading-dot subdomain wildcard — so the perimeter admits
+// only the named host (tenet 3: the boundary is the host:port allowlist, not a pattern).
+var hostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// egressAllowlistToSquidACL transforms the session's default-deny URL allowlist into the Squid
+// http_access ACL fragment the per-session proxy enforces (B8). Each URL becomes an EXACT-host +
+// EXACT-port allow. It FAILS CLOSED on ANY malformed/unsupported entry (a non-http(s) scheme, a
+// missing/invalid host, an unparseable port) — returning an error rather than silently dropping the
+// entry, so a bad allowlist can never collapse into an empty (deny-all-but-then-mis-handled) or
+// over-broad config that would make the egress proof vacuous (DESIGN.md §5.2; the review's
+// fail-closed-on-malformed requirement). An EMPTY allowlist yields an empty fragment — the proxy's
+// trailing `http_access deny all` then denies everything (deny-all, the correct default).
+//
+// The host is lower-cased and validated against hostRe; the port defaults to 443 (https) / 80 (http).
+// Values are interpolated into squid.conf, so the strict host charset + numeric port are the
+// injection guard (a Squid config has no string-quoting we could rely on instead).
+func egressAllowlistToSquidACL(allowlist []string) (string, error) {
+	var b strings.Builder
+	for i, raw := range allowlist {
+		raw = strings.TrimSpace(raw)
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", fmt.Errorf("cloudgcp: malformed egress allowlist URL %q: %w", raw, err)
+		}
+		switch u.Scheme {
+		case "http", "https":
+		default:
+			return "", fmt.Errorf("cloudgcp: egress allowlist URL %q has unsupported scheme %q (want http/https)", raw, u.Scheme)
+		}
+		host := strings.ToLower(u.Hostname())
+		if host == "" || !hostRe.MatchString(host) {
+			return "", fmt.Errorf("cloudgcp: egress allowlist URL %q has missing/invalid host %q", raw, host)
+		}
+		port := u.Port()
+		if port == "" {
+			if u.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		if !isNumericPort(port) {
+			return "", fmt.Errorf("cloudgcp: egress allowlist URL %q has invalid port %q", raw, port)
+		}
+		// Per-entry ACLs so host A:443 and host B:8443 are paired exactly (never cross-allowed).
+		fmt.Fprintf(&b, "acl c7_dst_%d dstdomain %s\n", i, host)
+		fmt.Fprintf(&b, "acl c7_port_%d port %s\n", i, port)
+		fmt.Fprintf(&b, "http_access allow c7_dst_%d c7_port_%d\n", i, i)
+	}
+	return b.String(), nil
+}
+
+// isNumericPort reports whether p is a 1-5 digit port in 1..65535.
+func isNumericPort(p string) bool {
+	if len(p) < 1 || len(p) > 5 {
+		return false
+	}
+	n := 0
+	for _, c := range p {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n >= 1 && n <= 65535
 }
 
 // jsonScalar encodes s as a double-quoted YAML scalar via encoding/json (a JSON string is a valid
