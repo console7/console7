@@ -53,6 +53,11 @@ output "gke_sandbox_node_pool" {
   value       = module.gke.sandbox_node_pool
 }
 
+output "sandbox_image_repository_url" {
+  description = "Base path of the sandbox-image Artifact Registry repository, \"<region>-docker.pkg.dev/<project>/<name_prefix>\". The (forthcoming) release pipeline pushes \"<this>/<image>:<tag>\" here; append \"/<image>@sha256:...\" to form the digest-pinned reference the (forthcoming) providers/cloud-gcp Config.SandboxImage will consume."
+  value       = module.artifact_registry.repository_url
+}
+
 output "evidence_bucket_name" {
   description = "Name of the durable WORM evidence bucket. Wire it into providers/evidence-gcs Config.Bucket so the EvidenceSink commits records here. Evidence stays in the adopter's tenancy (GOAL.md tenet 1)."
   value       = module.evidence.bucket_name

@@ -90,6 +90,15 @@ not reimplemented**, run as-is in the sandbox over its CLI/Agent SDK. It is a se
 change can shift permission/hook behaviour (`DESIGN.md` §1.4). It lives only in the
 **sandbox base image** — never in the control-plane or key-broker images.
 
+**Image distribution & integrity.** The sandbox base image is published to a dedicated
+**Artifact Registry** Docker repository (`deploy/gcp/modules/artifact-registry`, ✅ in tree) with
+**immutable tags** (a pushed tag cannot be moved to different bytes) and a **repo-scoped** pull
+grant to the GKE node SA. The **signing/SBOM/provenance build pipeline**
+(`.github/workflows/sandbox-image-release.yml`) and the **consumer-side digest pin**
+(`providers/cloud-gcp` `Config.SandboxImage` `@sha256`, the intended authoritative content-address)
+are **(planned)** — not in tree at this commit. Until they land, `immutable_tags` is the registry-
+side integrity control in place.
+
 ## `console7-cloud-local` dependency posture
 Out-of-tree, **consume-by-pin**: `go.mod` requires `github.com/console7/console7` at a
 pinned pseudo-version (no `replace`, no fork). Otherwise **stdlib-only** — the Docker/Podman

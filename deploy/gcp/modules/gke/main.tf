@@ -39,8 +39,9 @@ resource "google_project_service" "container" {
 # --- Least-privilege node service account ---
 
 # A dedicated node SA instead of the over-privileged default Compute Engine SA. It holds only the
-# verbs nodes need (write logs/metrics, pull images); pod-level authorization comes from Workload
-# Identity, not this SA, so concealing it (GKE_METADATA) costs the sandbox nothing legitimate.
+# verbs nodes need (write logs/metrics; image-pull is granted repo-scoped in modules/artifact-
+# registry, not here); pod-level authorization comes from Workload Identity, not this SA, so
+# concealing it (GKE_METADATA) costs the sandbox nothing legitimate.
 resource "google_service_account" "nodes" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-gke-nodes"
@@ -48,14 +49,17 @@ resource "google_service_account" "nodes" {
 }
 
 resource "google_project_iam_member" "nodes" {
-  # The minimal GKE node SA set: write logs/metrics + node resource metadata, pull images. NO
-  # monitoring.viewer (project-wide metric READ is not a node verb) — least privilege (tenet 5), so
-  # even if GKE_METADATA were ever bypassed the node token reads nothing it should not write.
+  # The minimal GKE node SA set: write logs/metrics + node resource metadata. NO monitoring.viewer
+  # (project-wide metric READ is not a node verb) — least privilege (tenet 5), so even if
+  # GKE_METADATA were ever bypassed the node token reads nothing it should not write. Image-pull
+  # (roles/artifactregistry.reader) is deliberately NOT granted here: modules/artifact-registry
+  # grants it REPO-SCOPED on the one sandbox-image repository, so the node can pull that image and no
+  # other repo's — a project-wide reader would point at every repo (and, before that module, at no
+  # repo at all).
   for_each = toset([
     "roles/logging.logWriter",
     "roles/monitoring.metricWriter",
     "roles/stackdriver.resourceMetadata.writer",
-    "roles/artifactregistry.reader",
   ])
   project = var.project_id
   role    = each.value

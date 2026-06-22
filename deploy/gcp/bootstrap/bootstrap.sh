@@ -300,6 +300,18 @@ grant_project_role "$APPLY_SA_EMAIL" "roles/compute.securityAdmin"
 grant_project_role "$APPLY_SA_EMAIL" "roles/container.admin"
 grant_project_role "$APPLY_SA_EMAIL" "roles/iam.serviceAccountUser"
 
+# deploy/gcp/modules/artifact-registry's delta: create the one sandbox-image Docker repository and
+# set its repo-scoped IAM (pull grant to the node SA). repository CREATE needs the project-level
+# artifactregistry.repositories.create verb and setting repo IAM needs setIamPolicy; no narrower
+# predefined role covers BOTH (repoAdmin grants repo-IAM but not project-level create), so
+# artifactregistry.admin is the least over-grant that lets this one-shot CD identity stand the
+# module up. Within-project it also implies artifact push/delete — i.e. the deploy identity is a
+# write path to the sandbox image — but that is strictly less than the container.admin granted
+# above (which can already deploy arbitrary cluster workloads), and it confers nothing in OTHER
+# projects and no compute. The image's integrity rests on the registry's immutable_tags and the
+# forthcoming consumer-side digest pin, not on withholding push from the deploy identity.
+grant_project_role "$APPLY_SA_EMAIL" "roles/artifactregistry.admin"
+
 # --- outputs --------------------------------------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 cat <<EOF
