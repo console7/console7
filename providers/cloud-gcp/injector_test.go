@@ -2,6 +2,7 @@ package cloudgcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,72 @@ func TestProvider_OwnsAndDeliverIfOwned(t *testing.T) {
 	if !ok || string(got) != "sk-ant-secret" {
 		t.Fatalf("delivered material = %q, ok=%v; want the owner's material", got, ok)
 	}
+}
+
+func TestCredentialDeliverWipeArgv_Shape(t *testing.T) {
+	h := interfaces.SandboxHandle{ID: "console7-sb-abc"}
+	deliver := strings.Join(credentialDeliverArgv(h), " ")
+	for _, want := range []string{"-n console7-sb-abc", "-c sandbox", "-i", "umask 077; cat > " + credentialPath} {
+		if !strings.Contains(deliver, want) {
+			t.Errorf("deliver argv missing %q: %s", want, deliver)
+		}
+	}
+	// The material is delivered over STDIN — it is NEVER in the argv (there is no material parameter to
+	// the argv builder), so no secret-shaped token can appear in the process table / this adapter's logs.
+	for _, secretish := range []string{"sk-ant", "ANTHROPIC_API_KEY", "BEGIN ", "token"} {
+		if strings.Contains(deliver, secretish) {
+			t.Errorf("deliver argv unexpectedly contains secret-shaped %q: %s", secretish, deliver)
+		}
+	}
+	wipe := strings.Join(credentialWipeArgv(h), " ")
+	if !strings.Contains(wipe, "rm -f "+credentialPath) {
+		t.Errorf("wipe argv must rm -f the credential path: %s", wipe)
+	}
+	if containsArg(credentialWipeArgv(h), "-i") {
+		t.Errorf("wipe must not open STDIN (-i): %s", wipe)
+	}
+}
+
+func containsArg(argv []string, want string) bool {
+	for _, a := range argv {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProvider_CredentialAudit(t *testing.T) {
+	p, _ := newProviderWithDeliverer(t)
+	type ev struct {
+		event, id string
+		ok        bool
+	}
+	var events []ev
+	p.SetCredentialAudit(func(event, id string, ok bool) { events = append(events, ev{event, id, ok}) })
+
+	h := provisionFor(t, p, "alice@example.test", "sess-1")
+	// deny (non-owner) → "deny"; deliver (owner) → "deliver" ok; destroy → "wipe".
+	p.DeliverIfOwned(h, "mallory@example.test", "sess-1", []byte("k"))
+	p.DeliverIfOwned(h, "alice@example.test", "sess-1", []byte("sk-ant-secret"))
+	if err := p.DestroySandbox(context.Background(), h); err != nil {
+		t.Fatalf("DestroySandbox: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, e := range events {
+		seen[e.event] = true
+		if e.id != h.ID {
+			t.Errorf("audit %q carried the wrong handle id %q (want %q)", e.event, e.id, h.ID)
+		}
+	}
+	for _, want := range []string{"deny", "deliver", "wipe"} {
+		if !seen[want] {
+			t.Errorf("missing %q audit event; got %+v", want, events)
+		}
+	}
+	// Redaction-safety is structural: the hook signature carries (event, handleID, ok) — there is no
+	// material parameter, so a credential can never be logged through it.
 }
 
 func TestProvider_DeliverFailClosed(t *testing.T) {

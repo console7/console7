@@ -101,6 +101,21 @@ func (r *kubeRunner) kubectlAnnotate(ctx context.Context, kind, name, kv string)
 	return err
 }
 
+// readyTimeout bounds the pod/proxy-readiness wait before the first engine exec.
+const readyTimeout = 90 * time.Second
+
+// waitReady blocks until target (e.g. "pod/<id>" or "deployment/egress-proxy") in namespace ns meets
+// condition (e.g. "condition=Ready" / "condition=Available"), or timeout elapses. It is the readiness
+// GATE the engine run depends on: a `kubectl exec` against a scheduled-but-not-started pod would make
+// the managed-settings `test -s` misfire ("policy absent") and the engine's inference egress would
+// race a not-yet-listening proxy. Fail-closed: a timeout/error is returned, not ignored.
+func (r *kubeRunner) waitReady(ctx context.Context, target, ns, condition string, timeout time.Duration) error {
+	_, err := r.run(ctx, "kubectl", nil,
+		"wait", "--for="+condition, target, "-n", ns,
+		fmt.Sprintf("--timeout=%ds", int(timeout.Seconds())))
+	return err
+}
+
 // preflightNetworkPolicyEnforced refuses to build the provider against a cluster where a
 // NetworkPolicy would be INERT. On GKE Standard without GKE Dataplane V2 (ADVANCED_DATAPATH) or
 // the legacy network-policy addon, `kubectl apply` of a NetworkPolicy succeeds but enforces
@@ -341,6 +356,17 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	ctx, cancel := context.WithTimeout(ctx, task.Timeout)
 	defer cancel()
 
+	// 0. Pod-readiness GATE before the first exec (B11): wait for the sandbox pod to be Ready and its
+	// per-session egress proxy Deployment to be Available. Without this the managed-settings `test -s`
+	// below misfires on a scheduled-but-not-started pod ("policy absent"), and the engine's inference
+	// egress races a not-yet-listening Squid. Fail closed on a timeout — never run against an unready pod.
+	if err := k.run.waitReady(ctx, "pod/"+h.ID, h.ID, "condition=Ready", readyTimeout); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: sandbox pod not Ready before run: %w", err)
+	}
+	if err := k.run.waitReady(ctx, "deployment/"+proxyServiceName, proxyNS(h.ID), "condition=Available", readyTimeout); err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: per-session egress proxy not Available before run: %w", err)
+	}
+
 	// 1. Fail closed unless the LOCKED managed-settings are already present in the pod. They are
 	// rendered from the resolved profile and mounted READ-ONLY at PROVISION time (the agent never
 	// writes its own policy — DESIGN.md §5.1, tenet 3); this run only VERIFIES them, mirroring the
@@ -522,8 +548,9 @@ const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false p
 // command-substitution): under `set -e` a standalone failed `$(cat …)` aborts the script, whereas a
 // FAILED substitution in a prefix assignment (`VAR="$(cat …)" cmd`) does NOT abort on dash — it would
 // run the engine with an empty key. The explicit `[ -n ]` then closes the TOCTOU window between the
-// `test -s` check and the read (a racing Wipe/refresh/eviction). Both together make fail-closed real,
-// not just asserted (the unit test exercises it under the actual shell).
+// `test -s` check and the read (a racing Wipe/refresh/eviction). Both together make fail-closed real:
+// the unit test asserts the fail-closed STRUCTURE (the read→[-n]-guard→engine order); the runtime
+// shell semantics are exercised only by the integration run.
 //
 // A function (not a const) so the fail-closed behaviour is testable against a temp path without a
 // cluster (the runner is integration-only). The prompt arrives on STDIN, which claude inherits (the
@@ -545,14 +572,24 @@ type kubeCredentialDeliverer struct {
 	run *kubeRunner
 }
 
+// credentialDeliverArgv / credentialWipeArgv are the EXACT kubectl argv for delivering/wiping the
+// credential. They are pure (the material is NEVER among them — it is the exec's STDIN), so a unit
+// test can assert the shape — `-i` (stdin) + `cat > <path>` for deliver, `rm -f <path>` for wipe,
+// container `sandbox` — without a cluster (B11 exit criterion: the deliver/wipe shape test).
+func credentialDeliverArgv(h interfaces.SandboxHandle) []string {
+	return []string{"exec", "-n", h.ID, h.ID, "-c", "sandbox", "-i", "--", "/bin/sh", "-c", "umask 077; cat > " + credentialPath}
+}
+
+func credentialWipeArgv(h interfaces.SandboxHandle) []string {
+	return []string{"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--", "/bin/sh", "-c", "rm -f " + credentialPath}
+}
+
 // Deliver writes material to credentialPath in the sandbox container. `umask 077` makes the file
 // 0600 (owner-only); the engine runs as that same non-root uid and reads its own credential. The
 // material is the exec's STDIN, so it is never an argument. cat truncates+rewrites, so a re-deliver
 // (a refreshed token) replaces the prior bytes.
 func (d *kubeCredentialDeliverer) Deliver(ctx context.Context, h interfaces.SandboxHandle, material []byte) error {
-	_, err := d.run.run(ctx, "kubectl", material,
-		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "-i", "--",
-		"/bin/sh", "-c", "umask 077; cat > "+credentialPath)
+	_, err := d.run.run(ctx, "kubectl", material, credentialDeliverArgv(h)...)
 	return err
 }
 
@@ -560,9 +597,7 @@ func (d *kubeCredentialDeliverer) Deliver(ctx context.Context, h interfaces.Sand
 // volume is medium: Memory), so an exec failure here (e.g. the pod is already gone) is tolerated by
 // the caller; `rm -f` is idempotent.
 func (d *kubeCredentialDeliverer) Wipe(ctx context.Context, h interfaces.SandboxHandle) error {
-	_, err := d.run.run(ctx, "kubectl", nil,
-		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--",
-		"/bin/sh", "-c", "rm -f "+credentialPath)
+	_, err := d.run.run(ctx, "kubectl", nil, credentialWipeArgv(h)...)
 	return err
 }
 

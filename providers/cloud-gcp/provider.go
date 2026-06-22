@@ -47,6 +47,11 @@ type Provider struct {
 	newID     func() (string, error)
 	sandboxes map[string]*sandboxState
 
+	// audit is the redaction-safe credential-lifecycle hook (event "deliver"/"deny"/"wipe", handle
+	// id, outcome — NEVER the material). Defaults to a no-op so the provider cannot accidentally log a
+	// secret; the control plane installs a real one via SetCredentialAudit (B11).
+	audit func(event, handleID string, ok bool)
+
 	// kubeconfigPath is the private kubeconfig New created for the real adapters; Close removes
 	// it. Empty for a Provider built by NewWithPorts (tests/conformance), where Close is a no-op.
 	kubeconfigPath string
@@ -94,7 +99,21 @@ func NewWithPorts(runtime SandboxRuntime, egress EgressController, runner Engine
 		now:       now,
 		newID:     randomID(prefix),
 		sandboxes: make(map[string]*sandboxState),
+		audit:     func(string, string, bool) {}, // no-op until SetCredentialAudit wires the sink.
 	}, nil
+}
+
+// SetCredentialAudit installs the redaction-safe credential-lifecycle audit hook (see the Provider
+// field). A nil hook is ignored (the no-op default is kept). Call at wiring time. The hook is invoked
+// while p.mu is held (the atomic check-and-deliver), so it MUST be non-blocking and panic-free —
+// hand off to an async sink rather than doing slow I/O inline (RISKS R-7, the head-of-line tradeoff).
+func (p *Provider) SetCredentialAudit(f func(event, handleID string, ok bool)) {
+	if f == nil {
+		return
+	}
+	p.mu.Lock()
+	p.audit = f
+	p.mu.Unlock()
 }
 
 // SetCredentialDeliverer wires the port that DeliverIfOwned uses to write credential material into a
@@ -281,8 +300,9 @@ func (p *Provider) DestroySandbox(ctx context.Context, h interfaces.SandboxHandl
 	// is defence in depth that shreds the secret a moment sooner. (Held under p.mu like the rest of
 	// Destroy — the same atomicity-over-throughput tradeoff DeliverIfOwned documents; RISKS R-7.)
 	wipeCtx, wipeCancel := context.WithTimeout(ctx, deliverTimeout)
-	_ = p.deliverer.Wipe(wipeCtx, h)
+	werr := p.deliverer.Wipe(wipeCtx, h)
 	wipeCancel()
+	p.audit("wipe", h.ID, werr == nil)
 	// Tear the workload down FIRST (stop the thing that could act), then clear its perimeter. A
 	// runtime-destroy failure is fatal and is NOT marked dead — the sandbox may still be live, so
 	// the caller (and a retry) must see it as live, exactly as the orchestrator's abort path
@@ -377,11 +397,14 @@ func (p *Provider) DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.owns(h, subject, session) {
+		p.audit("deny", h.ID, false)
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
 	defer cancel()
-	return p.deliverer.Deliver(ctx, h, material) == nil
+	ok := p.deliverer.Deliver(ctx, h, material) == nil
+	p.audit("deliver", h.ID, ok)
+	return ok
 }
 
 // lookup returns the state for h, marking it dead first if it has aged past its MaxTTL so a
