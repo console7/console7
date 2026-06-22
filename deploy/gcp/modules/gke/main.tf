@@ -252,6 +252,12 @@ resource "google_service_account_iam_member" "control_plane_wi" {
   service_account_id = "projects/${var.project_id}/serviceAccounts/${var.secrets_workload_service_account_email}"
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.control_plane_ksa}]"
+
+  # The member references the cluster's Workload-Identity pool (<project>.svc.id.goog) as a STRING,
+  # so Terraform cannot infer the dependency. Without this, on a first apply the binding races ahead
+  # of the (slow) cluster create and fails with "Identity Pool does not exist". The pool is created
+  # WITH the cluster (workload_identity_config above), so order this binding after it explicitly.
+  depends_on = [google_container_cluster.sandbox]
 }
 
 # --- Cloud Router + NAT: the sanctioned egress path (deferred from modules/networking, PR-1) ---
