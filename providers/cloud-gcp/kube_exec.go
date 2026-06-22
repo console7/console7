@@ -548,8 +548,9 @@ const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false p
 // command-substitution): under `set -e` a standalone failed `$(cat …)` aborts the script, whereas a
 // FAILED substitution in a prefix assignment (`VAR="$(cat …)" cmd`) does NOT abort on dash — it would
 // run the engine with an empty key. The explicit `[ -n ]` then closes the TOCTOU window between the
-// `test -s` check and the read (a racing Wipe/refresh/eviction). Both together make fail-closed real,
-// not just asserted (the unit test exercises it under the actual shell).
+// `test -s` check and the read (a racing Wipe/refresh/eviction). Both together make fail-closed real:
+// the unit test asserts the fail-closed STRUCTURE (the read→[-n]-guard→engine order); the runtime
+// shell semantics are exercised only by the integration run.
 //
 // A function (not a const) so the fail-closed behaviour is testable against a temp path without a
 // cluster (the runner is integration-only). The prompt arrives on STDIN, which claude inherits (the

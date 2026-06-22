@@ -104,7 +104,9 @@ func NewWithPorts(runtime SandboxRuntime, egress EgressController, runner Engine
 }
 
 // SetCredentialAudit installs the redaction-safe credential-lifecycle audit hook (see the Provider
-// field). A nil hook is ignored (the no-op default is kept). Call at wiring time.
+// field). A nil hook is ignored (the no-op default is kept). Call at wiring time. The hook is invoked
+// while p.mu is held (the atomic check-and-deliver), so it MUST be non-blocking and panic-free —
+// hand off to an async sink rather than doing slow I/O inline (RISKS R-7, the head-of-line tradeoff).
 func (p *Provider) SetCredentialAudit(f func(event, handleID string, ok bool)) {
 	if f == nil {
 		return

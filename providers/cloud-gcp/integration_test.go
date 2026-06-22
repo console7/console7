@@ -17,9 +17,30 @@
 //
 // TestIntegration_ProvisionNarrowDestroy proves the lifecycle/egress-narrow spine.
 // TestIntegration_LiveEngineRun (B11) adds the Phase-1 EXIT proof — credential deliver/wipe, the
-// boundary egress/metadata denials, and the genuine `claude -p` run → real signed-able commit. The
+// boundary egress/metadata denials, and the genuine `claude -p` run → real proposed commit. The
 // engine run is gated behind C7_RUN_ENGINE + C7_ANTHROPIC_API_KEY (a short-lived org key) so the
 // cheaper lifecycle test can run without spending model tokens.
+//
+// SCOPE — read before declaring Phase-1 EXIT. This test drives the cloud-gcp Provider DIRECTLY, so it
+// proves the DATA-PLANE half live (genuine engine in a real gVisor sandbox + default-deny boundary +
+// metadata-IP deny + a real commit). It does NOT sign the commit, stamp lineage, or seal the WORM
+// chain — those are the orchestrator's job (control-plane/orchestrator + the c7 dev run, proven on the
+// in-memory spine). No single execution yet proves ALL exit criteria together; a control-plane main
+// that drives the orchestrator against the REAL live seams (closing signing+WORM on the live engine)
+// is a tracked residual (B13). Run this for the data-plane proof; do not check the signing/WORM/
+// "maintainer-uninvolved" boxes from this test alone.
+//
+// OPERATOR PRE-FLIGHT (do these BEFORE `terraform apply` — the cluster bills continuously):
+//  1. CONFIRM the model id: `curl -s https://api.anthropic.com/v1/models -H "x-api-key: $KEY"
+//     -H "anthropic-version: 2023-06-01"` → export C7_ANTHROPIC_MODEL=<a returned id>. Don't trust
+//     the default blindly.
+//  2. C7_SANDBOX_IMAGE MUST be the DIGEST-PINNED signed image — verify with
+//     scripts/verify-sandbox-image.sh first (New() rejects a tag-only ref).
+//  3. Apply the namespace-TTL reaper (`kubectl apply -f deploy/gcp/modules/gke/reaper.yaml`) so an
+//     aborted run is swept.
+//  4. Keep the PoC prompt strictly Write-only (the default is) — headless `--permission-mode default`
+//     stalls on a non-allow-listed tool.
+//  5. Have `terraform -chdir=deploy/gcp destroy` ready and run it SAME DAY.
 package cloudgcp
 
 import (
@@ -118,8 +139,11 @@ func TestIntegration_LiveEngineRun(t *testing.T) {
 	ctx := context.Background()
 	p, err := New(ctx, Config{
 		ProjectID: project, Location: location, Cluster: cluster, SandboxImage: image,
-		// The pinned engine's default model 404s on the API, so a real run needs a known-good id.
-		AnthropicModel: orEnv("C7_ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+		// The pinned engine's DEFAULT model 404s on the API, so a real run needs a known-good id.
+		// PRE-FLIGHT: confirm the id against `GET /v1/models` with THIS key before the billed run and
+		// override with C7_ANTHROPIC_MODEL — do not trust this default blindly. Default is a cheap,
+		// previously-live-proven snapshot (a HELLO.txt PoC needs nothing larger).
+		AnthropicModel: orEnv("C7_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -131,7 +155,9 @@ func TestIntegration_LiveEngineRun(t *testing.T) {
 	h, err := p.ProvisionSandbox(ctx, interfaces.SandboxSpec{
 		SessionID: session, Subject: subject, Persona: interfaces.PersonaAuthor,
 		Egress: interfaces.EgressPolicy{Allowlist: []string{"https://api.anthropic.com"}},
-		MaxTTL: 10 * time.Minute,
+		// Generous headroom: readiness waits (≤90s×2) + delivery + probes + the ≤8-min engine run must
+		// finish well before the namespace-TTL reaper / activeDeadlineSeconds reclaims the sandbox.
+		MaxTTL: 20 * time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("ProvisionSandbox: %v", err)
@@ -157,15 +183,29 @@ func TestIntegration_LiveEngineRun(t *testing.T) {
 	}
 
 	// (d) the boundary denies a non-allowlisted host AND the GCP metadata IP from inside the sandbox.
-	// A raw TCP connect (node is the image's guaranteed runtime) must FAIL — the per-session
-	// NetworkPolicy permits egress only to the proxy, and the proxy admits only api.anthropic.com.
-	for _, dst := range []struct{ host, port string }{
-		{"169.254.169.254", "80"}, // GCP metadata server (also concealed by GKE_METADATA)
-		{"metadata.google.internal", "80"},
-		{"1.1.1.1", "443"}, // a non-allowlisted public host
+	// POSITIVE CONTROL FIRST (so the denials below aren't vacuous): the sandbox MUST be able to reach
+	// its own per-session proxy. If a blanket node/exec/RBAC failure made that fail too, every "deny"
+	// would pass for the wrong reason — so a dead positive control fails the test hard.
+	endpoint, err := runner.proxyEndpoint(ctx, proxyNS(h.ID)) // "http://<clusterIP>:3128"
+	if err != nil {
+		t.Fatalf("resolve proxy endpoint for the egress positive control: %v", err)
+	}
+	proxyIP := strings.TrimSuffix(strings.TrimPrefix(endpoint, "http://"), fmt.Sprintf(":%d", proxyPort))
+	if !sandboxCanConnect(ctx, runner, h, proxyIP, fmt.Sprintf("%d", proxyPort)) {
+		t.Fatal("egress positive control FAILED: the sandbox cannot reach its own proxy — node/exec is broken, so the deny results below would be meaningless")
+	}
+	// Now the deny probes. A raw TCP connect (node is the image's guaranteed runtime) must FAIL: the
+	// per-session NetworkPolicy permits egress ONLY to the proxy, so every other IP is dropped. The
+	// 169.254.169.254 IP probe is the AUTHORITATIVE metadata-deny proof; the metadata.google.internal
+	// name probe additionally confirms there is NO in-sandbox resolver (it fails at resolution, the
+	// no-DNS property — not the IP block).
+	for _, dst := range []struct{ host, port, why string }{
+		{"169.254.169.254", "80", "GCP metadata IP (NetworkPolicy deny + GKE_METADATA concealment)"},
+		{"metadata.google.internal", "80", "metadata DNS name (no in-sandbox resolver)"},
+		{"1.1.1.1", "443", "a non-allowlisted public host"},
 	} {
-		if denied := tcpConnectDenied(ctx, runner, h, dst.host, dst.port); !denied {
-			t.Errorf("egress to %s:%s SUCCEEDED from the sandbox — the boundary failed to deny it", dst.host, dst.port)
+		if sandboxCanConnect(ctx, runner, h, dst.host, dst.port) {
+			t.Errorf("egress to %s:%s (%s) SUCCEEDED from the sandbox — the boundary failed to deny it", dst.host, dst.port, dst.why)
 		}
 	}
 
@@ -187,17 +227,19 @@ func TestIntegration_LiveEngineRun(t *testing.T) {
 	t.Logf("PoC OK: proposed commit %s (%d files) under default-deny egress", res.HeadSHA, len(res.FilesChanged))
 }
 
-// tcpConnectDenied execs a raw TCP connect to host:port inside the sandbox (via node, the image's
-// guaranteed runtime) and reports whether it was DENIED — i.e. the in-pod process exited non-zero
-// (connection refused/timed out/blocked). host/port are test constants, %q-quoted into the script.
-func tcpConnectDenied(ctx context.Context, runner *kubeRunner, h interfaces.SandboxHandle, host, port string) bool {
+// sandboxCanConnect execs a raw TCP connect to host:port inside the sandbox (via node, the image's
+// guaranteed runtime) and reports whether it CONNECTED — the in-pod process exited 0. A non-zero exit
+// (connection refused/timed out/blocked, or a DNS-resolution failure) reports false. Used both as the
+// positive control (the proxy must connect) and the deny probes (everything else must not). host/port
+// are test constants, %q/%s-interpolated into the script.
+func sandboxCanConnect(ctx context.Context, runner *kubeRunner, h interfaces.SandboxHandle, host, port string) bool {
 	script := fmt.Sprintf(`const net=require('net');`+
 		`const s=net.connect({host:%q,port:%s},()=>process.exit(0));`+
 		`s.setTimeout(4000,()=>{s.destroy();process.exit(3)});`+
 		`s.on('error',()=>process.exit(2));`, host, port)
 	_, err := runner.run(ctx, "kubectl", nil,
 		"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--", "node", "-e", script)
-	return err != nil // non-zero exit ⇒ the connect was denied (the boundary held)
+	return err == nil // exit 0 ⇒ connected
 }
 
 func orEnv(key, fallback string) string {
