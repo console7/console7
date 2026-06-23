@@ -13,7 +13,7 @@ package orchestrator
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -690,7 +690,7 @@ func payloadTBS(subject interfaces.Subject, session interfaces.SessionID, person
 // genuine signature from another record/session was replayed — fails. It lets an auditor
 // prove every recorded event traces to the stamped human → NHI, not merely that the chain is
 // unbroken.
-func VerifyRecordPayload(caRoot ed25519.PublicKey, rec interfaces.EvidenceRecord) error {
+func VerifyRecordPayload(caRoot crypto.PublicKey, rec interfaces.EvidenceRecord) error {
 	var sp stampedPayload
 	if err := json.Unmarshal(rec.Payload, &sp); err != nil {
 		return fmt.Errorf("orchestrator: undecodable evidence payload: %w", err)

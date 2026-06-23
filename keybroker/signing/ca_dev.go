@@ -39,6 +39,9 @@ func (c Cert) clone() Cert {
 	return c
 }
 
+// Compile-time assertion that DevCA satisfies the CA root-signing seam.
+var _ CA = (*DevCA)(nil)
+
 // NewDevCA generates a fresh CA root key. It panics on CSPRNG failure rather than
 // returning a CA with a predictable key.
 func NewDevCA() *DevCA {
@@ -49,14 +52,15 @@ func NewDevCA() *DevCA {
 	return &DevCA{rootPriv: priv, rootPub: pub}
 }
 
-// Issue signs a certificate binding nhi + session + subject + pub. The CA does not retain
-// the certificate; the holder (a SessionSigner) carries it and presents it at verify time.
-func (c *DevCA) Issue(nhi string, session interfaces.SessionID, subject interfaces.Subject, pub ed25519.PublicKey) Cert {
-	sig := ed25519.Sign(c.rootPriv, certTBS(nhi, session, subject, pub))
-	return Cert{NHI: nhi, Session: session, Subject: subject, Pub: pub, CASig: sig}
+// Sign signs a domain-tagged certificate TBS with the in-process ed25519 root key (the CA seam).
+// It never errors (the in-process key cannot fail); a KMS-backed CA returns an error here instead.
+func (c *DevCA) Sign(tbs []byte) ([]byte, error) {
+	return ed25519.Sign(c.rootPriv, tbs), nil
 }
 
-// Root returns the CA's public key — the trust anchor a verifier pins.
+// Root returns the CA's public key — the trust anchor a verifier pins. It is an ed25519.PublicKey,
+// which is assignable to the crypto.PublicKey anchor the verifiers (Verify / VerifySinkSignature)
+// take, so callers can pass it directly.
 func (c *DevCA) Root() ed25519.PublicKey {
 	return c.rootPub
 }

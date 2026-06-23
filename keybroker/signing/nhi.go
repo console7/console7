@@ -13,11 +13,12 @@ import (
 // human acts through for the life of the session; it is the anchor the orchestrator
 // stamps onto every action (DESIGN.md §2.3).
 type NHIBinder struct {
-	ca *DevCA
+	ca CA
 }
 
-// NewNHIBinder returns a binder that certifies identities under ca.
-func NewNHIBinder(ca *DevCA) *NHIBinder {
+// NewNHIBinder returns a binder that certifies identities under ca (any CA root — the in-process
+// DevCA or a KMS-backed root).
+func NewNHIBinder(ca CA) *NHIBinder {
 	return &NHIBinder{ca: ca}
 }
 
@@ -61,7 +62,11 @@ func (b *NHIBinder) Bind(subject interfaces.Subject, session interfaces.SessionI
 	// authoritative binding regardless; the name is a self-describing evidence label, not
 	// an identity key.
 	nhi := nhiPrefix(session) + string(persona)
-	cert := b.ca.Issue(nhi, session, subject, pub)
+	casig, err := b.ca.Sign(certTBS(nhi, session, subject, pub))
+	if err != nil {
+		return nil, fmt.Errorf("signing: CA failed to issue the NHI certificate: %w", err)
+	}
+	cert := Cert{NHI: nhi, Session: session, Subject: subject, Pub: pub, CASig: casig}
 	return &SessionSigner{
 		Subject:   subject,
 		SessionID: session,

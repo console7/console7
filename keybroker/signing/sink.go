@@ -2,8 +2,10 @@ package signing
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 )
 
 // SinkCert binds a sink IDENTITY (a long-lived service name, e.g. an evidence WORM sink)
@@ -29,14 +31,6 @@ type SinkSignature struct {
 	Cert   SinkCert
 }
 
-// IssueSink signs a certificate binding a sink identity to its public key. The CA does not
-// retain the certificate; the holder (a SinkSigner) carries it and presents it at verify
-// time, exactly as for a lineage Cert.
-func (c *DevCA) IssueSink(sinkID string, pub ed25519.PublicKey) SinkCert {
-	sig := ed25519.Sign(c.rootPriv, sinkCertTBS(sinkID, pub))
-	return SinkCert{SinkID: sinkID, Pub: pub, CASig: sig}
-}
-
 // SinkSigner holds a sink's long-lived checkpoint-signing key (unexported, never returned)
 // and its CA certificate. Unlike a SessionSigner it is NOT session-deadline-bound: the
 // keybroker custodies it across sessions so a sink can seal a checkpoint at any time —
@@ -53,7 +47,7 @@ type SinkSigner struct {
 // NewSinkSigner mints a fresh checkpoint key for sinkID and has the CA certify it. It errors
 // (rather than returning a signer with a predictable or empty identity) on a missing id or a
 // CSPRNG failure.
-func NewSinkSigner(ca *DevCA, sinkID string) (*SinkSigner, error) {
+func NewSinkSigner(ca CA, sinkID string) (*SinkSigner, error) {
 	if sinkID == "" {
 		return nil, errors.New("signing: cannot mint a sink signer without a sink id")
 	}
@@ -61,7 +55,11 @@ func NewSinkSigner(ca *DevCA, sinkID string) (*SinkSigner, error) {
 	if err != nil {
 		return nil, errors.New("signing: sink signer key generation failed")
 	}
-	return &SinkSigner{sinkID: sinkID, priv: priv, cert: ca.IssueSink(sinkID, pub)}, nil
+	casig, err := ca.Sign(sinkCertTBS(sinkID, pub))
+	if err != nil {
+		return nil, fmt.Errorf("signing: CA failed to issue the sink certificate: %w", err)
+	}
+	return &SinkSigner{sinkID: sinkID, priv: priv, cert: SinkCert{SinkID: sinkID, Pub: pub, CASig: casig}}, nil
 }
 
 // SinkID returns the sink identity this signer seals for. The evidence sink binds it into the
@@ -99,10 +97,9 @@ func (c SinkCert) clone() SinkCert {
 // signed tbs, and (3) the signature's SinkID agrees with the certificate. Key lengths are
 // guarded first — ed25519.Verify PANICS on a wrong-length key, so a malformed (e.g.
 // externally-decoded) checkpoint must be rejected, not allowed to crash the verifier.
-func VerifySinkSignature(caRoot ed25519.PublicKey, tbs []byte, sig SinkSignature) error {
-	if len(caRoot) != ed25519.PublicKeySize {
-		return errors.New("signing: CA root key has the wrong length")
-	}
+func VerifySinkSignature(caRoot crypto.PublicKey, tbs []byte, sig SinkSignature) error {
+	// Guard the LEAF key size before ed25519.Verify (it panics on a wrong-length key); the ROOT key
+	// is guarded inside verifyRoot, which dispatches on the anchor's type.
 	if len(sig.Cert.Pub) != ed25519.PublicKeySize {
 		return errors.New("signing: sink certificate public key has the wrong length")
 	}
@@ -111,7 +108,7 @@ func VerifySinkSignature(caRoot ed25519.PublicKey, tbs []byte, sig SinkSignature
 		return errors.New("signing: sink signature id does not match its certificate")
 	}
 	// (1) the CA root must have certified this SinkID->key binding.
-	if !ed25519.Verify(caRoot, sinkCertTBS(sig.Cert.SinkID, sig.Cert.Pub), sig.Cert.CASig) {
+	if !verifyRoot(caRoot, sinkCertTBS(sig.Cert.SinkID, sig.Cert.Pub), sig.Cert.CASig) {
 		return errors.New("signing: sink certificate does not chain to the trusted CA root")
 	}
 	// (2) the certified sink key must have signed the checkpoint bytes.
