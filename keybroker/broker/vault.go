@@ -49,6 +49,18 @@ func (b *Broker) InjectOrgCredential(ctx context.Context, in interfaces.OrgCrede
 	return b.Secrets.InjectOrgCredential(ctx, in)
 }
 
+// InjectInferenceCredential asks the SecretsProvider to MINT a short-lived cloud inference
+// credential (a GCP bearer for the in-tenancy Vertex lane) and inject it into the session's own
+// sandbox. The seam mints + delivers inside the provider (the broker and control plane never see the
+// token), verifies the owning sandbox, and caps the token to the session deadline; the broker only
+// forwards the facts.
+func (b *Broker) InjectInferenceCredential(ctx context.Context, in interfaces.InferenceCredentialInjection) error {
+	if b.Secrets == nil {
+		return errors.New("broker: missing secrets seam")
+	}
+	return b.Secrets.InjectInferenceCredential(ctx, in)
+}
+
 // ResolveInference asks the InferenceBackend to route a session to its model endpoint,
 // enforcing the attended/unattended seam. The discriminator is the (Attended,
 // Beneficiaries) facts in sel, not how the session was invoked. A nil seam is reported as

@@ -55,8 +55,14 @@
 //
 //   - REAL: org-API endpoint resolution (regional / global / a Private-Service-Connect or
 //     VPC-SC base-URL override) and the fail-closed seam, including the subscription refusal.
-//   - DEFERRED: GCP credential acquisition (ADC / workload-SA token mint, a SecretsProvider
-//     and key-broker concern); the engine-invocation env emitted to the sandbox
-//     (ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION for the wrapped Claude Code engine); and
-//     all live inference traffic — gated behind the not-yet-built sandbox/egress boundary.
+//     Resolve also surfaces the lane discriminator (BackendKind=BackendVertex) and the routing
+//     FACTS (VertexProjectID / VertexRegion) the wrapped engine needs (PR-C1).
+//   - NOW WIRED (the previously-deferred path, end to end except live traffic): the workload-SA
+//     token mint (secrets-gcp InjectInferenceCredential via IAM Credentials, PR-C3a/b); the
+//     engine-invocation env emitted to the sandbox (CLAUDE_CODE_USE_VERTEX +
+//     ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION + the @-form model + the GCP bearer, PR-C2);
+//     and the orchestrator routing the Vertex lane to the mint-and-inject path (PR-C4).
+//   - DEFERRED: only live inference traffic itself — the operator-run Phase-1 EXIT window
+//     (apply → run a session through the orchestrator on Vertex → prove signed commit + WORM →
+//     destroy), preflighted with scripts/verify-vertex-model.sh.
 package inferencevertex

@@ -42,6 +42,15 @@ func newBench(t *testing.T) bench {
 
 func newBenchWithAllowlist(t *testing.T, allowlist []string) bench {
 	t.Helper()
+	return newBenchWithInference(t, allowlist, devkit.NewPolicyInference(devkit.SeamPolicy{
+		SubscriptionEndpoint: subscriptionURL,
+		OrgAPIEndpoint:       orgAPIURL,
+		SubscriptionEnabled:  true,
+	}))
+}
+
+func newBenchWithInference(t *testing.T, allowlist []string, inference interfaces.InferenceBackend) bench {
+	t.Helper()
 	reg := devkit.NewSandboxRegistry()
 	cloud := devkit.NewMemCloud(reg)
 	secrets := devkit.NewMemSecrets(reg)
@@ -59,11 +68,6 @@ func newBenchWithAllowlist(t *testing.T, allowlist []string) bench {
 		t.Fatalf("idp keygen: %v", err)
 	}
 	identity := devkit.NewDevIdentity(idpPub, nil)
-	inference := devkit.NewPolicyInference(devkit.SeamPolicy{
-		SubscriptionEndpoint: subscriptionURL,
-		OrgAPIEndpoint:       orgAPIURL,
-		SubscriptionEnabled:  true,
-	})
 	b := broker.New(identity, secrets, scm, inference, binder)
 
 	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
@@ -247,6 +251,91 @@ func TestRun_UnattendedRoutesOrgAPI(t *testing.T) {
 	}
 	if !sawOrg {
 		t.Error("unattended (org-API) session did not inject the org credential")
+	}
+}
+
+// vertexStubInference is an InferenceBackend that resolves the org-API mode to the in-tenancy Vertex
+// LANE (BackendVertex + project/region facts), so the orchestrator test can drive the Vertex path
+// without importing providers/inference-vertex into the control plane. It is intentionally permissive
+// (it does not enforce the attended/beneficiary seam the real provider does — that is covered by the
+// provider's own conformance/white-box tests); here it exists only to emit a Vertex-lane endpoint.
+type vertexStubInference struct {
+	url, project, region string
+}
+
+func (v vertexStubInference) Resolve(_ context.Context, sel interfaces.InferenceSelection) (interfaces.BackendEndpoint, error) {
+	if sel.Mode != interfaces.ModeOrgAPI {
+		return interfaces.BackendEndpoint{}, errors.New("vertex stub: only org-API")
+	}
+	return interfaces.BackendEndpoint{
+		Mode: interfaces.ModeOrgAPI, URL: v.url, Kind: interfaces.BackendVertex,
+		VertexProjectID: v.project, VertexRegion: v.region,
+	}, nil
+}
+
+// TestRun_VertexLaneInjectsMintedTokenAndThreadsEnv proves the Vertex lane end to end on the bench:
+// resolution carries the BackendVertex lane + facts, the orchestrator takes the inference-credential
+// (mint) inject branch (not org/subscription), and it threads the Vertex env facts into the EngineTask.
+func TestRun_VertexLaneInjectsMintedTokenAndThreadsEnv(t *testing.T) {
+	const vertexURL = "https://us-east5-aiplatform.googleapis.com"
+	b := newBenchWithInference(t, []string{vertexURL}, vertexStubInference{url: vertexURL, project: "proj-x", region: "us-east5"})
+	sum, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn:     b.authn(t, "carol"),
+		SessionID: "sess-vtx",
+		Persona:   interfaces.PersonaAuthor,
+		Repo:      b.repo,
+		Branch:    "feature/vtx",
+		Attended:  false,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Resolution threaded the Vertex lane + facts into the Summary.
+	if sum.Inference.Kind != interfaces.BackendVertex || sum.Inference.VertexProjectID != "proj-x" || sum.Inference.VertexRegion != "us-east5" {
+		t.Errorf("inference = %+v, want BackendVertex proj-x/us-east5", sum.Inference)
+	}
+	// The Vertex lane took the inference-credential (mint) inject branch — NOT org/subscription.
+	var sawInference, sawOrg, sawSub bool
+	for i := 0; i < b.evidence.Len(); i++ {
+		rec, _, _ := b.evidence.At(i)
+		switch rec.Type {
+		case "inference-credential-injected":
+			sawInference = true
+		case "org-credential-injected":
+			sawOrg = true
+		case "subscription-injected":
+			sawSub = true
+		}
+	}
+	if !sawInference {
+		t.Error("Vertex session did not inject a minted inference credential")
+	}
+	if sawOrg || sawSub {
+		t.Errorf("Vertex session wrongly used org/subscription inject (org=%v sub=%v)", sawOrg, sawSub)
+	}
+	// The orchestrator threaded the Vertex env facts into the engine invocation.
+	task := b.cloud.LastTask()
+	if task.InferenceBackend != interfaces.BackendVertex || task.VertexProjectID != "proj-x" || task.VertexRegion != "us-east5" {
+		t.Errorf("EngineTask Vertex env = {kind:%v proj:%q region:%q}, want BackendVertex/proj-x/us-east5", task.InferenceBackend, task.VertexProjectID, task.VertexRegion)
+	}
+}
+
+// TestRun_VertexLaneMissingRegionFailsClosed: a BackendVertex endpoint without the region facts is
+// rejected at the orchestrator (the authoritative point) rather than shipping an empty CLOUD_ML_REGION
+// the engine rejects in-sandbox.
+func TestRun_VertexLaneMissingRegionFailsClosed(t *testing.T) {
+	const vertexURL = "https://us-east5-aiplatform.googleapis.com"
+	b := newBenchWithInference(t, []string{vertexURL}, vertexStubInference{url: vertexURL, project: "proj-x", region: ""})
+	_, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: b.authn(t, "dave"), SessionID: "sess-vtx-bad", Persona: interfaces.PersonaAuthor,
+		Repo: b.repo, Branch: "feature/vtx", Attended: false,
+	})
+	if err == nil {
+		t.Fatal("expected a fail-closed error for a Vertex endpoint missing its region")
+	}
+	// Assert it failed for the RIGHT reason (the region gate), not some unrelated abort.
+	if !strings.Contains(err.Error(), "region") {
+		t.Errorf("expected the error to name the missing region, got: %v", err)
 	}
 }
 

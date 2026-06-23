@@ -208,6 +208,11 @@ func TestMemCloud_RunTask_DeterministicAndFailsClosed(t *testing.T) {
 	if !res1.Changed || len(res1.CommitDigest) == 0 || res1.HeadSHA == "" {
 		t.Fatalf("expected a changed result with a digest and head, got %+v", res1)
 	}
+	// LastTask captures the RunTask input (the test-only hook the orchestrator test uses to assert
+	// the inference lane/env it threaded).
+	if got := cloud.LastTask(); got.SessionID != task.SessionID || got.Branch != task.Branch {
+		t.Errorf("LastTask did not capture the run input: got %+v", got)
+	}
 	// Deterministic over the same coordinates (offline, reproducible — the bench stand-in role).
 	res2, err := cloud.RunTask(ctx, h, task)
 	if err != nil {

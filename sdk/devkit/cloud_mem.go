@@ -38,6 +38,7 @@ type MemCloud struct {
 	mu        sync.Mutex
 	reg       *SandboxRegistry
 	sandboxes map[string]*memSandbox
+	lastTask  interfaces.EngineTask // the most recent RunTask input, for test assertions.
 }
 
 // memSandbox is the lifecycle state MemCloud tracks for one provisioned sandbox; the
@@ -171,6 +172,7 @@ func (c *MemCloud) RunTask(ctx context.Context, h interfaces.SandboxHandle, task
 	if !ok || !sb.live {
 		return interfaces.EngineResult{}, errors.New("devkit: MemCloud cannot run a task in an unknown, destroyed, or expired sandbox")
 	}
+	c.lastTask = task // record the input so a test can assert the orchestrator threaded the right lane/env.
 	digest := benchCommitDigest(task)
 	return interfaces.EngineResult{
 		CommitDigest: digest,
@@ -178,6 +180,14 @@ func (c *MemCloud) RunTask(ctx context.Context, h interfaces.SandboxHandle, task
 		FilesChanged: []string{"(devkit MemCloud stand-in: no genuine engine run, deterministic digest over task coordinates)"},
 		Changed:      true,
 	}, nil
+}
+
+// LastTask returns the most recent EngineTask passed to RunTask, a test-only inspection hook so a
+// test can assert the orchestrator threaded the right inference lane/env into the engine invocation.
+func (c *MemCloud) LastTask() interfaces.EngineTask {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastTask
 }
 
 // benchCommitDigest derives the deterministic digest MemCloud.RunTask "produces". It is the
