@@ -2,7 +2,10 @@ package signing
 
 import (
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/sha256"
 	"errors"
 
 	"github.com/console7/console7/sdk/interfaces"
@@ -101,9 +104,19 @@ func verifyRoot(caRoot crypto.PublicKey, msg, sig []byte) bool {
 	switch k := caRoot.(type) {
 	case ed25519.PublicKey:
 		return len(k) == ed25519.PublicKeySize && ed25519.Verify(k, msg, sig)
+	case *ecdsa.PublicKey:
+		// The KMS-backed root: a Cloud KMS EC_SIGN_P256_SHA256 key signs the SHA-256 DIGEST of the
+		// TBS and returns an ASN.1/DER ECDSA signature. PIN exactly that algorithm (curve P-256) and
+		// guard EVERY field VerifyASN1 dereferences (Curve/X/Y) so a wrong-curve or partially-decoded
+		// anchor (e.g. from a malformed KMS public-key PEM) fails CLOSED rather than panicking — and
+		// so the arm enforces exactly the algorithm it names, not any NIST curve.
+		if k == nil || k.Curve != elliptic.P256() || k.X == nil || k.Y == nil {
+			return false
+		}
+		h := sha256.Sum256(msg)
+		return ecdsa.VerifyASN1(k, h[:], sig)
 	default:
-		// An unrecognised anchor type (incl. the KMS EC-P256 root, until its verify arm lands with
-		// the adapter) fails closed rather than silently accepting an unverifiable chain.
+		// An unrecognised anchor type fails closed rather than silently accepting an unverifiable chain.
 		return false
 	}
 }

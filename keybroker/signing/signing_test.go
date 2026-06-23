@@ -2,12 +2,80 @@ package signing
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"testing"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
+
+// ecdsaCA is an in-process EC-P256 CA root (the same shape the KMS-backed root will take: sign the
+// SHA-256 digest of the TBS, return an ASN.1 DER ECDSA signature). It lets the EC-P256 dispatch in
+// verifyRoot be proven end-to-end — Bind/NewSinkSigner through the real binder, then Verify under
+// the *ecdsa.PublicKey anchor — with no GCP/KMS dependency.
+type ecdsaCA struct{ priv *ecdsa.PrivateKey }
+
+func (c ecdsaCA) Sign(tbs []byte) ([]byte, error) {
+	h := sha256.Sum256(tbs)
+	return ecdsa.SignASN1(rand.Reader, c.priv, h[:])
+}
+
+// TestVerify_ECDSAP256Root proves the pluggable-root design works for a NON-ed25519 (EC-P256) root:
+// a lineage Cert and a sink cert issued under an EC root verify under the EC public-key anchor, fail
+// under a different EC key, and a typed-nil EC anchor fails closed (no panic).
+func TestVerify_ECDSAP256Root(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa keygen: %v", err)
+	}
+	ca := ecdsaCA{priv: priv}
+	payload := []byte("payload")
+
+	signer, err := NewNHIBinder(ca).Bind("alice", "s1", interfaces.PersonaAuthor)
+	if err != nil {
+		t.Fatalf("Bind under EC root: %v", err)
+	}
+	sig := signer.Sign(payload)
+	if err := Verify(&priv.PublicKey, payload, sig); err != nil {
+		t.Errorf("lineage should verify under the EC-P256 anchor: %v", err)
+	}
+	// A DIFFERENT EC root must reject the chain.
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err := Verify(&other.PublicKey, payload, sig); err == nil {
+		t.Error("lineage verified under the WRONG EC-P256 root")
+	}
+	// A typed-nil EC anchor fails closed (verifyRoot guards the nil curve — no panic).
+	if err := Verify((*ecdsa.PublicKey)(nil), payload, sig); err == nil {
+		t.Error("a nil EC anchor should fail closed")
+	}
+	// A partially-decoded anchor (curve set, X/Y nil — e.g. from a malformed KMS PEM) must fail
+	// CLOSED, not PANIC inside ecdsa.VerifyASN1.
+	if err := Verify(&ecdsa.PublicKey{Curve: elliptic.P256()}, payload, sig); err == nil {
+		t.Error("a partial (X/Y-nil) EC anchor should fail closed")
+	}
+	// A non-P256 curve is rejected (the arm pins EC-P256, the only EC root we issue).
+	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err := Verify(&p384.PublicKey, payload, sig); err == nil {
+		t.Error("a non-P256 EC anchor should be rejected")
+	}
+
+	// The sink path verifies under the EC root too.
+	ss, err := NewSinkSigner(ca, "evidence-sink")
+	if err != nil {
+		t.Fatalf("NewSinkSigner under EC root: %v", err)
+	}
+	csig, err := ss.SignCheckpoint(context.Background(), []byte("ckpt"))
+	if err != nil {
+		t.Fatalf("SignCheckpoint: %v", err)
+	}
+	if err := VerifySinkSignature(&priv.PublicKey, []byte("ckpt"), csig); err != nil {
+		t.Errorf("sink signature should verify under the EC-P256 anchor: %v", err)
+	}
+}
 
 // failCA is a CA whose root Sign always errors, to exercise the binder/sink-signer fail-closed paths
 // (a real KMS-backed root can fail where the in-process DevCA cannot).
