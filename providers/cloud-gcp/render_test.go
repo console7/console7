@@ -39,10 +39,19 @@ func TestConfigNormalize(t *testing.T) {
 		{"tag-only image (not digest-pinned)", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: "ghcr.io/console7/sandbox-base:v1"}},
 		{"image with short/invalid digest", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: "ghcr.io/console7/sandbox-base@sha256:abc"}},
 		{"malformed double-digest image", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: "ghcr.io/console7/sandbox-base@sha256:" + strings.Repeat("a", 64) + "@sha256:" + strings.Repeat("b", 64)}},
+		{"vertex model in API (-snapshot) form", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, VertexModel: "claude-haiku-4-5-20251001"}},
+		{"vertex model missing date suffix", Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, VertexModel: "claude-haiku-4-5"}},
 	} {
 		if _, err := tc.cfg.normalize(); err == nil {
 			t.Errorf("%s: expected a validation error", tc.name)
 		}
+	}
+
+	// A valid "@"-form Vertex model id is accepted and trimmed.
+	if got, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, VertexModel: "  claude-haiku-4-5@20251001 "}).normalize(); err != nil {
+		t.Errorf("valid VertexModel rejected: %v", err)
+	} else if got.VertexModel != "claude-haiku-4-5@20251001" {
+		t.Errorf("VertexModel not trimmed: %q", got.VertexModel)
 	}
 }
 
