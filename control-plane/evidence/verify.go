@@ -3,7 +3,7 @@ package evidence
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto"
 	"errors"
 	"fmt"
 
@@ -99,7 +99,7 @@ func (s *Sink) VerifyChain() error {
 // internally-consistent, attributed PREFIX — tail truncation/rollback past the last verified
 // checkpoint is resisted by the durable backing's retention lock, not by this in-band check
 // (see doc.go residual table).
-func (s *Sink) VerifyCheckpoints(caRoot ed25519.PublicKey, expectedSinkID string) error {
+func (s *Sink) VerifyCheckpoints(caRoot crypto.PublicKey, expectedSinkID string) error {
 	s.mu.Lock()
 	ckpts := make([]Checkpoint, len(s.checkpoints))
 	copy(ckpts, s.checkpoints)

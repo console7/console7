@@ -3,10 +3,56 @@ package signing
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"testing"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
+
+// failCA is a CA whose root Sign always errors, to exercise the binder/sink-signer fail-closed paths
+// (a real KMS-backed root can fail where the in-process DevCA cannot).
+type failCA struct{}
+
+func (failCA) Sign([]byte) ([]byte, error) { return nil, errors.New("signing: induced CA failure") }
+
+// TestCASignError_FailsClosed: when the CA root cannot sign a certificate, neither an NHI binder nor
+// a sink signer fabricates an unsigned identity — both surface the error.
+func TestCASignError_FailsClosed(t *testing.T) {
+	if _, err := NewNHIBinder(failCA{}).Bind("alice", "s1", interfaces.PersonaAuthor); err == nil {
+		t.Error("Bind should fail closed when the CA root cannot sign the certificate")
+	}
+	if _, err := NewSinkSigner(failCA{}, "evidence-sink"); err == nil {
+		t.Error("NewSinkSigner should fail closed when the CA root cannot sign the certificate")
+	}
+}
+
+// TestVerify_UnknownAnchorTypeFailsClosed: a trust anchor that is not a recognised public-key type
+// (nil here; a Cloud KMS EC-P256 root until its verify arm lands in the KMS adapter) is rejected —
+// verifyRoot fails closed rather than accepting an unverifiable chain. SinkID() is exercised too.
+func TestVerify_UnknownAnchorTypeFailsClosed(t *testing.T) {
+	ca := NewDevCA()
+	lineage, _ := NewNHIBinder(ca).Bind("alice", "s1", interfaces.PersonaAuthor)
+	sig := lineage.Sign([]byte("payload"))
+	// A valid signature still fails to verify under an unrecognised (non-ed25519) anchor.
+	if err := Verify(nil, []byte("payload"), sig); err == nil {
+		t.Error("Verify should fail closed for an unrecognised CA anchor type")
+	}
+
+	ss, err := NewSinkSigner(ca, "evidence-sink")
+	if err != nil {
+		t.Fatalf("NewSinkSigner: %v", err)
+	}
+	if ss.SinkID() != "evidence-sink" {
+		t.Errorf("SinkID = %q, want evidence-sink", ss.SinkID())
+	}
+	csig, err := ss.SignCheckpoint(context.Background(), []byte("ckpt"))
+	if err != nil {
+		t.Fatalf("SignCheckpoint: %v", err)
+	}
+	if err := VerifySinkSignature(nil, []byte("ckpt"), csig); err == nil {
+		t.Error("VerifySinkSignature should fail closed for an unrecognised CA anchor type")
+	}
+}
 
 func TestBindAndSign_LineageVerifies(t *testing.T) {
 	ca := NewDevCA()

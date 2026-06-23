@@ -3,7 +3,7 @@ package evidence
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -60,8 +60,10 @@ type Sink struct {
 	store  Store
 	signer CheckpointSigner
 	// caRoot is the trust anchor self-verification (Verify) checks against. It is the CA's
-	// PUBLIC key, never a signing key — storing it does not make this a key-holder.
-	caRoot ed25519.PublicKey
+	// PUBLIC key (an ed25519.PublicKey from the DevCA, or a KMS root's public key), never a
+	// signing key — storing it does not make this a key-holder. crypto.PublicKey so the sink
+	// pins whichever root algorithm the keybroker uses; VerifySinkSignature dispatches on its type.
+	caRoot crypto.PublicKey
 	// sinkID is this sink's identity, read from the signer; bound into every checkpoint and
 	// pinned by Verify so a chain's seal is attributable to THIS sink.
 	sinkID string
@@ -93,15 +95,18 @@ type Sink struct {
 // durable checkpoint persistence/resume is a providers/evidence-gcs concern (see doc.go). A
 // fallible durable Store should add a context-taking, erroring constructor there; New uses a
 // background context and best-effort hydration because the in-memory store cannot fault.
-func New(store Store, signer CheckpointSigner, caRoot ed25519.PublicKey, ckptEvery int) *Sink {
+func New(store Store, signer CheckpointSigner, caRoot crypto.PublicKey, ckptEvery int) *Sink {
 	var sinkID string
 	if signer != nil {
 		sinkID = signer.SinkID()
 	}
 	s := &Sink{
-		store:     store,
-		signer:    signer,
-		caRoot:    append(ed25519.PublicKey(nil), caRoot...),
+		store:  store,
+		signer: signer,
+		// The anchor is a long-lived pinned public key the caller does not mutate, so storing the
+		// reference is sound (no defensive copy — a crypto.PublicKey may be a pointer type such as
+		// *ecdsa.PublicKey, not a slice we could copy uniformly).
+		caRoot:    caRoot,
 		sinkID:    sinkID,
 		ckptEvery: ckptEvery,
 	}
@@ -144,7 +149,7 @@ func (s *Sink) refreshFromStoreLocked(ctx context.Context) error {
 // NewInMemory is the bench/conformance convenience: a Sink over an in-memory Store. The real
 // durable backing (GCS bucket-lock) is a later PR; do not mistake a green run here for a
 // durable WORM store (see doc.go).
-func NewInMemory(signer CheckpointSigner, caRoot ed25519.PublicKey, ckptEvery int) *Sink {
+func NewInMemory(signer CheckpointSigner, caRoot crypto.PublicKey, ckptEvery int) *Sink {
 	return New(newMemStore(), signer, caRoot, ckptEvery)
 }
 

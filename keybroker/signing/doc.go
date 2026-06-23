@@ -14,10 +14,16 @@
 // signer is the cryptographic ROOT of the chain, not its system-of-record stamping point;
 // that stamping point moves to the orchestrator in a later phase (docs/ROADMAP.md).
 //
-// SECURITY: the implementation here is a DEV stand-in. DevCA is an in-process ed25519
-// root that models an org CA / Sigstore-keyless issuer; per-session signing keys are
-// ephemeral ed25519 keys held only inside a SessionSigner and never returned. It
-// demonstrates the binding and the verifiable lineage chain, NOT a real keyless/CA
-// trust root (transparency log, OIDC identity binding, key custody) — those are
-// Phase-1+ (docs/ROADMAP.md).
+// The CA ROOT is pluggable behind the CA interface (Sign): DevCA is the in-process ed25519
+// dev root; a KMS-backed EC-P256 root (the keybroker's hardened, out-of-process signing
+// identity) implements the same interface, and the verifiers (Verify / VerifySinkSignature)
+// take a crypto.PublicKey anchor and dispatch on its type. Only the ROOT algorithm varies;
+// the per-session NHI keys and sink checkpoint keys stay ephemeral ed25519 LEAF keys minted
+// by the binder/sink-signer and never returned.
+//
+// SECURITY: DevCA is a DEV stand-in — an in-process ed25519 root that models an org CA /
+// Sigstore-keyless issuer. It demonstrates the binding and the verifiable lineage chain, NOT a
+// real keyless/CA trust root (transparency log, OIDC identity binding, key custody). The
+// KMS-backed root (a hardened, out-of-process key the control plane never holds) lands behind
+// the CA interface above (docs/ROADMAP.md).
 package signing
