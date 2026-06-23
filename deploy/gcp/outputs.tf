@@ -8,6 +8,16 @@ output "secrets_kms_crypto_key_id" {
   value       = module.secrets.kms_crypto_key_id
 }
 
+output "keybroker_signing_key_version" {
+  description = "Full Cloud KMS CryptoKeyVersion resource id of the keybroker CA root signing key — providers/keybroker-gcp Config.KeyVersionName (string-exact). Distinct key ring from the secrets KEK (ARCHITECTURE.md §6.4)."
+  value       = module.keybroker_signing.signing_key_version
+}
+
+output "keybroker_service_account_email" {
+  description = "Email of the keybroker's DISTINCT signing SA (holds cloudkms.signerVerifier on the signing key only). Its GKE Workload Identity binding is deferred to the gke module / production wiring."
+  value       = module.keybroker_signing.keybroker_service_account_email
+}
+
 output "inference_vertex_endpoint_url" {
   description = "The in-tenancy regional Vertex inference endpoint URL (scheme-qualified). Seed the session's default-deny egress allowlist with this verbatim — the orchestrator matches the resolved BackendEndpoint.URL against the allowlist by exact string."
   value       = module.inference_vertex.endpoint_url
