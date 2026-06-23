@@ -12,6 +12,40 @@ import (
 // These are white-box (package devkit) tests so they can inspect the sealed store and
 // prove the at-rest invariants — there is deliberately no exported read path.
 
+func TestMemSecrets_InjectInferenceCredential(t *testing.T) {
+	reg := NewSandboxRegistry()
+	m := NewMemSecrets(reg)
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return now }
+	ctx := context.Background()
+	owned := reg.Provision("alice", "s1")
+	other := reg.Provision("bob", "s2")
+	future := now.Add(15 * time.Minute)
+
+	// Past / zero deadline refused.
+	if err := m.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: time.Time{}}); err == nil {
+		t.Error("expected refusal for a zero deadline")
+	}
+	// Non-owned sandbox refused.
+	if err := m.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: other, SessionDeadline: future}); err == nil {
+		t.Error("injected into a non-owned sandbox")
+	}
+	// Owned + future deadline: minted token delivered.
+	if err := m.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: future}); err != nil {
+		t.Fatalf("InjectInferenceCredential into owner: %v", err)
+	}
+	if got, ok := reg.Injected(owned); !ok || len(got) == 0 {
+		t.Errorf("minted inference token not delivered to owner: ok=%v got=%q", ok, got)
+	}
+	// Revoked subject refused.
+	if err := m.RevokeSubject(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: future}); err == nil {
+		t.Error("minted an inference credential for a revoked subject")
+	}
+}
+
 func TestMemSecrets_MintEphemeral_CapsExpiryToDeadline(t *testing.T) {
 	reg := NewSandboxRegistry()
 	m := NewMemSecrets(reg)

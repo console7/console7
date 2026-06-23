@@ -66,6 +66,16 @@
 //   - DEFERRED: the GCP-native MintEphemeral backing (IAM Credentials GenerateAccessToken).
 //     MintEphemeral is a real, expiry-capped lease bookkeeper today (as in MemSecrets); the
 //     SA-impersonation token mint lands with the orchestrator/identity seam.
+//   - InjectInferenceCredential MINTS a short-lived GCP bearer for the in-tenancy inference lane
+//     (Vertex) via the AccessTokenMinter port — capping to the session deadline and delivering the
+//     token straight into the owning sandbox (the control plane never sees it). The port's REAL
+//     adapter (IAM Credentials generateAccessToken, self-impersonating the workload SA) + the deploy
+//     tokenCreator IAM are the next rung; until wired, New leaves the fail-closed denyMinter so the
+//     inference lane refuses rather than running the engine unauthenticated. RESIDUAL: if the mint
+//     succeeds but the atomic DeliverIfOwned loses a teardown race, the just-minted GCP token is
+//     orphaned — never delivered or written anywhere, but valid at GCP until its (deadline-capped,
+//     ≤1h) expiry. The cap bounds the exposure; explicit early revocation of an undelivered token is
+//     a possible future hardening.
 //   - RESIDUAL: revocation reaches the at-rest copy only; a token already injected into a
 //     live sandbox is reaped by tearing the sandbox down (the CloudProvider's job), not by
 //     this call. The process-local revocation tombstone is checked on mint, store, AND inject

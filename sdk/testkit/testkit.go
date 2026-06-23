@@ -109,6 +109,7 @@ func registry() []check {
 		{Contract{"SecretsProvider", "StoreSubscriptionToken", "store under a shared key, leave a standing operator read path, or pool the token"}, hasSecrets, checkSecretsStoreSubscriptionToken},
 		{Contract{"SecretsProvider", "InjectSubscriptionToken", "return plaintext to the caller, inject into a non-owner sandbox, or back an unattended session"}, hasSecrets, checkSecretsInjectSubscriptionToken},
 		{Contract{"SecretsProvider", "InjectOrgCredential", "return plaintext to the caller, inject into a non-owner / cross-session sandbox, or run the engine unauthenticated when no org credential is configured"}, hasSecrets, checkSecretsInjectOrgCredential},
+		{Contract{"SecretsProvider", "InjectInferenceCredential", "return plaintext to the caller, inject into a non-owner / cross-session sandbox, or mint a credential that outlives the session"}, hasSecrets, checkSecretsInjectInferenceCredential},
 		{Contract{"SecretsProvider", "RevokeSubject", "retain a recoverable copy of revoked material"}, hasSecrets, checkSecretsRevokeSubject},
 		{Contract{"IdentityProvider", "Authenticate", "trust client-asserted claims without cryptographic verification, or mint/persist a long-lived session secret"}, hasIdentity, checkIdentityAuthenticate},
 		{Contract{"IdentityProvider", "ResolveGroups", "let a subject self-assert or widen its own group membership"}, hasIdentity, checkIdentityResolveGroups},
@@ -426,6 +427,52 @@ func checkSecretsInjectOrgCredential(ctx context.Context, p ProviderUnderTest) e
 		Subject: owner, SessionID: session, Sandbox: owned,
 	}); err != nil {
 		return fmt.Errorf("org-credential injection into the session's own sandbox should succeed: %w", err)
+	}
+	return nil
+}
+
+// checkSecretsInjectInferenceCredential upholds InjectInferenceCredential's SECURITY clause: the
+// MINTED inference credential is delivered ONLY into the session's own sandbox, capped to the session
+// deadline, and never returned to the caller. It exercises the universal fail-closed cases (a
+// past/zero deadline; a non-owner / cross-session sandbox) that hold regardless of how the minter is
+// wired; the owned-success path is asserted white-box per impl (it needs the impl's minter — the real
+// secrets-gcp provider is fail-closed until SetAccessTokenMinter, whereas the dev double mints inline).
+func checkSecretsInjectInferenceCredential(ctx context.Context, p ProviderUnderTest) error {
+	future := time.Now().Add(15 * time.Minute)
+	dummy := interfaces.SandboxHandle{ID: "conf-inf-nonexistent-sandbox"}
+	// A non-owned sandbox is refused (fail closed) even with a valid future deadline.
+	if err := p.Secrets.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{
+		Subject: confSubject, SessionID: "conf-inf", Sandbox: dummy, SessionDeadline: future,
+	}); err == nil {
+		return errors.New("injected an inference credential into a non-owned sandbox")
+	}
+	if p.SecretsRig == nil {
+		return nil
+	}
+	const owner = interfaces.Subject("conf-inf-owner")
+	const session = interfaces.SessionID("conf-inf-inject")
+	owned := p.SecretsRig.Provision(owner, session)
+	other := p.SecretsRig.Provision("conf-inf-other", "conf-inf-other-session")
+	// A zero/past deadline is refused — never mint material that can outlive the session.
+	if err := p.Secrets.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{
+		Subject: owner, SessionID: session, Sandbox: owned, SessionDeadline: time.Time{},
+	}); err == nil {
+		return errors.New("minted an inference credential with no session deadline (could outlive the session)")
+	}
+	// A different session's sandbox is refused even with a valid deadline (no cross-session delivery).
+	if err := p.Secrets.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{
+		Subject: owner, SessionID: session, Sandbox: other, SessionDeadline: future,
+	}); err == nil {
+		return errors.New("injected an inference credential into a different session's sandbox")
+	}
+	// Injection into the session's OWN sandbox with a future deadline must succeed — proving the
+	// refusals above came from the gate, not a uniformly-failing minter. (The harness wires a token
+	// minter off-seam — the dev double mints inline, the GCP provider via SetAccessTokenMinter; a
+	// minter-less provider is fail-closed and asserted white-box.)
+	if err := p.Secrets.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{
+		Subject: owner, SessionID: session, Sandbox: owned, SessionDeadline: future,
+	}); err != nil {
+		return fmt.Errorf("inference-credential injection into the session's own sandbox should succeed: %w", err)
 	}
 	return nil
 }

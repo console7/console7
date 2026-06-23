@@ -79,6 +79,31 @@ type OrgCredentialInjection struct {
 	Sandbox SandboxHandle
 }
 
+// InferenceCredentialInjection identifies an injection of a freshly-MINTED short-lived cloud
+// inference credential (a GCP bearer token for the in-tenancy Vertex lane) into one session's
+// sandbox. Unlike OrgCredentialInjection (which delivers a STORED org API key) the provider MINTS
+// the credential on demand from the adopter's identity platform (workload-identity token mint) — so
+// no long-lived inference credential is ever stored, and the sandbox can authenticate to the backend
+// from this delivered token INSTEAD of the node metadata server. (Whether the sandbox can reach the
+// metadata server at all is the egress boundary / GKE metadata config's job — the authoritative
+// control, GOAL.md tenet 3 — not this seam's; this seam's job is to make a delivered token the
+// credential source.) It is not beneficiary-bound: the inference credential backs any session the
+// orchestrator routes to the in-tenancy backend, so it carries only the binding facts plus the
+// deadline to cap the minted token's lifetime against.
+type InferenceCredentialInjection struct {
+	// Subject is the session's human subject — used (with SessionID) to verify the target sandbox
+	// is the one provisioned for this session before the credential is delivered into it.
+	Subject Subject
+	// SessionID is the session the sandbox belongs to; binds the injection to one session.
+	SessionID SessionID
+	// Sandbox is the session's sandbox to inject the minted inference credential into.
+	Sandbox SandboxHandle
+	// SessionDeadline is the authoritative ABSOLUTE time the session ends. The provider MUST cap the
+	// minted credential's expiry to no later than min(now+providerMax, SessionDeadline) and MUST NOT
+	// mint material that outlives the session (ephemeral by default; GOAL.md tenet 5).
+	SessionDeadline time.Time
+}
+
 // SecretsProvider abstracts secret storage, envelope encryption, and KMS
 // (ARCHITECTURE.md §5; default ref: GCP Secret Manager + Cloud KMS). It is a broker,
 // not a vault the control plane reads: it mints and injects, it does not hand keys
@@ -131,6 +156,24 @@ type SecretsProvider interface {
 	// exactly the orchestrated/scheduled/headless/multi-beneficiary work GOAL.md tenet 2 assigns to
 	// org API keys (DESIGN.md §2.1, §3).
 	InjectOrgCredential(ctx context.Context, in OrgCredentialInjection) error
+
+	// InjectInferenceCredential MINTS a short-lived cloud inference credential (e.g. a GCP bearer
+	// token for the in-tenancy Vertex backend) and injects it directly into the session's own
+	// sandbox. Unlike InjectOrgCredential it does NOT deliver a stored secret — it mints on demand
+	// from the adopter's identity platform (workload-identity token mint), so no long-lived inference
+	// credential is ever stored and a delivered token — not the node metadata server — is the
+	// sandbox's credential source. (Denying the sandbox the metadata server is the egress boundary /
+	// GKE metadata config's job, not this seam's.)
+	//
+	// SECURITY: the implementation MUST verify in.Sandbox belongs to in.Subject's in.SessionID and
+	// inject the minted credential ONLY into that owning sandbox; it MUST cap the credential's expiry
+	// to no later than min(now+providerMax, in.SessionDeadline) and MUST NOT mint material that
+	// outlives the session; it MUST scope the credential to the least privilege the backend needs;
+	// it MUST NOT return the plaintext credential to the caller (the mint AND the delivery both happen
+	// INSIDE the provider — the control plane never sees it); and it MUST fail closed on any mint or
+	// delivery error, never letting the engine run unauthenticated (DESIGN.md §2.1, §3; GOAL.md
+	// tenet 5 — least privilege, ephemeral by default).
+	InjectInferenceCredential(ctx context.Context, in InferenceCredentialInjection) error
 
 	// RevokeSubject deletes a user's stored material on revocation/offboarding
 	// (e.g. SCIM deprovision).

@@ -4,9 +4,26 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"time"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
+
+// AccessTokenMinter mints a short-lived GCP OAuth2 access token for the provider's workload
+// identity, so the in-tenancy inference lane (Vertex) authenticates from a delivered short-lived
+// token rather than the node metadata server (which the egress boundary / GKE metadata config denies
+// the sandbox — the authoritative control). The real adapter is IAM Credentials generateAccessToken
+// (self-impersonation of the workload SA — iamcredentials_gcp.go); the fake (fakes.go) returns a
+// deterministic token for tests/conformance. The minted token is the ONLY thing that crosses this
+// boundary: InjectInferenceCredential delivers it straight into the owning sandbox and never returns
+// it to the control plane.
+type AccessTokenMinter interface {
+	// MintAccessToken mints an access token scoped to scopes, requesting a lifetime of `lifetime`.
+	// The provider has already capped lifetime to the session deadline; the adapter MAY further cap
+	// to the platform maximum (IAM access tokens default to 1h). It returns the token material and
+	// its actual expiry, and MUST fail rather than return a token longer-lived than requested.
+	MintAccessToken(ctx context.Context, scopes []string, lifetime time.Duration) (token []byte, expiry time.Time, err error)
+}
 
 // The provider logic depends only on these three ports; the cloud.google.com/go clients
 // are confined to the adapters that satisfy them (kms_gcp.go, secretmanager_gcp.go) and to

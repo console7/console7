@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/console7/console7/sdk/interfaces"
 )
@@ -183,6 +184,74 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// InMemoryAccessTokenMinter is a fake AccessTokenMinter returning a deterministic token, for the
+// provider's white-box tests and the conformance harness. It records the requested scopes and
+// lifetime so a test can assert the provider's expiry-cap logic without a real clock, and can be
+// told to fail to exercise the fail-closed path. It models NONE of a real IAM-Credentials mint's
+// guarantees — never wire one into a deployment.
+type InMemoryAccessTokenMinter struct {
+	mu           sync.Mutex
+	token        []byte
+	fail         bool
+	lastScopes   []string
+	lastLifetime time.Duration
+	calls        int
+	// now is the clock the fake stamps the returned expiry from (now()+lifetime). It defaults to
+	// time.Now; a white-box test sharing the provider's injected clock sets it so the provider's
+	// defensive expiry-cap check (which uses the provider's clock) compares like-for-like.
+	now func() time.Time
+}
+
+var _ AccessTokenMinter = (*InMemoryAccessTokenMinter)(nil)
+
+// NewInMemoryAccessTokenMinter returns a fake minter yielding a fixed non-empty token.
+func NewInMemoryAccessTokenMinter() *InMemoryAccessTokenMinter {
+	return &InMemoryAccessTokenMinter{token: []byte("fake-gcp-access-token"), now: time.Now}
+}
+
+// SetFail makes MintAccessToken return an error, to exercise the provider's fail-closed path.
+func (m *InMemoryAccessTokenMinter) SetFail(fail bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fail = fail
+}
+
+// LastLifetime returns the lifetime the provider last requested (for asserting the deadline cap).
+func (m *InMemoryAccessTokenMinter) LastLifetime() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastLifetime
+}
+
+// MintAccessToken records the request and returns the fixed token with expiry now+lifetime.
+func (m *InMemoryAccessTokenMinter) MintAccessToken(ctx context.Context, scopes []string, lifetime time.Duration) ([]byte, time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	m.lastScopes = append([]string(nil), scopes...)
+	m.lastLifetime = lifetime
+	if m.fail {
+		return nil, time.Time{}, errors.New("secretsgcp/fake: induced MintAccessToken failure")
+	}
+	out := make([]byte, len(m.token))
+	copy(out, m.token)
+	return out, m.now().Add(lifetime), nil
+}
+
+// denyMinter is the fail-closed AccessTokenMinter New wires until a real workload-SA token mint is
+// configured: it mints nothing, so InjectInferenceCredential refuses rather than running the engine
+// with no inference credential (GOAL.md tenet 3 — the boundary wins, fail closed).
+type denyMinter struct{}
+
+var _ AccessTokenMinter = denyMinter{}
+
+func (denyMinter) MintAccessToken(context.Context, []string, time.Duration) ([]byte, time.Time, error) {
+	return nil, time.Time{}, errors.New("secretsgcp: no access-token minter configured (the inference lane requires a workload-SA token mint)")
 }
 
 // denyInjector is the fail-closed Injector New wires until the real data-plane sandbox exists:

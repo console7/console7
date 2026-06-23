@@ -25,6 +25,7 @@ type Provider struct {
 	kek    KEKWrapper
 	store  SecretStore
 	inject Injector
+	minter AccessTokenMinter
 	prefix string
 	now    func() time.Time
 
@@ -74,9 +75,12 @@ func NewWithPorts(kek KEKWrapper, store SecretStore, inject Injector, prefix str
 		inject = denyInjector{}
 	}
 	return &Provider{
-		kek:     kek,
-		store:   store,
-		inject:  inject,
+		kek:    kek,
+		store:  store,
+		inject: inject,
+		// Fail-closed default: no access-token minter until one is wired (SetAccessTokenMinter or New),
+		// so InjectInferenceCredential refuses rather than running the engine with no inference credential.
+		minter:  denyMinter{},
 		prefix:  prefix,
 		now:     now,
 		revoked: make(map[interfaces.Subject]bool),
@@ -112,6 +116,28 @@ func (p *Provider) injector() Injector {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.inject
+}
+
+// SetAccessTokenMinter wires the workload-identity token minter InjectInferenceCredential uses to
+// mint a short-lived GCP bearer for the in-tenancy inference lane (Vertex). It mirrors SetInjector:
+// New defaults to the fail-closed denyMinter, and the production constructor (or the orchestrator)
+// wires the real IAM-Credentials adapter here. Guarded by p.mu and read via minter(); a nil argument
+// is ignored (the fail-closed default / already-wired minter is kept). Intended for wiring time.
+func (p *Provider) SetAccessTokenMinter(m AccessTokenMinter) {
+	if m == nil {
+		return
+	}
+	p.mu.Lock()
+	p.minter = m
+	p.mu.Unlock()
+}
+
+// accessTokenMinter returns the wired AccessTokenMinter under p.mu, so a read never races a
+// SetAccessTokenMinter write (the same discipline as injector()).
+func (p *Provider) accessTokenMinter() AccessTokenMinter {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.minter
 }
 
 // secretID derives the per-subject Secret Manager secret ID. It is "<prefix>-sub-<hex
@@ -395,6 +421,72 @@ func (p *Provider) InjectOrgCredential(ctx context.Context, in interfaces.OrgCre
 	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery
 	// (DeliverIfOwned closes the teardown race). The plaintext never leaves this call by any other path.
 	if !inj.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, key) {
+		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
+	}
+	return nil
+}
+
+// inferenceTokenMaxTTL caps a minted inference token's lifetime. IAM access tokens default to a 1h
+// maximum; the provider additionally caps to the session deadline (whichever is sooner).
+const inferenceTokenMaxTTL = time.Hour
+
+// inferenceScopes is the least-privilege OAuth scope the minted GCP token carries for the in-tenancy
+// inference lane. cloud-platform is the scope Vertex AI requires; the underlying IAM permission is
+// constrained to aiplatform.endpoints.predict on the workload SA by deploy/gcp/modules/inference-vertex,
+// so the scope grants no more than the SA's own bindings allow.
+var inferenceScopes = []string{"https://www.googleapis.com/auth/cloud-platform"}
+
+// InjectInferenceCredential mints a short-lived GCP access token (via the workload-identity minter)
+// and delivers it ONLY into the session's own sandbox, for the in-tenancy inference lane (Vertex).
+// It never stores the token and never returns it to the caller; both the mint and the delivery happen
+// inside the provider. It fails CLOSED on a missing/zero/past deadline, a revoked subject, a mint
+// error, an empty minted token, or a non-owning sandbox (the engine must not run unauthenticated).
+func (p *Provider) InjectInferenceCredential(ctx context.Context, in interfaces.InferenceCredentialInjection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	now := p.now()
+	// Refuse to mint material that could outlive the session (ephemeral by default; tenet 5).
+	if in.SessionDeadline.IsZero() || !in.SessionDeadline.After(now) {
+		return errors.New("secretsgcp: InjectInferenceCredential requires a SessionDeadline in the future")
+	}
+	// Cap the requested lifetime to the earlier of the provider max and the absolute session deadline.
+	lifetime := inferenceTokenMaxTTL
+	if d := in.SessionDeadline.Sub(now); d < lifetime {
+		lifetime = d
+	}
+	// Revocation backstop: refuse to mint for an offboarded subject. NOTE the deliberate divergence
+	// from InjectOrgCredential (which has NO revocation gate): the org credential is a SHARED,
+	// org-wide secret with no per-subject meaning (rotated out-of-band), whereas this token is minted
+	// fresh and anchored to THIS subject's session — so gating it on the subject's tombstone is the
+	// right offboarding backstop (consistent with MintEphemeral).
+	if p.isRevoked(in.Subject) {
+		return errors.New("secretsgcp: refusing inference-credential injection for a revoked subject")
+	}
+	// Snapshot the injector + minter once under the lock so neither read races a wiring swap and the
+	// fail-fast Owns and the authoritative DeliverIfOwned observe the same injector.
+	inj := p.injector()
+	mint := p.accessTokenMinter()
+	// Ownership fail-fast before the (remote) mint; the authoritative check is DeliverIfOwned below.
+	if !inj.Owns(in.Sandbox, in.Subject, in.SessionID) {
+		return errors.New("secretsgcp: sandbox does not belong to the subject's session")
+	}
+	token, expiry, err := mint.MintAccessToken(ctx, inferenceScopes, lifetime)
+	if err != nil {
+		return fmt.Errorf("secretsgcp: mint inference token: %w", err)
+	}
+	defer zero(token)
+	if len(token) == 0 {
+		return errors.New("secretsgcp: minter returned an empty inference token (fail closed)")
+	}
+	// Defence in depth: enforce the "MUST cap expiry" obligation PROVIDER-side rather than trusting
+	// the adapter. A minter that returns a token outliving the requested lifetime (a bug, or a
+	// compromised adapter) must not be delivered — fail closed. A small skew tolerates clock drift.
+	if !expiry.IsZero() && expiry.After(now.Add(lifetime+time.Minute)) {
+		return errors.New("secretsgcp: minted inference token outlives the requested lifetime (fail closed)")
+	}
+	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery.
+	if !inj.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
 		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
 	}
 	return nil
