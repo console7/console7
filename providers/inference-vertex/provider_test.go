@@ -153,6 +153,12 @@ func TestConfig_RequiredFields(t *testing.T) {
 	if _, err := New(Config{ProjectID: "p", Global: true}); err != nil {
 		t.Fatalf("global config should not require a region: %v", err)
 	}
+	// A PSC/VPC-SC override with a MALFORMED region is rejected: the region is not interpolated into
+	// the override host, but it still becomes the engine's CLOUD_ML_REGION, so a bad value must fail
+	// at construction rather than ship a garbage region into the sandbox.
+	if _, err := New(Config{ProjectID: "p", Region: "Bad Region!", EndpointBaseURL: "https://x.vpc.p.googleapis.com"}); err == nil {
+		t.Fatal("expected New to reject a malformed region on the override path")
+	}
 }
 
 // TestConfig_RegionHostInjection asserts Region is validated against the GCP location grammar
