@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -454,6 +455,92 @@ func TestNewWithPorts_NilInjectorFailsClosed(t *testing.T) {
 	}); err == nil {
 		t.Error("expected refusal with a nil (fail-closed) Injector, got nil")
 	}
+}
+
+// TestSetInjector_WiresRealDeliveryAndStaysFailClosed proves the production wiring seam: a Provider
+// built fail-closed (denyInjector) refuses delivery, SetInjector swaps in a real Injector so the
+// owning sandbox receives the credential, a non-owned sandbox is still refused, and SetInjector(nil)
+// is ignored (the wired injector is kept, never silently reverted to fail-open).
+func TestSetInjector_WiresRealDeliveryAndStaysFailClosed(t *testing.T) {
+	kek := NewInMemoryKEK()
+	store := NewInMemoryStore()
+	p := NewWithPorts(kek, store, nil, "console7", func() time.Time { return fixedNow }) // fail-closed default.
+	ctx := context.Background()
+
+	orgKey := []byte("org-api-key")
+	if err := p.SetOrgCredential(ctx, orgKey); err != nil {
+		t.Fatalf("SetOrgCredential: %v", err)
+	}
+
+	reg := devkit.NewSandboxRegistry()
+	owned := reg.Provision("alice", "s1")
+	other := reg.Provision("bob", "s2")
+
+	// Before wiring, delivery into the owning sandbox is refused (denyInjector owns nothing).
+	if err := p.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned}); err == nil {
+		t.Error("expected fail-closed refusal before SetInjector, got nil")
+	}
+	if _, ok := reg.Injected(owned); ok {
+		t.Error("delivered before an Injector was wired")
+	}
+
+	// Wire the real Injector.
+	p.SetInjector(reg)
+
+	// A non-owned sandbox is still refused (no cross-session delivery).
+	if err := p.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: other}); err == nil {
+		t.Error("delivered into a non-owned sandbox after SetInjector")
+	}
+	// The owning sandbox now receives exactly the configured org key.
+	if err := p.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned}); err != nil {
+		t.Fatalf("InjectOrgCredential into owner after SetInjector: %v", err)
+	}
+	got, ok := reg.Injected(owned)
+	if !ok || !bytes.Equal(got, orgKey) {
+		t.Errorf("org credential not delivered to owner: ok=%v got=%q", ok, got)
+	}
+
+	// SetInjector(nil) is ignored: the wired injector is kept, not reverted to fail-open.
+	p.SetInjector(nil)
+	fresh := reg.Provision("carol", "s3")
+	if err := p.SetOrgCredential(ctx, orgKey); err != nil {
+		t.Fatalf("SetOrgCredential(carol): %v", err)
+	}
+	if err := p.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "carol", SessionID: "s3", Sandbox: fresh}); err != nil {
+		t.Errorf("SetInjector(nil) wrongly dropped the wired injector: %v", err)
+	}
+}
+
+// TestSetInjector_NoRaceWithConcurrentInject exercises SetInjector concurrently with in-flight
+// injections so `go test -race` flags any unsynchronized read of p.inject. Each Inject* method
+// snapshots the injector under p.mu, so this must be clean. It does not assert delivery outcome
+// (the swap is racing on purpose); the race detector is the assertion.
+func TestSetInjector_NoRaceWithConcurrentInject(t *testing.T) {
+	kek := NewInMemoryKEK()
+	store := NewInMemoryStore()
+	p := NewWithPorts(kek, store, devkit.NewSandboxRegistry(), "console7", func() time.Time { return fixedNow })
+	ctx := context.Background()
+	if err := p.SetOrgCredential(ctx, []byte("org-api-key")); err != nil {
+		t.Fatalf("SetOrgCredential: %v", err)
+	}
+	if err := p.StoreSubscriptionToken(ctx, interfaces.SubscriptionToken{Subject: "alice", Token: []byte("tok")}); err != nil {
+		t.Fatalf("StoreSubscriptionToken: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(3)
+		go func() { defer wg.Done(); p.SetInjector(devkit.NewSandboxRegistry()) }()
+		go func() {
+			defer wg.Done()
+			_ = p.InjectOrgCredential(ctx, interfaces.OrgCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: interfaces.SandboxHandle{ID: "x"}})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = p.InjectSubscriptionToken(ctx, interfaces.SubscriptionInjection{Subject: "alice", SessionID: "s1", Sandbox: interfaces.SandboxHandle{ID: "x"}, Attended: true, Beneficiaries: 1})
+		}()
+	}
+	wg.Wait()
 }
 
 func TestStore_RecordsKEKVersion(t *testing.T) {

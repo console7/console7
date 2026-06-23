@@ -84,6 +84,36 @@ func NewWithPorts(kek KEKWrapper, store SecretStore, inject Injector, prefix str
 	}
 }
 
+// SetInjector wires the data-plane Injector that the ownership check (Owns) and the atomic
+// check-and-deliver (DeliverIfOwned) use to deliver credential material into a session's sandbox.
+// It is the production wiring seam alongside NewWithPorts: New defaults to the fail-closed
+// denyInjector, and the orchestrator — which holds BOTH this provider and the providers/cloud-gcp
+// Provider (which satisfies Injector via Owns/DeliverIfOwned) — calls this to wire the real
+// data-plane path without having to reconstruct via NewWithPorts. The write and every read of the
+// inject port are guarded by p.mu (each Inject* method snapshots it via injector()), so calling
+// this concurrently with an in-flight injection is data-race-safe; it is still intended for
+// wiring time. A nil argument is ignored — the fail-closed default is kept — so a missing or
+// fat-fingered wiring refuses injection rather than nil-panicking; it does NOT reset an
+// already-wired injector to deny (GOAL.md tenet 2: the boundary wins, fail closed).
+func (p *Provider) SetInjector(inject Injector) {
+	if inject == nil {
+		return
+	}
+	p.mu.Lock()
+	p.inject = inject
+	p.mu.Unlock()
+}
+
+// injector returns the currently wired Injector under p.mu, so a read never races a SetInjector
+// write. Each Inject* method snapshots it ONCE and uses the snapshot for both the cheap fail-fast
+// Owns and the authoritative DeliverIfOwned, so a wiring swap mid-method cannot make those two
+// observe different injectors. Callers must not already hold p.mu (the lock is not reentrant).
+func (p *Provider) injector() Injector {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inject
+}
+
 // secretID derives the per-subject Secret Manager secret ID. It is "<prefix>-sub-<hex
 // SHA-256(subject)>": a fixed-length, name-prefixed, charset-safe id that keeps the SSO
 // subject (often an email) out of resource names and audit logs. The same value is the AAD
@@ -223,9 +253,12 @@ func (p *Provider) InjectSubscriptionToken(ctx context.Context, in interfaces.Su
 	if p.isRevoked(in.Subject) {
 		return errors.New("secretsgcp: refusing subscription injection for a revoked subject")
 	}
+	// Snapshot the wired Injector once under the lock so the fail-fast Owns and the authoritative
+	// DeliverIfOwned below observe the SAME injector and neither read races a SetInjector wiring.
+	inj := p.injector()
 	// Ownership gate (cheap fail-fast before the decrypt): the sandbox must belong to this
 	// subject's session. The authoritative check is re-done atomically with delivery below.
-	if !p.inject.Owns(in.Sandbox, in.Subject, in.SessionID) {
+	if !inj.Owns(in.Sandbox, in.Subject, in.SessionID) {
 		return errors.New("secretsgcp: sandbox does not belong to the subject's session")
 	}
 
@@ -267,7 +300,7 @@ func (p *Provider) InjectSubscriptionToken(ctx context.Context, in interfaces.Su
 	revoked := p.revoked[in.Subject]
 	delivered := false
 	if !revoked {
-		delivered = p.inject.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token)
+		delivered = inj.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token)
 	}
 	p.mu.Unlock()
 	if revoked {
@@ -328,9 +361,12 @@ func (p *Provider) InjectOrgCredential(ctx context.Context, in interfaces.OrgCre
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Snapshot the wired Injector once under the lock so the fail-fast Owns and the authoritative
+	// DeliverIfOwned below observe the SAME injector and neither read races a SetInjector wiring.
+	inj := p.injector()
 	// Ownership gate (cheap fail-fast before the KMS round-trip): the sandbox must belong to this
 	// subject's session. The authoritative check is re-done atomically with delivery below.
-	if !p.inject.Owns(in.Sandbox, in.Subject, in.SessionID) {
+	if !inj.Owns(in.Sandbox, in.Subject, in.SessionID) {
 		return errors.New("secretsgcp: sandbox does not belong to the subject's session")
 	}
 	sid := p.orgSecretID()
@@ -358,7 +394,7 @@ func (p *Provider) InjectOrgCredential(ctx context.Context, in interfaces.OrgCre
 	defer zero(key)
 	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery
 	// (DeliverIfOwned closes the teardown race). The plaintext never leaves this call by any other path.
-	if !p.inject.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, key) {
+	if !inj.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, key) {
 		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
 	}
 	return nil

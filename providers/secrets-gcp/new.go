@@ -15,11 +15,12 @@ import (
 // file. Pass option.ClientOptions for tests/integration (e.g. a fake endpoint or an explicit
 // credential); production passes none.
 //
-// The Injector is wired fail-closed (denyInjector): this secrets New refuses to deliver into an
-// unverified sandbox. The REAL Injector now exists — the providers/cloud-gcp Provider satisfies
-// this seam (Owns/DeliverIfOwned: ownership-checked delivery into the pod's memory volume, B5) —
-// but wiring it in is the ORCHESTRATOR's job (it holds both providers), via NewWithPorts. Until
-// that wiring lands (B11/PART-A), this convenience constructor stays fail-closed.
+// The Injector starts wired fail-closed (denyInjector): this secrets New refuses to deliver into
+// an unverified sandbox until the data-plane path is wired. The REAL Injector exists — the
+// providers/cloud-gcp Provider satisfies this seam (Owns/DeliverIfOwned: ownership-checked delivery
+// into the pod's memory volume, B5) — and wiring it in is the ORCHESTRATOR's job (it holds both
+// providers): call SetInjector(cloud) on the returned Provider (or build via NewWithPorts to inject
+// at construction). Until that wiring lands, this convenience constructor stays fail-closed.
 //
 // Call Close at shutdown to release the clients.
 func New(ctx context.Context, cfg Config, opts ...option.ClientOption) (*Provider, error) {

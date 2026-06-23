@@ -61,8 +61,8 @@
 //     fail-closed — the providers/cloud-gcp Provider implements the Injector seam (Owns/
 //     DeliverIfOwned, B5) — but is NOT YET WIRED into a running session: this convenience New still
 //     defaults to a fail-closed denyInjector, and no landed path delivers a real credential into a
-//     real pod. The ORCHESTRATOR wires the cloud-gcp Provider in via NewWithPorts, proven live at
-//     B11/PART-A (docs/THREAT-MODEL.md §1).
+//     real pod. The ORCHESTRATOR wires the cloud-gcp Provider in via SetInjector (or NewWithPorts at
+//     construction), proven live at B11/PART-A (docs/THREAT-MODEL.md §1).
 //   - DEFERRED: the GCP-native MintEphemeral backing (IAM Credentials GenerateAccessToken).
 //     MintEphemeral is a real, expiry-capped lease bookkeeper today (as in MemSecrets); the
 //     SA-impersonation token mint lands with the orchestrator/identity seam.
