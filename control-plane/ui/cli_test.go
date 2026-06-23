@@ -74,7 +74,7 @@ func TestLaunchSpec_toRequest(t *testing.T) {
 func TestLaunch_RendersProposalAndVerifiedEvidence(t *testing.T) {
 	r := &fakeRunner{sum: orchestrator.Summary{
 		NHI:          "nhi/s1/author",
-		Inference:    interfaces.BackendEndpoint{URL: "https://api.anthropic.com"},
+		Inference:    interfaces.BackendEndpoint{URL: "https://api.anthropic.com", Kind: interfaces.BackendAnthropicAPI},
 		HeadSHA:      "abc1234deadbeef",
 		FilesChanged: []string{"README.md"},
 		PR:           interfaces.PRRef{URL: "https://github.com/acme/widgets/pull/7", Number: 7},
@@ -106,7 +106,7 @@ func TestLaunch_RendersProposalAndVerifiedEvidence(t *testing.T) {
 func TestLaunch_NoChangeAndTamperAndError(t *testing.T) {
 	// No-change session: clean tree, no PROPOSED line; nil verifier ⇒ records-sealed (no verdict).
 	var out1 strings.Builder
-	r1 := &fakeRunner{sum: orchestrator.Summary{Records: 3, Inference: interfaces.BackendEndpoint{URL: "u"}}}
+	r1 := &fakeRunner{sum: orchestrator.Summary{Records: 3, Inference: interfaces.BackendEndpoint{URL: "u", Kind: interfaces.BackendAnthropicAPI}}}
 	_ = Launch(context.Background(), r1, "t", LaunchSpec{SessionID: "s", Repo: "a/b", Branch: "x", Prompt: "p"}, nil, &out1)
 	if !strings.Contains(out1.String(), "no change proposed") || !strings.Contains(out1.String(), "3 records sealed") {
 		t.Errorf("no-change/nil-verifier output wrong:\n%s", out1.String())

@@ -78,6 +78,12 @@ func TestResolve_Seam(t *testing.T) {
 			if ep.Mode != tc.sel.Mode {
 				t.Fatalf("Mode = %v, want %v (Resolve must echo the resolved class)", ep.Mode, tc.sel.Mode)
 			}
+			// Both the subscription and org-API routes are the direct-Anthropic LANE — assert the
+			// kind explicitly so a consumer selects the ANTHROPIC_API_KEY credential type, never
+			// mistaking it for the Vertex GCP-bearer lane.
+			if ep.Kind != interfaces.BackendAnthropicAPI {
+				t.Fatalf("Kind = %v, want BackendAnthropicAPI", ep.Kind)
+			}
 		})
 	}
 }

@@ -526,6 +526,16 @@ func checkInferenceResolve(ctx context.Context, p ProviderUnderTest) error {
 	}); err == nil {
 		return errors.New("backed a multi-beneficiary session with a subscription credential")
 	}
+	// Any endpoint a backend DOES resolve MUST name its concrete lane (Kind): Mode alone cannot tell
+	// a Vertex org route from a direct-Anthropic org route, and the CloudProvider needs the lane to
+	// render the right engine env and credential type. This asserts IF org-API resolves — a backend
+	// is free to refuse a route (a subscription-only backend may), so a refusal here is not a failure;
+	// only resolving an endpoint WITHOUT a lane is.
+	if ep, err := p.Inference.Resolve(ctx, interfaces.InferenceSelection{
+		Mode: interfaces.ModeOrgAPI, Attended: false, Beneficiaries: 1,
+	}); err == nil && ep.Kind == interfaces.BackendUnspecified {
+		return errors.New("resolved a backend endpoint but left BackendKind unspecified — a consumer cannot tell the inference lane")
+	}
 	return nil
 }
 
