@@ -26,6 +26,15 @@ type Config struct {
 	// Region pins Secret Manager user-managed replication to one location, keeping payloads
 	// in-region (no egress of adopter data). It MUST match the KMS key ring's location.
 	Region string
+	// WorkloadSAEmail is the workload service account New impersonates (via IAM Credentials
+	// GenerateAccessToken) to MINT the short-lived GCP bearer InjectInferenceCredential delivers
+	// for the in-tenancy Vertex lane — deploy/gcp/modules/secrets' workload_service_account_email
+	// output. The SA must hold roles/iam.serviceAccountTokenCreator on ITSELF (self-impersonation;
+	// provisioned by that module). OPTIONAL: when empty, New leaves the fail-closed denyMinter, so a
+	// deployment that never uses the Vertex lane needs no token-mint wiring (InjectInferenceCredential
+	// then refuses rather than running unauthenticated). Not validated for format here — an invalid
+	// value surfaces as a GenerateAccessToken error at first use, never a credential leak.
+	WorkloadSAEmail string
 }
 
 // secretPrefixRe bounds the prefix so a derived secret ID ("<prefix>-sub-<64 hex>") is a

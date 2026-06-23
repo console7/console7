@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	credentials "cloud.google.com/go/iam/credentials/apiv1"
 	kms "cloud.google.com/go/kms/apiv1"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"google.golang.org/api/option"
@@ -48,5 +49,23 @@ func New(ctx context.Context, cfg Config, opts ...option.ClientOption) (*Provide
 		nil,
 	)
 	p.closers = []io.Closer{kmsClient, smClient}
+
+	// Wire the inference-lane token minter only when a workload SA is configured: New dials IAM
+	// Credentials and impersonates that SA (self-impersonation — it holds tokenCreator on itself) to
+	// mint the short-lived Vertex bearer. When WorkloadSAEmail is empty the fail-closed denyMinter is
+	// kept, so a deployment that never uses the Vertex lane stays minter-free and InjectInferenceCredential
+	// refuses rather than running unauthenticated.
+	if cfg.WorkloadSAEmail != "" {
+		credClient, cerr := credentials.NewIamCredentialsClient(ctx, opts...)
+		if cerr != nil {
+			_ = p.Close()
+			return nil, fmt.Errorf("secretsgcp: dial IAM Credentials: %w", cerr)
+		}
+		p.SetAccessTokenMinter(&iamCredentialsMinter{
+			client: credClient,
+			saName: "projects/-/serviceAccounts/" + cfg.WorkloadSAEmail,
+		})
+		p.closers = append(p.closers, credClient)
+	}
 	return p, nil
 }

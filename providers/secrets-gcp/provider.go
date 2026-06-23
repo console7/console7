@@ -480,10 +480,12 @@ func (p *Provider) InjectInferenceCredential(ctx context.Context, in interfaces.
 		return errors.New("secretsgcp: minter returned an empty inference token (fail closed)")
 	}
 	// Defence in depth: enforce the "MUST cap expiry" obligation PROVIDER-side rather than trusting
-	// the adapter. A minter that returns a token outliving the requested lifetime (a bug, or a
-	// compromised adapter) must not be delivered — fail closed. A small skew tolerates clock drift.
-	if !expiry.IsZero() && expiry.After(now.Add(lifetime+time.Minute)) {
-		return errors.New("secretsgcp: minted inference token outlives the requested lifetime (fail closed)")
+	// the adapter. A real mint ALWAYS reports a truthful, future expiry — so reject a token whose
+	// reported expiry is missing/in the past (note: a nil protobuf ExpireTime decodes to the Unix
+	// EPOCH, not Go's zero time, so check against `now`, not IsZero) OR that outlives the requested
+	// lifetime (a bug or a compromised adapter). A small skew tolerates clock drift.
+	if !expiry.After(now) || expiry.After(now.Add(lifetime+time.Minute)) {
+		return errors.New("secretsgcp: minted inference token has an implausible expiry — missing, past, or longer-lived than requested (fail closed)")
 	}
 	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery.
 	if !inj.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
