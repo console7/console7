@@ -48,7 +48,39 @@ type BackendEndpoint struct {
 	// URL is the resolved inference endpoint; it MUST already be present on the
 	// session's egress allowlist (the boundary is authoritative).
 	URL string
+	// Kind names the concrete backend lane (Anthropic API vs Vertex). Mode is the
+	// credential CLASS (subscription vs org-API); Kind is the provider LANE, which a
+	// consumer needs to render the right engine env and credential type. Resolve MUST
+	// set it explicitly on a returned endpoint.
+	Kind BackendKind
+	// VertexProjectID and VertexRegion carry the Vertex routing facts when Kind is
+	// BackendVertex (VertexRegion is "global" for the location-independent endpoint);
+	// both are empty otherwise. They are emitted to the wrapped engine as
+	// ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION and are NOT secrets.
+	VertexProjectID string
+	VertexRegion    string
 }
+
+// BackendKind names the concrete inference LANE a BackendEndpoint resolves to, so a
+// consumer (the CloudProvider rendering the engine-invocation env and selecting the
+// credential type) can tell an Anthropic-API org key from a Vertex GCP-bearer-token
+// lane. Mode alone cannot: both the in-tenancy Vertex route and the direct-Anthropic
+// org route are ModeOrgAPI. It is a routing FACT, never a credential.
+type BackendKind int
+
+const (
+	// BackendUnspecified is the zero value and is INVALID for a resolved endpoint: a
+	// consumer MUST NOT infer a lane from it. A Resolve implementation that returns an
+	// endpoint MUST set an explicit kind.
+	BackendUnspecified BackendKind = iota
+	// BackendAnthropicAPI is the direct-Anthropic lane — a subscription seat or an org
+	// API key spoken over the Anthropic API; authenticated with an ANTHROPIC_API_KEY.
+	BackendAnthropicAPI
+	// BackendVertex is the in-tenancy Vertex AI lane (org-API only), reached at a
+	// *-aiplatform.googleapis.com endpoint and authenticated with a short-lived GCP
+	// bearer token (NOT an ANTHROPIC_API_KEY, NOT the node metadata server).
+	BackendVertex
+)
 
 // InferenceBackend abstracts backend selection and the attended/unattended seam
 // (ARCHITECTURE.md §5; default ref: Vertex). It is the only seam whose traffic

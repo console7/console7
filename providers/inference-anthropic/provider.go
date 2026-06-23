@@ -51,9 +51,9 @@ func (p *Provider) Resolve(ctx context.Context, sel interfaces.InferenceSelectio
 		}
 		// Pinned to first-party Anthropic, structurally — a seat token can never be fronted by
 		// a gateway (DESIGN.md §3; GOAL.md tenet 7).
-		return interfaces.BackendEndpoint{Mode: interfaces.ModeSubscription, URL: FirstPartyBaseURL}, nil
+		return interfaces.BackendEndpoint{Mode: interfaces.ModeSubscription, URL: FirstPartyBaseURL, Kind: interfaces.BackendAnthropicAPI}, nil
 	case interfaces.ModeOrgAPI:
-		return interfaces.BackendEndpoint{Mode: interfaces.ModeOrgAPI, URL: p.orgAPIURL}, nil
+		return interfaces.BackendEndpoint{Mode: interfaces.ModeOrgAPI, URL: p.orgAPIURL, Kind: interfaces.BackendAnthropicAPI}, nil
 	default:
 		// ModeUnspecified or any unrecognised value: fail closed.
 		return interfaces.BackendEndpoint{}, errors.New("inferenceanthropic: inference mode unspecified or unrecognised — refusing to default")

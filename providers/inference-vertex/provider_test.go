@@ -85,6 +85,51 @@ func TestResolve_Seam(t *testing.T) {
 	}
 }
 
+// TestResolve_VertexLaneFacts asserts a resolved org-API endpoint carries the Vertex lane
+// discriminator (Kind == BackendVertex) and the routing facts the wrapped engine needs
+// (ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION): the configured project, the region for a
+// regional host, and "global" for the location-independent endpoint. These are facts, not
+// secrets — Mode alone cannot tell a Vertex org route from a direct-Anthropic org route.
+func TestResolve_VertexLaneFacts(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         Config
+		wantProject string
+		wantRegion  string
+	}{
+		{"regional", Config{ProjectID: "proj-a", Region: "us-east5"}, "proj-a", "us-east5"},
+		{"global", Config{ProjectID: "proj-b", Global: true}, "proj-b", "global"},
+		// A PSC/VPC-SC override carries the adopter's region through as CLOUD_ML_REGION...
+		{"override with region", Config{ProjectID: "proj-c", Region: "us-east5", EndpointBaseURL: "https://us-east5-aiplatform.vpc.p.googleapis.com"}, "proj-c", "us-east5"},
+		// ...and an override with no region yields an empty CLOUD_ML_REGION (the adopter's call).
+		{"override no region", Config{ProjectID: "proj-d", EndpointBaseURL: "https://aiplatform.vpc.p.googleapis.com"}, "proj-d", ""},
+		// An override set alongside Global takes the override path: the region stays the adopter's
+		// value, NOT forced to "global" (precedence override→Global→regional).
+		{"override beats global", Config{ProjectID: "proj-e", Global: true, Region: "us-west1", EndpointBaseURL: "https://x.vpc.p.googleapis.com"}, "proj-e", "us-west1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(tc.cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ep, err := p.Resolve(context.Background(), interfaces.InferenceSelection{Mode: interfaces.ModeOrgAPI})
+			if err != nil {
+				t.Fatalf("Resolve(ModeOrgAPI): %v", err)
+			}
+			if ep.Kind != interfaces.BackendVertex {
+				t.Errorf("Kind = %v, want BackendVertex", ep.Kind)
+			}
+			if ep.VertexProjectID != tc.wantProject {
+				t.Errorf("VertexProjectID = %q, want %q", ep.VertexProjectID, tc.wantProject)
+			}
+			if ep.VertexRegion != tc.wantRegion {
+				t.Errorf("VertexRegion = %q, want %q", ep.VertexRegion, tc.wantRegion)
+			}
+		})
+	}
+}
+
 // TestResolve_ContextCancelled asserts a cancelled context is honoured before any routing.
 func TestResolve_ContextCancelled(t *testing.T) {
 	p := mustNew(t, Config{ProjectID: "p", Region: "us-east5"})

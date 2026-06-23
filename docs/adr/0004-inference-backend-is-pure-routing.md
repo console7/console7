@@ -118,6 +118,28 @@ axis orthogonal to the control-plane cloud.** Concretely:
 - Bedrock and non-GCP inference backends remain future/out-of-tree; this ADR records the shape
   they will take, not their delivery.
 
+## Amendment — 2026-06-23 (PR-C1, Phase-1 EXIT Vertex lane)
+
+The decision (pure routing; inference cloud orthogonal to the control-plane cloud) stands
+unchanged. One factual detail above is now narrower than the shipped type: the contract output
+is no longer literally `BackendEndpoint{Mode, URL}`. To let a consumer (the CloudProvider
+rendering engine env + selecting the credential type) tell the **Vertex** lane from the
+**direct-Anthropic** lane — which `Mode` alone cannot, since both the in-tenancy Vertex route and
+the direct-Anthropic org route are `ModeOrgAPI` — `BackendEndpoint` gained:
+
+- `Kind BackendKind` — the concrete lane (`BackendAnthropicAPI` / `BackendVertex`); and
+- `VertexProjectID` / `VertexRegion` — the Vertex routing **facts** the wrapped engine needs
+  (`ANTHROPIC_VERTEX_PROJECT_ID` / `CLOUD_ML_REGION`), `"global"` for the location-independent
+  endpoint.
+
+This does **not** weaken "pure routing": the new fields are configuration-derived routing facts,
+not credentials, no client, no network call. They are the orthogonal *lane* axis the
+"orthogonal axes" framing already anticipated, sitting beside the *credential-class* axis
+(`Mode`). The Vertex credential (a short-lived GCP bearer token) still travels the separate
+`SecretsProvider` injection seam, never this struct. Read every "the seam's whole output is a
+URL" phrasing above as "the seam's whole output is a set of non-secret routing facts (endpoint
+URL + lane + the engine env facts for that lane)."
+
 ## Links
 
 - `docs/adr/0001-language.md` — the ADR that established this record format.

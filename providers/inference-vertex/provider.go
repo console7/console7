@@ -12,8 +12,14 @@ import (
 // route exclusively; the subscription route is refused (see doc.go).
 type Provider struct {
 	// endpointURL is the resolved ModeOrgAPI Vertex endpoint (regional host, GlobalHost, or
-	// a validated PSC/VPC-SC override). It is the only state the router carries.
+	// a validated PSC/VPC-SC override).
 	endpointURL string
+	// projectID and region are the Vertex routing FACTS the wrapped engine needs
+	// (ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION). region is "global" for the
+	// location-independent endpoint; for a PSC/VPC-SC override it is the configured region (or
+	// empty if the adopter set none). Neither is a credential.
+	projectID string
+	region    string
 }
 
 // Compile-time assertion that Provider satisfies the seam.
@@ -40,7 +46,13 @@ func (p *Provider) Resolve(ctx context.Context, sel interfaces.InferenceSelectio
 		// Vertex cannot back a subscription seat — refuse outright, never downgrade to org-API.
 		return interfaces.BackendEndpoint{}, errors.New("inferencevertex: subscription refused — Vertex is an org-API in-tenancy backend; a subscription credential does not route through Vertex (use the direct-Anthropic backend for attended subscription sessions)")
 	case interfaces.ModeOrgAPI:
-		return interfaces.BackendEndpoint{Mode: interfaces.ModeOrgAPI, URL: p.endpointURL}, nil
+		return interfaces.BackendEndpoint{
+			Mode:            interfaces.ModeOrgAPI,
+			URL:             p.endpointURL,
+			Kind:            interfaces.BackendVertex,
+			VertexProjectID: p.projectID,
+			VertexRegion:    p.region,
+		}, nil
 	default:
 		// ModeUnspecified or any unrecognised value: fail closed.
 		return interfaces.BackendEndpoint{}, errors.New("inferencevertex: inference mode unspecified or unrecognised — refusing to default")

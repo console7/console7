@@ -10,5 +10,8 @@ func New(cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{endpointURL: cfg.EndpointBaseURL}, nil
+	// normalize has resolved cfg.Region to the engine's CLOUD_ML_REGION value: the configured region
+	// for a regional host, "global" for the location-independent endpoint, or the adopter's value
+	// (possibly empty) for a PSC/VPC-SC override.
+	return &Provider{endpointURL: cfg.EndpointBaseURL, projectID: cfg.ProjectID, region: cfg.Region}, nil
 }

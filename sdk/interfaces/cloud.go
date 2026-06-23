@@ -67,6 +67,27 @@ type EngineTask struct {
 	// Timeout bounds the engine run. The implementation MUST cap it to the sandbox's remaining
 	// lifetime and MUST NOT let a run outlive the session deadline (ephemeral by default; tenet 5).
 	Timeout time.Duration
+	// InferenceBackend is the resolved inference LANE (BackendAnthropicAPI or BackendVertex), set by
+	// the orchestrator from the resolved BackendEndpoint.Kind. The implementation renders the
+	// engine-invocation env from it: the Vertex lane sets CLAUDE_CODE_USE_VERTEX plus the project/region
+	// below and authenticates with an injected short-lived GCP bearer token; the Anthropic-API lane
+	// authenticates with an injected ANTHROPIC_API_KEY. It is a routing FACT, never a credential.
+	//
+	// SECURITY: unlike BackendEndpoint.Kind on a RESOLVE OUTPUT — where BackendUnspecified is INVALID
+	// (a resolver must name the lane) — the zero value HERE names the DEFAULT Anthropic-API lane.
+	// Vertex is reached ONLY by an explicit BackendVertex, so a lane that was never threaded degrades
+	// to the Anthropic-API lane, NEVER silently to Vertex. This is not a fail-open on the credential
+	// boundary: the egress perimeter is narrowed to the RESOLVED endpoint URL independently (tenet 3),
+	// so a mis-threaded lane fails CLOSED at the boundary (the engine cannot reach a host the perimeter
+	// did not open) rather than leaking or confusing a credential. The implementation MUST fail closed
+	// if InferenceBackend is BackendVertex but VertexProjectID/VertexRegion are empty — a
+	// half-specified Vertex lane is never run.
+	InferenceBackend BackendKind
+	// VertexProjectID and VertexRegion are the Vertex routing facts (empty unless InferenceBackend is
+	// BackendVertex; VertexRegion is "global" for the location-independent endpoint). They are emitted
+	// to the sandbox as ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION and are NOT secrets.
+	VertexProjectID string
+	VertexRegion    string
 }
 
 // EngineResult is what a completed engine run yields back to the control plane: the PROPOSAL the

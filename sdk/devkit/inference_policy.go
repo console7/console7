@@ -70,12 +70,12 @@ func (i *PolicyInference) Resolve(ctx context.Context, sel interfaces.InferenceS
 		if i.policy.SubscriptionEndpoint == "" {
 			return interfaces.BackendEndpoint{}, errors.New("devkit: subscription endpoint not configured")
 		}
-		return interfaces.BackendEndpoint{Mode: interfaces.ModeSubscription, URL: i.policy.SubscriptionEndpoint}, nil
+		return interfaces.BackendEndpoint{Mode: interfaces.ModeSubscription, URL: i.policy.SubscriptionEndpoint, Kind: interfaces.BackendAnthropicAPI}, nil
 	case interfaces.ModeOrgAPI:
 		if i.policy.OrgAPIEndpoint == "" {
 			return interfaces.BackendEndpoint{}, errors.New("devkit: org-API endpoint not configured")
 		}
-		return interfaces.BackendEndpoint{Mode: interfaces.ModeOrgAPI, URL: i.policy.OrgAPIEndpoint}, nil
+		return interfaces.BackendEndpoint{Mode: interfaces.ModeOrgAPI, URL: i.policy.OrgAPIEndpoint, Kind: interfaces.BackendAnthropicAPI}, nil
 	default:
 		// ModeUnspecified or any unrecognised value: fail closed.
 		return interfaces.BackendEndpoint{}, errors.New("devkit: inference mode unspecified or unrecognised — refusing to default")

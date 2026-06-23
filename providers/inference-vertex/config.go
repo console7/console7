@@ -68,11 +68,23 @@ func (c Config) normalize() (Config, error) {
 		if err := validateEndpointOverride(c.EndpointBaseURL); err != nil {
 			return Config{}, err
 		}
+		// Region (if set) is NOT interpolated into the override host, but it still becomes the
+		// engine's CLOUD_ML_REGION, so a malformed value must fail at construction rather than ship
+		// a garbage region into the sandbox. Empty is allowed — an adopter's private endpoint may
+		// not need a region hint (their endpoint, their call); CLOUD_ML_REGION is then empty.
+		if c.Region != "" && !regionPattern.MatchString(c.Region) {
+			return Config{}, fmt.Errorf("inferencevertex: Config.Region %q is not a valid GCP location for the engine's CLOUD_ML_REGION", c.Region)
+		}
 		return c, nil
 	}
 
 	if c.Global {
+		// "global" is the engine's CLOUD_ML_REGION for the location-independent endpoint. Resolving
+		// it here (rather than in New) keeps the precedence override→Global→regional authoritative,
+		// so a config that set BOTH an override and Global takes the override path above and never
+		// reaches here — its region stays the adopter's value, not "global".
 		c.EndpointBaseURL = GlobalHost
+		c.Region = "global"
 		return c, nil
 	}
 
