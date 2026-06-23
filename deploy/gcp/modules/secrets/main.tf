@@ -56,6 +56,31 @@ resource "google_kms_crypto_key_iam_member" "workload_encrypt_decrypt" {
   member        = "serviceAccount:${google_service_account.workload.email}"
 }
 
+# --- Inference-lane token mint (lands with secrets-gcp InjectInferenceCredential) ---
+
+# IAM Credentials API: the provider mints a short-lived GCP bearer for the in-tenancy inference lane
+# (Vertex) via GenerateAccessToken, so the sandbox authenticates from a delivered token instead of
+# the (denied) node metadata server. cloudkms is a bootstrap prerequisite; enable this here.
+resource "google_project_service" "iamcredentials" {
+  project = var.project_id
+  service = "iamcredentials.googleapis.com"
+  # Don't disable on destroy — other project users may depend on it and re-enabling is slow.
+  disable_on_destroy = false
+}
+
+# SELF-IMPERSONATION: the workload SA mints short-lived, scope-capped access tokens for ITSELF
+# (the control plane already runs AS this SA via GKE Workload Identity; GenerateAccessToken downscopes
+# that identity to a deadline-capped token the sandbox uses for Vertex). tokenCreator is granted on
+# THIS one SA (resource = the SA itself), never project-wide, so the mint capability is scoped to a
+# single identity. The token carries cloud-platform scope but the SA's only Vertex binding is
+# aiplatform.endpoints.predict (deploy/gcp/modules/inference-vertex), so the scope grants no more
+# than that. Omit this binding and the Vertex lane stays fail-closed (the provider refuses to mint).
+resource "google_service_account_iam_member" "workload_self_token_creator" {
+  service_account_id = google_service_account.workload.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.workload.email}"
+}
+
 # --- Secret Manager: API + the provider's least-privilege roles (lands with secrets-gcp) ---
 
 # The provider stores each user's sealed payload (KEK-wrapped DEK + GCM-sealed token) as one

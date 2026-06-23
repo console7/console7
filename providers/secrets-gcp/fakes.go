@@ -202,6 +202,10 @@ type InMemoryAccessTokenMinter struct {
 	// time.Now; a white-box test sharing the provider's injected clock sets it so the provider's
 	// defensive expiry-cap check (which uses the provider's clock) compares like-for-like.
 	now func() time.Time
+	// forceExpiry, when set, overrides the returned expiry (default now()+lifetime), so a test can
+	// drive the provider's implausible-expiry fail-closed path (epoch/past/too-far-future).
+	forceExpiry    time.Time
+	useForceExpiry bool
 }
 
 var _ AccessTokenMinter = (*InMemoryAccessTokenMinter)(nil)
@@ -225,6 +229,15 @@ func (m *InMemoryAccessTokenMinter) LastLifetime() time.Duration {
 	return m.lastLifetime
 }
 
+// SetExpiry overrides the returned expiry, to exercise the provider's implausible-expiry fail-closed
+// path (e.g. the Unix epoch a nil protobuf ExpireTime decodes to, or a far-future value).
+func (m *InMemoryAccessTokenMinter) SetExpiry(t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forceExpiry = t
+	m.useForceExpiry = true
+}
+
 // MintAccessToken records the request and returns the fixed token with expiry now+lifetime.
 func (m *InMemoryAccessTokenMinter) MintAccessToken(ctx context.Context, scopes []string, lifetime time.Duration) ([]byte, time.Time, error) {
 	if err := ctx.Err(); err != nil {
@@ -240,7 +253,11 @@ func (m *InMemoryAccessTokenMinter) MintAccessToken(ctx context.Context, scopes 
 	}
 	out := make([]byte, len(m.token))
 	copy(out, m.token)
-	return out, m.now().Add(lifetime), nil
+	expiry := m.now().Add(lifetime)
+	if m.useForceExpiry {
+		expiry = m.forceExpiry
+	}
+	return out, expiry, nil
 }
 
 // denyMinter is the fail-closed AccessTokenMinter New wires until a real workload-SA token mint is

@@ -307,6 +307,16 @@ func TestInjectInferenceCredential(t *testing.T) {
 	}
 	minter.SetFail(false)
 
+	// An implausible reported expiry fails closed: the Unix epoch (what a nil protobuf ExpireTime
+	// decodes to — NOT Go's zero time), and a far-future value that outlives the requested lifetime.
+	for _, badExpiry := range []time.Time{time.Unix(0, 0), fixedNow.Add(2 * time.Hour)} {
+		minter.SetExpiry(badExpiry)
+		if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline}); err == nil {
+			t.Errorf("expected fail-closed on an implausible expiry %v", badExpiry)
+		}
+	}
+	minter.useForceExpiry = false // back to the truthful now+lifetime expiry.
+
 	// A revoked subject is refused (offboarding backstop), even with a wired minter + owned sandbox.
 	if err := p.RevokeSubject(ctx, "alice"); err != nil {
 		t.Fatal(err)
