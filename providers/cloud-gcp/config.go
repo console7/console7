@@ -62,8 +62,17 @@ type Config struct {
 	// provision/destroy needs no model), and when empty no ANTHROPIC_MODEL is rendered (the engine
 	// falls back to its default, which currently 404s). The Anthropic API KEY is NOT set here: it is
 	// a secret injected into the pod at run time (the SecretsProvider injection path), never rendered
-	// into the pod spec. Vertex routing env is a separate lane (B12).
+	// into the pod spec. Vertex routing env is a separate lane (see VertexModel).
 	AnthropicModel string
+	// VertexModel pins the engine's model on the VERTEX lane. Vertex publisher model ids use the
+	// "@"-date form (e.g. "claude-haiku-4-5@20251001" or "<id>@latest"), which is a DIFFERENT
+	// namespace from the Anthropic-API "-"-snapshot form in AnthropicModel — they are not
+	// interchangeable, so the Vertex lane carries its own pin. It is optional at construction
+	// (lifecycle provision/destroy needs no model) and used only when a session resolves to the
+	// Vertex lane; normalize rejects a value that is not in the "@"-form (so an Anthropic-API id
+	// fat-fingered into this slot fails at construction, not as a confusing 404 in the sandbox).
+	// Like AnthropicModel it is a routing fact, never a credential.
+	VertexModel string
 }
 
 // namePrefixRe bounds the prefix so derived Kubernetes object names ("<prefix>-sb-<32 hex>")
@@ -77,6 +86,24 @@ var namePrefixRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,17}[a-z0-9])?$`)
 // the bytes the kubelet runs. A ref MAY carry both a tag and a digest ("repo:tag@sha256:…"); the
 // digest is always last, so anchoring it at the end is sufficient.
 var sandboxImageRe = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
+
+// gcpProjectRe bounds a GCP project id (6-30 chars: a lowercase letter, then lowercase
+// letters/digits/hyphens, no trailing hyphen). The Vertex lane interpolates the task's
+// ANTHROPIC_VERTEX_PROJECT_ID into the engine's env in engineRunScript, so validating the charset
+// here is the shell-injection guard (it is a routing fact, not a credential, but still untrusted input).
+var gcpProjectRe = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
+
+// vertexRegionRe bounds the engine's CLOUD_ML_REGION to GCP's location grammar plus the literal
+// "global" (the location-independent endpoint). Like gcpProjectRe it is the shell-injection guard for
+// the value engineRunScript interpolates into the engine env.
+var vertexRegionRe = regexp.MustCompile(`^(global|[a-z]+-[a-z]+[0-9]+)$`)
+
+// vertexModelRe bounds a Vertex publisher model id to the "@"-date form GCP serves
+// ("<model>@YYYYMMDD" or "<model>@latest"), e.g. "claude-haiku-4-5@20251001". The "@" is
+// mandatory: it both distinguishes a Vertex id from the Anthropic-API "-"-snapshot form (a
+// fat-fingered API id has no "@" and is rejected) and, with the strict charset, keeps the value
+// shell-safe when engineRunScript interpolates it into the engine's ANTHROPIC_MODEL env.
+var vertexModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*@([0-9]{8}|latest)$`)
 
 // normalize applies defaults and validates. It returns the effective config so New does not
 // mutate the caller's value.
@@ -113,5 +140,9 @@ func (c Config) normalize() (Config, error) {
 		return Config{}, fmt.Errorf("cloudgcp: Config.SandboxImage must be digest-pinned (…@sha256:<64 hex>), not tag-only — a tag is mutable and is not what the kubelet content-addresses; got %q", c.SandboxImage)
 	}
 	c.AnthropicModel = strings.TrimSpace(c.AnthropicModel)
+	c.VertexModel = strings.TrimSpace(c.VertexModel)
+	if c.VertexModel != "" && !vertexModelRe.MatchString(c.VertexModel) {
+		return Config{}, fmt.Errorf("cloudgcp: Config.VertexModel %q must be a Vertex publisher model id in the \"@\"-date form (e.g. \"claude-haiku-4-5@20251001\" or \"<id>@latest\"), not the Anthropic-API \"-\"-snapshot form", c.VertexModel)
+	}
 	return c, nil
 }

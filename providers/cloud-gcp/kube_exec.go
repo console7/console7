@@ -396,15 +396,26 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	}
 
 	// 3. Run the genuine engine headless UNDER THE DELIVERED CREDENTIAL (the B9 file→env bridge). The
-	// CredentialDeliverer (B5) wrote the short-lived org-API key to credentialPath; engineRunScript
-	// reads it FROM THAT IN-POD FILE and exports it as ANTHROPIC_API_KEY for the claude process only —
-	// so the secret value is never in the kubectl argv (control side), the pod spec (etcd), claude's
-	// own argv, or this adapter's logs. It fails CLOSED if the credential is absent/empty (the engine
-	// must not run unauthenticated). The untrusted prompt is still passed over STDIN (claude inherits
-	// fd 0), so a shell can never re-split it into extra argv; the engine reads the locked
-	// managed-settings itself (the verified file is the authority; default permission mode belt-and-braces).
+	// CredentialDeliverer (B5) wrote the short-lived credential to credentialPath; engineRunScript
+	// reads it FROM THAT IN-POD FILE and exports it for the claude process only — as ANTHROPIC_API_KEY
+	// on the Anthropic-API lane, or as the Vertex GCP bearer on the Vertex lane (task.InferenceBackend
+	// selects). Either way the secret value is never in the kubectl argv (control side), the pod spec
+	// (etcd), claude's own argv, or this adapter's logs. It fails CLOSED if the credential is
+	// absent/empty (the engine must not run unauthenticated) and on a half-specified Vertex lane. The
+	// untrusted prompt is still passed over STDIN (claude inherits fd 0), so a shell can never re-split
+	// it into extra argv; the engine reads the locked managed-settings itself (the verified file is the
+	// authority; default permission mode belt-and-braces).
+	script, err := engineRunScript(credentialPath, engineLane{
+		kind:          task.InferenceBackend,
+		vertexProject: task.VertexProjectID,
+		vertexRegion:  task.VertexRegion,
+		vertexModel:   k.cfg.VertexModel,
+	})
+	if err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: build engine run script: %w", err)
+	}
 	if _, err := k.execIn(ctx, h, []byte(task.Prompt),
-		"/bin/sh", "-c", engineRunScript(credentialPath)); err != nil {
+		"/bin/sh", "-c", script); err != nil {
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: run engine: %w", err)
 	}
 
@@ -559,13 +570,73 @@ const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false p
 // A function (not a const) so the fail-closed behaviour is testable against a temp path without a
 // cluster (the runner is integration-only). The prompt arrives on STDIN, which claude inherits (the
 // cat/test read the file, not STDIN). credPath is a trusted no-space constant (credentialPath).
-func engineRunScript(credPath string) string {
-	return `set -eu
+func engineRunScript(credPath string, lane engineLane) (string, error) {
+	read := `set -eu
 test -s ` + credPath + ` || { echo "cloudgcp: engine credential absent/empty at ` + credPath + ` (fail closed)" >&2; exit 1; }
 _c7cred="$(cat ` + credPath + `)"
 [ -n "$_c7cred" ] || { echo "cloudgcp: engine credential empty at ` + credPath + ` (fail closed)" >&2; exit 1; }
-ANTHROPIC_API_KEY="$_c7cred" claude -p --permission-mode default`
+`
+	switch lane.kind {
+	case interfaces.BackendVertex:
+		// Vertex lane: the delivered credential is a short-lived GCP bearer token (NOT an
+		// ANTHROPIC_API_KEY), and the engine reaches Vertex with it WITHOUT ever touching the node
+		// metadata server (denied to the sandbox). Validate the non-secret routing facts before
+		// interpolating them into the program — fail closed on a half-specified Vertex lane (the
+		// EngineTask SECURITY contract) and keep the script shell-safe (the values are untrusted input).
+		if !gcpProjectRe.MatchString(lane.vertexProject) {
+			return "", fmt.Errorf("cloudgcp: Vertex lane requires a valid ANTHROPIC_VERTEX_PROJECT_ID, got %q (fail closed)", lane.vertexProject)
+		}
+		if !vertexRegionRe.MatchString(lane.vertexRegion) {
+			return "", fmt.Errorf("cloudgcp: Vertex lane requires a valid CLOUD_ML_REGION, got %q (fail closed)", lane.vertexRegion)
+		}
+		if !vertexModelRe.MatchString(lane.vertexModel) {
+			return "", fmt.Errorf("cloudgcp: Vertex lane requires Config.VertexModel (the @-form Vertex model id), got %q (fail closed)", lane.vertexModel)
+		}
+		// R-V1: the engine authenticates to Vertex via Google ADC by default, which would hit the
+		// (denied) metadata server. The binary exposes CLAUDE_CODE_SKIP_VERTEX_AUTH (skip the ADC
+		// dance) and CLOUDSDK_AUTH_ACCESS_TOKEN (the gcloud-standard pre-minted bearer) — the
+		// best-evidence pairing for feeding our minted token. The EXACT lever for the PINNED engine
+		// version MUST be confirmed in the live spike; it is isolated in the named constants below so
+		// that is a one-line change. The token is read from the in-pod file (never argv/pod-spec/logs).
+		return read +
+			vertexUseEnv + "=1 \\\n" +
+			vertexSkipAuthEnv + "=1 \\\n" +
+			vertexProjectEnv + "='" + lane.vertexProject + "' \\\n" +
+			vertexRegionEnv + "='" + lane.vertexRegion + "' \\\n" +
+			modelEnv + "='" + lane.vertexModel + "' \\\n" +
+			vertexAccessTokenEnv + `="$_c7cred" \` + "\n" +
+			`claude -p --permission-mode default`, nil
+	case interfaces.BackendAnthropicAPI, interfaces.BackendUnspecified:
+		// Default Anthropic-API lane: the delivered credential is the ANTHROPIC_API_KEY; the model is
+		// the pod-env ANTHROPIC_MODEL (cfg.AnthropicModel, rendered at provision in renderSandboxPod).
+		return read + `ANTHROPIC_API_KEY="$_c7cred" claude -p --permission-mode default`, nil
+	default:
+		return "", fmt.Errorf("cloudgcp: unknown inference lane %d (fail closed)", lane.kind)
+	}
 }
+
+// engineLane carries the per-session inference-lane facts engineRunScript needs to build the engine's
+// auth + env. The Anthropic-API lane needs nothing beyond the credential file; the Vertex lane needs
+// the (non-secret) project/region/model facts to set the engine's Vertex env. kind comes from the
+// resolved BackendEndpoint (threaded onto EngineTask); the model comes from cloud-gcp Config.
+type engineLane struct {
+	kind          interfaces.BackendKind
+	vertexProject string
+	vertexRegion  string
+	vertexModel   string
+}
+
+// Engine env levers. Names are isolated as constants so the R-V1 bearer-token mechanism (confirmed
+// against the pinned engine in the live spike) is a one-line change, and so the render/exec tests
+// pin the exact shape.
+const (
+	vertexUseEnv         = "CLAUDE_CODE_USE_VERTEX"
+	vertexSkipAuthEnv    = "CLAUDE_CODE_SKIP_VERTEX_AUTH"
+	vertexProjectEnv     = "ANTHROPIC_VERTEX_PROJECT_ID"
+	vertexRegionEnv      = "CLOUD_ML_REGION"
+	vertexAccessTokenEnv = "CLOUDSDK_AUTH_ACCESS_TOKEN" //nolint:gosec // G101 false positive: an env var NAME, not a secret value; RISKS R-9
+	modelEnv             = "ANTHROPIC_MODEL"
+)
 
 // kubeCredentialDeliverer realises CredentialDeliverer: it writes credential material into a live
 // sandbox pod's memory volume via `kubectl exec`, feeding the material over STDIN (never argv) so it
@@ -822,6 +893,10 @@ func renderSandboxPod(nsID string, cfg Config, spec interfaces.SandboxSpec, prox
 		}
 	}
 	if cfg.AnthropicModel != "" {
+		// The Anthropic-API lane's model pin. On the VERTEX lane engineRunScript re-sets ANTHROPIC_MODEL
+		// (the @-form VertexModel) as a command-prefix env on `claude`, which OVERRIDES this inherited
+		// pod-env value — so this is intentionally shadowed on a Vertex session, not a conflict. Do not
+		// "dedupe" the two: they pin different model-id namespaces for different lanes.
 		fmt.Fprintf(&env, "        - name: ANTHROPIC_MODEL\n          value: %s\n", jsonScalar(cfg.AnthropicModel))
 	}
 	envBlock := ""

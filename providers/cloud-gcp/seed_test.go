@@ -73,28 +73,95 @@ func TestIsProtectedBranch(t *testing.T) {
 }
 
 func TestEngineRunScript_Shape(t *testing.T) {
-	s := engineRunScript(credentialPath)
+	// The Anthropic-API lane (and the zero value, which defaults to it).
+	for _, kind := range []interfaces.BackendKind{interfaces.BackendAnthropicAPI, interfaces.BackendUnspecified} {
+		s, err := engineRunScript(credentialPath, engineLane{kind: kind})
+		if err != nil {
+			t.Fatalf("engineRunScript(kind=%d): %v", kind, err)
+		}
+		for _, want := range []string{
+			"test -s /run/console7/credential",          // fail CLOSED unless the credential is present + non-empty
+			`_c7cred="$(cat /run/console7/credential)"`, // read ONCE, standalone (set -e aborts a failed read)
+			`[ -n "$_c7cred" ]`,                         // ...and explicitly reject an empty value (TOCTOU close)
+			"exit 1",                                    // never runs the engine unauthenticated
+			`ANTHROPIC_API_KEY="$_c7cred" claude -p --permission-mode default`, // injected by NAME, not argv
+		} {
+			if !strings.Contains(s, want) {
+				t.Errorf("Anthropic lane (kind=%d) missing %q\n---\n%s", kind, want, s)
+			}
+		}
+		if strings.Contains(s, "CLAUDE_CODE_USE_VERTEX") {
+			t.Errorf("Anthropic lane must NOT set Vertex env:\n%s", s)
+		}
+		assertCredFailClosedOrder(t, s)
+	}
+}
+
+func TestEngineRunScript_VertexLane(t *testing.T) {
+	s, err := engineRunScript(credentialPath, engineLane{
+		kind:          interfaces.BackendVertex,
+		vertexProject: "acme-prod-123",
+		vertexRegion:  "us-east5",
+		vertexModel:   "claude-haiku-4-5@20251001",
+	})
+	if err != nil {
+		t.Fatalf("Vertex lane: %v", err)
+	}
 	for _, want := range []string{
-		"test -s /run/console7/credential",          // fail CLOSED unless the credential is present + non-empty
-		`_c7cred="$(cat /run/console7/credential)"`, // read ONCE, standalone (set -e aborts a failed read)
-		`[ -n "$_c7cred" ]`,                         // ...and explicitly reject an empty value (TOCTOU close)
-		"exit 1",                                    // never runs the engine unauthenticated
-		`ANTHROPIC_API_KEY="$_c7cred" claude -p --permission-mode default`, // injected by NAME, not argv
+		"CLAUDE_CODE_USE_VERTEX=1",
+		"CLAUDE_CODE_SKIP_VERTEX_AUTH=1",
+		`ANTHROPIC_VERTEX_PROJECT_ID='acme-prod-123'`,
+		`CLOUD_ML_REGION='us-east5'`,
+		`ANTHROPIC_MODEL='claude-haiku-4-5@20251001'`,
+		`CLOUDSDK_AUTH_ACCESS_TOKEN="$_c7cred"`, // the minted GCP bearer, read from the in-pod file
+		"claude -p --permission-mode default",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("engineRunScript missing %q\n---\n%s", want, s)
+			t.Errorf("Vertex lane missing %q\n---\n%s", want, s)
 		}
 	}
-	// The value must be injected by NAME on the claude process, NOT a `--`-flag (which would land in
-	// /proc/<pid>/cmdline), and the credential must not be re-read AFTER `claude` (the env carries it).
-	claudeAt := strings.Index(s, "claude -p")
-	if claudeAt < 0 || strings.Contains(s[claudeAt:], "$(cat") || strings.Contains(s, "--api-key") {
-		t.Errorf("credential must reach claude only via the prefix env var, never argv/flag/re-read:\n%s", s)
+	// The Vertex lane authenticates with a GCP bearer, NEVER an ANTHROPIC_API_KEY, and the token still
+	// comes from the in-pod file (never argv), with the same fail-closed read order as the Anthropic lane.
+	if strings.Contains(s, "ANTHROPIC_API_KEY") {
+		t.Errorf("Vertex lane must NOT set ANTHROPIC_API_KEY:\n%s", s)
 	}
-	// The fail-closed structure is what makes it safe under dash (where a FAILED prefix command-
-	// substitution does NOT trip set -e): assert the credential is read as a STANDALONE assignment
-	// (set -e aborts a failed standalone read) followed by an explicit non-empty guard BEFORE the
-	// engine line — so an absent/empty/raced credential can never reach a running engine.
+	if claudeAt := strings.Index(s, "claude -p"); claudeAt < 0 || strings.Contains(s[claudeAt:], "$(cat") {
+		t.Errorf("Vertex token must reach claude via the prefix env, never re-read after claude:\n%s", s)
+	}
+	assertCredFailClosedOrder(t, s)
+}
+
+func TestEngineRunScript_VertexFailClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		lane engineLane
+	}{
+		{"missing project", engineLane{kind: interfaces.BackendVertex, vertexRegion: "us-east5", vertexModel: "m@20251001"}},
+		{"missing region", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexModel: "m@20251001"}},
+		{"missing model", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5"}},
+		{"injection in project", engineLane{kind: interfaces.BackendVertex, vertexProject: "a'; rm -rf /; '", vertexRegion: "us-east5", vertexModel: "m@20251001"}},
+		{"api-format model", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "claude-haiku-4-5-20251001"}},
+		{"unknown lane", engineLane{kind: interfaces.BackendKind(99)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := engineRunScript(credentialPath, tc.lane); err == nil {
+				t.Error("expected fail-closed error, got nil")
+			}
+		})
+	}
+}
+
+// assertCredFailClosedOrder asserts the safe-under-dash credential read order: standalone read -> a
+// non-empty guard -> the engine, and that the credential reaches claude only via a prefix env var
+// (never a --flag in /proc/<pid>/cmdline).
+func assertCredFailClosedOrder(t *testing.T, s string) {
+	t.Helper()
+	claudeAt := strings.Index(s, "claude -p")
+	if claudeAt < 0 || strings.Contains(s, "--api-key") {
+		t.Errorf("credential must reach claude only via the prefix env var, never argv/flag:\n%s", s)
+		return
+	}
 	readAt := strings.Index(s, `_c7cred="$(cat`)
 	guardAt := strings.Index(s, `[ -n "$_c7cred" ]`)
 	if readAt < 0 || guardAt < 0 || readAt >= guardAt || guardAt >= claudeAt {
