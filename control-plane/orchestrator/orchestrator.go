@@ -259,6 +259,12 @@ func (o *Orchestrator) resolveInference(s *session) error {
 	if !onAllowlist(endpoint.URL, s.profile.EgressAllowlist) {
 		return s.abort(fmt.Errorf("resolved endpoint %q is not on the egress allowlist", endpoint.URL), "egress-check")
 	}
+	// Fail closed on a half-specified Vertex lane: the CloudProvider needs the project AND region to
+	// render the engine's Vertex env (a missing region would ship an empty CLOUD_ML_REGION the engine
+	// rejects in-sandbox), so reject it here at the authoritative point rather than deep in the run.
+	if endpoint.Kind == interfaces.BackendVertex && (endpoint.VertexProjectID == "" || endpoint.VertexRegion == "") {
+		return s.abort(fmt.Errorf("vertex endpoint is missing project/region facts (project=%q region=%q)", endpoint.VertexProjectID, endpoint.VertexRegion), "inference-resolve")
+	}
 	s.endpoint = endpoint
 	if err := s.stamp("inference-resolved", endpoint.URL); err != nil {
 		return s.abort(err, "inference-evidence")
@@ -277,14 +283,20 @@ func (o *Orchestrator) resolveInference(s *session) error {
 	}
 
 	// 6. Inject the session's inference credential into its OWN sandbox BY REFERENCE — the control
-	// plane never carries the plaintext. Either the user's already-vaulted subscription token
-	// (attended opt-in; sealed under their key at login) or the adopter's shared org API credential
-	// (every other session — unattended/orchestrated/headless, or attended without subscription;
-	// tenet 2). Each seam verifies the owning sandbox and fails closed.
-	if useSubscription {
-		return s.injectSubscription()
+	// plane never carries the plaintext. The lane decides which credential: the in-tenancy Vertex
+	// backend gets a freshly-MINTED short-lived GCP bearer (BackendVertex); an attended opt-in gets
+	// the user's already-vaulted subscription token; every other session gets the adopter's shared
+	// org API credential (unattended/orchestrated/headless, or attended without subscription; tenet
+	// 2). Each seam verifies the owning sandbox and fails closed.
+	switch s.endpoint.Kind {
+	case interfaces.BackendVertex:
+		return s.injectInferenceCredential()
+	default:
+		if useSubscription {
+			return s.injectSubscription()
+		}
+		return s.injectOrgCredential()
 	}
-	return s.injectOrgCredential()
 }
 
 // injectSubscription injects the owner's vaulted subscription token into their attended sandbox. The
@@ -324,6 +336,24 @@ func (s *session) injectOrgCredential() error {
 	return nil
 }
 
+// injectInferenceCredential mints (inside the SecretsProvider) a short-lived GCP bearer for the
+// in-tenancy Vertex lane and injects it into the session's own sandbox. The control plane never sees
+// the token; the seam caps it to the session deadline and verifies the owning sandbox, failing closed.
+func (s *session) injectInferenceCredential() error {
+	if err := s.o.Broker.InjectInferenceCredential(s.ctx, interfaces.InferenceCredentialInjection{
+		Subject:         s.subject,
+		SessionID:       s.req.SessionID,
+		Sandbox:         s.sandbox,
+		SessionDeadline: s.deadline,
+	}); err != nil {
+		return s.abort(err, "inject-inference-credential")
+	}
+	if err := s.stamp("inference-credential-injected", s.sandbox.ID); err != nil {
+		return s.abort(err, "inference-credential-evidence")
+	}
+	return nil
+}
+
 // propose runs the genuine engine inside the sandbox via the Cloud seam, signs the digest of the
 // REAL commit it produced with the session NHI, and opens the change as a PR (the only outward
 // side-effect). Every failure path aborts.
@@ -348,6 +378,12 @@ func (o *Orchestrator) propose(s *session) error {
 		Branch:    s.req.Branch,
 		Prompt:    s.req.Prompt,
 		Timeout:   remaining,
+		// Thread the resolved inference lane so the CloudProvider renders the right engine env +
+		// credential type. The zero value (BackendAnthropicAPI/Unspecified) keeps the API-key lane;
+		// BackendVertex carries the (non-secret) project/region for the engine's Vertex env.
+		InferenceBackend: s.endpoint.Kind,
+		VertexProjectID:  s.endpoint.VertexProjectID,
+		VertexRegion:     s.endpoint.VertexRegion,
 	})
 	if err != nil {
 		return s.abort(err, "run-task")

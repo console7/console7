@@ -230,6 +230,32 @@ func TestBroker_InjectOrgCredential(t *testing.T) {
 	}
 }
 
+func TestBroker_InjectInferenceCredential(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	secrets := devkit.NewMemSecrets(reg)
+	ca := signing.NewDevCA()
+	b := broker.New(devkit.NewDevIdentity(nil, nil), secrets, devkit.NewMemSCM(time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	ctx := context.Background()
+	box := reg.Provision("alice", "s1")
+	deadline := time.Now().Add(15 * time.Minute)
+
+	// The broker forwards the facts; the seam mints + delivers a (fake) inference credential into the owner.
+	if err := b.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: box, SessionDeadline: deadline}); err != nil {
+		t.Fatalf("InjectInferenceCredential: %v", err)
+	}
+	if _, ok := reg.Injected(box); !ok {
+		t.Error("inference credential not injected into the owning sandbox")
+	}
+
+	// A broker missing the secrets seam fails closed (an error, never a panic).
+	nob := broker.New(devkit.NewDevIdentity(nil, nil), nil, devkit.NewMemSCM(time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	if err := nob.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: box, SessionDeadline: deadline}); err == nil {
+		t.Error("broker missing the secrets seam should fail closed")
+	}
+}
+
 type countingSecrets struct {
 	interfaces.SecretsProvider
 	mints int
