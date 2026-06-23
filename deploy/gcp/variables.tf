@@ -36,6 +36,17 @@ variable "kms_rotation_period" {
   }
 }
 
+variable "keybroker_kms_protection_level" {
+  type        = string
+  default     = "SOFTWARE"
+  description = "Protection level for the keybroker CA signing key (SOFTWARE or HSM). The signing root anchors the entire lineage chain — a Tier-1 PRODUCTION deploy SHOULD set HSM (see the RUNBOOK); SOFTWARE is the lower-cost dogfood/PoC default."
+
+  validation {
+    condition     = contains(["SOFTWARE", "HSM"], var.keybroker_kms_protection_level)
+    error_message = "keybroker_kms_protection_level must be SOFTWARE or HSM."
+  }
+}
+
 variable "sandbox_node_tag" {
   type        = string
   description = "Network tag the sandbox node pool (modules/gke, deferred) carries. The default-deny egress + metadata-deny firewall rules target this tag, so ONLY sandbox-tagged workloads are walled; the control-plane / egress-proxy nodes carry a different tag and keep their sanctioned NAT egress."

@@ -114,3 +114,19 @@ module "evidence" {
   retention_seconds              = var.evidence_retention_seconds
   is_locked                      = var.evidence_retention_locked
 }
+
+# Keybroker signing identity (ARCHITECTURE.md §6.4): the Cloud KMS asymmetric-sign key (EC P-256)
+# that is the cryptographic root of the lineage chain, in a key ring + service account DISTINCT from
+# the secrets substrate — so one identity cannot both read secrets and forge lineage. Unlike the
+# inference-vertex grant (which adds a verb to the one control-plane SA), signing gets its own SA:
+# §6.4 mandates a distinct signing identity. providers/keybroker-gcp consumes signing_key_version.
+# The APPLY identity already holds the KMS-admin / SA-admin / project-IAM perms (bootstrap.sh) the
+# secrets module's key ring + SA + key IAM use.
+module "keybroker_signing" {
+  source = "./modules/keybroker-signing"
+
+  project_id           = var.project_id
+  region               = var.region
+  name_prefix          = var.name_prefix
+  kms_protection_level = var.keybroker_kms_protection_level
+}
