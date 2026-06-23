@@ -166,6 +166,37 @@ func (m *MemSecrets) InjectOrgCredential(ctx context.Context, in interfaces.OrgC
 	return nil
 }
 
+// InjectInferenceCredential MINTS a short-lived (fake) inference credential and delivers it ONLY
+// into the session's own sandbox, modelling the production workload-identity token mint for the
+// in-tenancy backend (Vertex). It mints nothing the control plane sees, caps to the session
+// deadline, and fails closed on a missing/past deadline, a revoked subject, or a non-owning sandbox.
+func (m *MemSecrets) InjectInferenceCredential(ctx context.Context, in interfaces.InferenceCredentialInjection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if in.SessionDeadline.IsZero() || !in.SessionDeadline.After(m.now()) {
+		return errors.New("devkit: InjectInferenceCredential requires a SessionDeadline in the future")
+	}
+	m.mu.Lock()
+	revoked := m.revoked[in.Subject]
+	m.mu.Unlock()
+	if revoked {
+		return errors.New("devkit: refusing inference-credential injection for a revoked subject")
+	}
+	// Ownership gate (cheap fail-fast); the authoritative re-check is DeliverIfOwned below.
+	if !m.sandboxes.Owns(in.Sandbox, in.Subject, in.SessionID) {
+		return errors.New("devkit: sandbox does not belong to the subject's session")
+	}
+	// The "mint": a deterministic non-empty fake bearer. A real provider mints this from the
+	// adopter's identity platform; the control plane never sees it either way.
+	token := []byte("devkit-fake-inference-token")
+	defer zero(token)
+	if !m.sandboxes.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
+		return errors.New("devkit: sandbox no longer belongs to the subject's session")
+	}
+	return nil
+}
+
 // StoreSubscriptionToken seals a user's subscription token under that user's own DEK and
 // persists only the ciphertext. The plaintext exists transiently inside this call and is
 // zeroed before return; it never reaches the control plane.

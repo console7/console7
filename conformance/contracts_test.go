@@ -47,6 +47,10 @@ func TestSecretsProvider_InjectOrgCredential(t *testing.T) {
 	runContract(t, "SecretsProvider", "InjectOrgCredential")
 }
 
+func TestSecretsProvider_InjectInferenceCredential(t *testing.T) {
+	runContract(t, "SecretsProvider", "InjectInferenceCredential")
+}
+
 func TestSecretsProvider_RevokeSubject(t *testing.T) {
 	runContract(t, "SecretsProvider", "RevokeSubject")
 }

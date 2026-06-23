@@ -258,6 +258,64 @@ func TestInjectOrgCredential(t *testing.T) {
 	}
 }
 
+func TestInjectInferenceCredential(t *testing.T) {
+	p, _, _, reg := newTestProvider()
+	ctx := context.Background()
+	owned := reg.Provision("alice", "s1")
+	other := reg.Provision("bob", "s2")
+	deadline := fixedNow.Add(30 * time.Minute)
+
+	// Fail closed before a minter is wired (denyMinter): a valid owned+future request still refuses.
+	if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline}); err == nil {
+		t.Error("expected fail-closed refusal with no minter wired")
+	}
+	if _, ok := reg.Injected(owned); ok {
+		t.Error("delivered an inference credential with no minter wired")
+	}
+
+	minter := NewInMemoryAccessTokenMinter()
+	minter.now = func() time.Time { return fixedNow } // share the provider's clock so the expiry-cap check compares like-for-like.
+	p.SetAccessTokenMinter(minter)
+
+	// Past / zero deadline is refused (never mint material that outlives the session).
+	for _, dl := range []time.Time{{}, fixedNow.Add(-time.Second), fixedNow} {
+		if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: dl}); err == nil {
+			t.Errorf("expected refusal for non-future deadline %v", dl)
+		}
+	}
+	// A non-owned sandbox is refused even with a valid deadline.
+	if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: other, SessionDeadline: deadline}); err == nil {
+		t.Error("injected into a non-owned sandbox")
+	}
+	// The owning sandbox receives the minted token, and the requested lifetime is capped to the
+	// deadline (30m < the 1h provider max).
+	if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline}); err != nil {
+		t.Fatalf("InjectInferenceCredential into owner: %v", err)
+	}
+	got, ok := reg.Injected(owned)
+	if !ok || !bytes.Equal(got, []byte("fake-gcp-access-token")) {
+		t.Errorf("minted token not delivered to owner: ok=%v got=%q", ok, got)
+	}
+	if want := 30 * time.Minute; minter.LastLifetime() != want {
+		t.Errorf("lifetime not capped to the deadline: got %v want %v", minter.LastLifetime(), want)
+	}
+
+	// A mint error fails closed (engine never runs unauthenticated).
+	minter.SetFail(true)
+	if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline}); err == nil {
+		t.Error("expected fail-closed on a mint error")
+	}
+	minter.SetFail(false)
+
+	// A revoked subject is refused (offboarding backstop), even with a wired minter + owned sandbox.
+	if err := p.RevokeSubject(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline}); err == nil {
+		t.Error("minted an inference credential for a revoked subject")
+	}
+}
+
 func TestInject_RefusesUnattendedOrFanoutOrNonOwner(t *testing.T) {
 	p, _, _, reg := newTestProvider()
 	ctx := context.Background()
