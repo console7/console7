@@ -14,9 +14,6 @@ import (
 	"net/http"
 	"os"
 	"time"
-
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 const (
@@ -25,6 +22,11 @@ const (
 	envRegion   = "CLOUD_ML_REGION"       // Vertex region; "global" → aiplatform.googleapis.com
 	defaultAddr = ":8080"
 )
+
+// envBearerFile names the env var holding the PATH to the control-plane-delivered bearer file (delivered
+// -file mode; if unset, ambient ADC is used). Its value is an env-var NAME, not a secret — gosec G101
+// false-positives on the "bearer" substring (same class as RISKS R-9 / R-13).
+const envBearerFile = "C7_AUTHPROXY_BEARER_FILE" //nolint:gosec // G101: env-var name, not a credential (RISKS R-13)
 
 func main() {
 	if err := run(); err != nil {
@@ -43,17 +45,12 @@ func run() error {
 		return err
 	}
 
-	// AMBIENT ADC: the pod's OWN Workload Identity, reached via the metadata server.
-	// DefaultTokenSource caches + refreshes the token internally, so the per-request
-	// Token() call is cheap and always returns a currently-valid token (or an error,
-	// which the handler turns into a fail-closed 503). We construct it eagerly so a
-	// misconfigured environment fails at startup, not on the first request.
-	ts, err := google.DefaultTokenSource(context.Background(), cloudPlatformScope)
+	ts, mode, err := selectTokenSource(context.Background(), os.Getenv(envBearerFile))
 	if err != nil {
 		return err
 	}
 
-	ap, err := newAuthProxy(upstream, oauth2.ReuseTokenSource(nil, ts))
+	ap, err := newAuthProxy(upstream, ts)
 	if err != nil {
 		return err
 	}
@@ -69,8 +66,8 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	//nolint:gosec // G706 — RISKS R-12: addr/upstream are operator-supplied process config (env +
+	//nolint:gosec // G706 — RISKS R-12: addr/upstream/mode are operator-supplied process config (env +
 	// validated resolveUpstream), not request-derived taint; logged once at startup, no body/token.
-	log.Printf("vertex-auth-proxy: listening on %s, forwarding to %s (adding /v1 + ambient bearer)", addr, upstream.String())
+	log.Printf("vertex-auth-proxy: listening on %s, forwarding to %s (adding /v1 + bearer via %s)", addr, upstream.String(), mode)
 	return srv.ListenAndServe()
 }
