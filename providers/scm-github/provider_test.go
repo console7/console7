@@ -15,7 +15,15 @@ var testRepo = interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"
 func newTestProvider() (*Provider, *InMemoryAppAuth, *InMemoryPullRequests) {
 	auth := NewInMemoryAppAuth()
 	pr := NewInMemoryPullRequests()
-	return NewWithPorts(auth, pr, 15*time.Minute), auth, pr
+	return NewWithPorts(auth, pr, NewInMemoryGitTransport(), 15*time.Minute), auth, pr
+}
+
+// newTestProviderWithGit wires a provider whose git transport is a fake the caller can inspect, for
+// the FetchRepoBundle/PushBranch (push→PR bridge) tests.
+func newTestProviderWithGit() (*Provider, *InMemoryAppAuth, *InMemoryGitTransport) {
+	auth := NewInMemoryAppAuth()
+	git := NewInMemoryGitTransport()
+	return NewWithPorts(auth, NewInMemoryPullRequests(), git, 15*time.Minute), auth, git
 }
 
 func TestMintWorkingCredential_ShortLivedRepoScoped(t *testing.T) {
@@ -257,7 +265,7 @@ func TestMintWorkingCredential_RefusesMissingDeadlineOrLineage(t *testing.T) {
 func TestMintWorkingCredential_RefusesProtectedBranch(t *testing.T) {
 	auth := NewInMemoryAppAuth()
 	pr := NewInMemoryPullRequests()
-	p := NewWithPorts(auth, pr, 15*time.Minute, "release")
+	p := NewWithPorts(auth, pr, NewInMemoryGitTransport(), 15*time.Minute, "release")
 	now := time.Now()
 	for _, branch := range []string{"main", "master", "release"} {
 		_, err := p.MintWorkingCredential(context.Background(), interfaces.WorkingCredentialRequest{

@@ -18,7 +18,7 @@ import (
 // DESIGN.md §2.1/§2.3/§7).
 func scmGitHubUnderTest() testkit.ProviderUnderTest {
 	return testkit.ProviderUnderTest{
-		SCM: scmgithub.NewWithPorts(scmgithub.NewInMemoryAppAuth(), scmgithub.NewInMemoryPullRequests(), 15*time.Minute),
+		SCM: scmgithub.NewWithPorts(scmgithub.NewInMemoryAppAuth(), scmgithub.NewInMemoryPullRequests(), scmgithub.NewInMemoryGitTransport(), 15*time.Minute),
 	}
 }
 

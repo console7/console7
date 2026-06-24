@@ -127,3 +127,57 @@ func TestMemSCM_OpenPullRequest_RefusesDirectMutation(t *testing.T) {
 		t.Errorf("refused PRs were recorded: count=%d", s.OpenPRCount())
 	}
 }
+
+func TestMemSCM_FetchRepoBundle(t *testing.T) {
+	s := NewMemSCM(10 * time.Minute)
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	b, err := s.FetchRepoBundle(context.Background(), repo, "main")
+	if err != nil || len(b) == 0 {
+		t.Fatalf("FetchRepoBundle: err=%v len=%d", err, len(b))
+	}
+	for _, tc := range []struct {
+		name string
+		repo interfaces.RepoRef
+		base string
+	}{
+		{"missing repo", interfaces.RepoRef{Host: "github.com", Owner: "acme"}, "main"},
+		{"empty base", repo, ""},
+	} {
+		if _, err := s.FetchRepoBundle(context.Background(), tc.repo, tc.base); err == nil {
+			t.Errorf("%s: expected an error", tc.name)
+		}
+	}
+}
+
+func TestMemSCM_PushBranch(t *testing.T) {
+	s := NewMemSCM(10*time.Minute, "release")
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	future := time.Now().Add(10 * time.Minute)
+	// Happy path records the working branch.
+	if err := s.PushBranch(context.Background(), interfaces.PushBranchRequest{
+		Subject: "alice", SessionID: "s1", Repo: repo, Branch: "c7/work", Bundle: []byte("wb"), SessionDeadline: future,
+	}); err != nil {
+		t.Fatalf("PushBranch: %v", err)
+	}
+	if got := s.PushedBranches(); len(got) != 1 || got[0] != "c7/work" {
+		t.Errorf("push not recorded: %v", got)
+	}
+	// Fail-closed cases must record nothing.
+	for _, tc := range []struct {
+		name string
+		req  interfaces.PushBranchRequest
+	}{
+		{"protected main", interfaces.PushBranchRequest{Subject: "a", SessionID: "s", Repo: repo, Branch: "main", Bundle: []byte("x"), SessionDeadline: future}},
+		{"protected release", interfaces.PushBranchRequest{Subject: "a", SessionID: "s", Repo: repo, Branch: "release", Bundle: []byte("x"), SessionDeadline: future}},
+		{"missing lineage", interfaces.PushBranchRequest{Repo: repo, Branch: "c7/w", Bundle: []byte("x"), SessionDeadline: future}},
+		{"empty bundle", interfaces.PushBranchRequest{Subject: "a", SessionID: "s", Repo: repo, Branch: "c7/w", Bundle: nil, SessionDeadline: future}},
+		{"past deadline", interfaces.PushBranchRequest{Subject: "a", SessionID: "s", Repo: repo, Branch: "c7/w", Bundle: []byte("x"), SessionDeadline: time.Now().Add(-time.Minute)}},
+	} {
+		if err := s.PushBranch(context.Background(), tc.req); err == nil {
+			t.Errorf("%s: expected an error", tc.name)
+		}
+	}
+	if got := s.PushedBranches(); len(got) != 1 {
+		t.Errorf("refused pushes were recorded: %v", got)
+	}
+}

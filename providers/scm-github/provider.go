@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,10 @@ var workingCredentialPermissions = map[string]string{"contents": "write"}
 // being silently overridden. Keeping this token minimal limits what an actuation-adjacent token
 // can do (GOAL.md tenets 4, 6).
 var pullRequestPermissions = map[string]string{"pull_requests": "write"}
+
+// readContentsPermissions is the per-operation subset FetchRepoBundle needs: contents READ only (to
+// clone the base) — never write, never pull_requests. Intersected with the granted ceiling.
+var readContentsPermissions = map[string]string{"contents": "read"}
 
 // permLevels ranks GitHub App access levels so a per-operation request can be intersected DOWN to
 // the granted ceiling (never up).
@@ -89,6 +94,7 @@ func intersectPermissions(requested, granted map[string]string) map[string]strin
 type Provider struct {
 	auth         AppAuth
 	pr           PullRequestOpener
+	git          GitTransport
 	protected    map[string]bool
 	perms        map[string]string
 	expectedHost string
@@ -118,7 +124,7 @@ var _ interfaces.SCMProvider = (*Provider)(nil)
 // harness use to wire the in-memory fakes (and that New uses to wire the real adapter). ttl
 // defaults to DefaultTTL; extraProtected names protected branches beyond the always-protected
 // main/master; permissions default to DefaultPermissions.
-func NewWithPorts(auth AppAuth, pr PullRequestOpener, ttl time.Duration, extraProtected ...string) *Provider {
+func NewWithPorts(auth AppAuth, pr PullRequestOpener, git GitTransport, ttl time.Duration, extraProtected ...string) *Provider {
 	prot := make(map[string]bool, len(defaultProtected)+len(extraProtected))
 	for b := range defaultProtected {
 		prot[b] = true
@@ -134,6 +140,7 @@ func NewWithPorts(auth AppAuth, pr PullRequestOpener, ttl time.Duration, extraPr
 	return &Provider{
 		auth:         auth,
 		pr:           pr,
+		git:          git,
 		protected:    prot,
 		perms:        DefaultPermissions,
 		expectedHost: DefaultExpectedHost,
@@ -326,6 +333,131 @@ func (p *Provider) OpenPullRequest(ctx context.Context, pr interfaces.PullReques
 		return interfaces.PRRef{}, errors.New("scmgithub: pull-request opener returned an empty ref")
 	}
 	return interfaces.PRRef{URL: url, Number: number}, nil
+}
+
+// FetchRepoBundle clones the base branch with a short-lived contents:READ installation token and
+// returns it as a git bundle, for the control plane to seed into the sandbox (cloud.go
+// EngineTask.RepoBundle). The token is minted least-privilege and handed to the git transport; it is
+// never returned to the caller. The sandbox never fetches from the SCM itself.
+func (p *Provider) FetchRepoBundle(ctx context.Context, repo interfaces.RepoRef, baseBranch string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if repo.Host == "" || repo.Owner == "" || repo.Name == "" {
+		return nil, errors.New("scmgithub: FetchRepoBundle requires a fully-specified repo")
+	}
+	if repo.Host != p.expectedHost {
+		return nil, fmt.Errorf("scmgithub: repo host %q is not the host this provider serves (%q)", repo.Host, p.expectedHost)
+	}
+	if strings.TrimSpace(baseBranch) == "" {
+		return nil, errors.New("scmgithub: FetchRepoBundle requires a base branch")
+	}
+	if !isSafeRefName(baseBranch) {
+		return nil, fmt.Errorf("scmgithub: FetchRepoBundle base branch %q is not a safe ref name", baseBranch)
+	}
+	if p.git == nil {
+		return nil, errors.New("scmgithub: no git transport configured (FetchRepoBundle unavailable)")
+	}
+	token, _, err := p.auth.MintInstallationToken(ctx, InstallationTokenRequest{
+		Repo:        repo,
+		Permissions: intersectPermissions(readContentsPermissions, p.perms),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scmgithub: minting read token for base fetch: %w", err)
+	}
+	if token == "" {
+		return nil, errors.New("scmgithub: App auth returned an empty installation token")
+	}
+	return p.git.CloneBundle(ctx, p.remoteURL(repo), baseBranch, token)
+}
+
+// PushBranch pushes the session's working branch (carried as a git bundle) to the remote with a
+// short-lived contents:WRITE token, capped to the session deadline and refused for a protected
+// branch — the control-plane half of the push→PR bridge. The push credential stays here; it is
+// never returned nor delivered to the sandbox (tenet 6).
+func (p *Provider) PushBranch(ctx context.Context, req interfaces.PushBranchRequest) error {
+	if err := p.validatePushBranchRequest(ctx, req); err != nil {
+		return err
+	}
+	token, _, err := p.auth.MintInstallationToken(ctx, InstallationTokenRequest{
+		Repo:        req.Repo,
+		Permissions: intersectPermissions(workingCredentialPermissions, p.perms),
+	})
+	if err != nil {
+		return fmt.Errorf("scmgithub: minting push token: %w", err)
+	}
+	if token == "" {
+		return errors.New("scmgithub: App auth returned an empty installation token")
+	}
+	return p.git.PushBundle(ctx, p.remoteURL(req.Repo), req.Branch, req.Bundle, token)
+}
+
+// validatePushBranchRequest fails closed on any malformed push request before any remote work:
+// lineage (subject + session), a fully-specified repo on this host, a non-protected working branch,
+// a non-empty bundle, a future session deadline, and a configured git transport.
+func (p *Provider) validatePushBranchRequest(ctx context.Context, req interfaces.PushBranchRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.Subject == "" || req.SessionID == "" {
+		return errors.New("scmgithub: PushBranch requires a subject and session for lineage")
+	}
+	if req.Repo.Host == "" || req.Repo.Owner == "" || req.Repo.Name == "" {
+		return errors.New("scmgithub: PushBranch requires a fully-specified repo")
+	}
+	if req.Repo.Host != p.expectedHost {
+		return fmt.Errorf("scmgithub: repo host %q is not the host this provider serves (%q)", req.Repo.Host, p.expectedHost)
+	}
+	if req.Branch == "" {
+		return errors.New("scmgithub: PushBranch requires a working branch")
+	}
+	if !isSafeRefName(req.Branch) {
+		return fmt.Errorf("scmgithub: PushBranch working branch %q is not a safe ref name", req.Branch)
+	}
+	// Refuse a protected/default branch — the change is proposed via a PR, never pushed onto a
+	// protected ref (tenet 6). protected is immutable post-construction.
+	if p.protected[req.Branch] {
+		return errors.New("scmgithub: refusing to push to a protected branch")
+	}
+	if len(req.Bundle) == 0 {
+		return errors.New("scmgithub: PushBranch requires a non-empty working-branch bundle")
+	}
+	if req.SessionDeadline.IsZero() || !req.SessionDeadline.After(p.now()) {
+		return errors.New("scmgithub: PushBranch requires a SessionDeadline in the future")
+	}
+	if p.git == nil {
+		return errors.New("scmgithub: no git transport configured (PushBranch unavailable)")
+	}
+	return nil
+}
+
+// remoteURL is the HTTPS git URL for repo on the host this provider serves.
+func (p *Provider) remoteURL(repo interfaces.RepoRef) string {
+	return fmt.Sprintf("https://%s/%s/%s.git", repo.Host, repo.Owner, repo.Name)
+}
+
+// isSafeRefName rejects a branch name that could be mistaken for a git OPTION (a leading '-' —
+// argument injection into the shelled `git`) or that is not a well-formed ref. This is defence in
+// depth AT THE SEAM, independent of the orchestrator's own validation, so the git transport never
+// receives a hostile branch even if a caller forgot to validate (a close cousin of git
+// check-ref-format). The branch is otherwise orchestrator-set, never agent-set.
+func isSafeRefName(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") || strings.HasSuffix(s, "/") {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.HasSuffix(s, ".lock") {
+		return false
+	}
+	for _, r := range s {
+		if r <= ' ' || r == 0x7f { // control characters and space
+			return false
+		}
+		switch r {
+		case '~', '^', ':', '?', '*', '[', '\\':
+			return false
+		}
+	}
+	return true
 }
 
 // randHex returns 2n hex chars of crypto-random data for an opaque, unguessable credential ref.

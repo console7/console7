@@ -42,9 +42,10 @@
 //
 // # The GitHub SDK is confined behind ports
 //
-// The provider logic (provider.go) depends only on the AppAuth and PullRequestOpener ports
-// (ports.go); the go-github and ghinstallation clients are confined to the adapter (ghapp_auth.go,
-// github_pr.go) wired by New (new.go). Tests and the conformance harness wire the in-memory fakes
+// The provider logic (provider.go) depends only on the AppAuth, PullRequestOpener, and GitTransport
+// ports (ports.go); the go-github and ghinstallation clients are confined to the adapter
+// (ghapp_auth.go, github_pr.go) and the git-over-HTTPS shell-out to gitCLI (git_cli.go), all wired
+// by New (new.go). Tests and the conformance harness wire the in-memory fakes
 // (fakes.go) instead, so the contract logic runs under `go test ./...` with no GitHub App and no
 // network — the same logic-vs-fakes split secrets-gcp and MemSCM prove. The exported ports + fakes
 // also let out-of-tree providers conformance-test themselves.
@@ -64,10 +65,16 @@
 // # Real vs deferred in this PR
 //
 //   - REAL: GitHub App JWT auth, repository-scoped + permission-narrowed installation-token mint,
-//     expiry capping to the session, protected-branch refusal, PR-only exit via go-github.
-//   - DEFERRED: delivery (redemption) of the held token into the owning sandbox git client — the
-//     data-plane path that does not exist until the sandbox PR. The lease book is the seam that
-//     path redeems against; no method exports the token today.
+//     expiry capping to the session, protected-branch refusal, PR-only exit via go-github, and the
+//     CONTROL-PLANE push→PR bridge — FetchRepoBundle (clone base, contents:read) seeds the sandbox
+//     and PushBranch (push the engine's working-branch bundle, contents:write) lands the head before
+//     OpenPullRequest, via gitCLI. The push credential reaches git in the child env (a credential
+//     helper), never argv; the branch is seam-validated (isSafeRefName). The sandbox holds NO SCM
+//     egress or push credential — the control plane does all git I/O (GOAL.md tenet 6).
+//   - DEFERRED: delivery (redemption) of a working credential into the SANDBOX git client for an
+//     in-sandbox push is NOT needed under the control-plane-mediated bridge and remains absent by
+//     design (the sandbox stays SCM-free). The lease book + RevokeRef remain for the
+//     MintWorkingCredential path; no method exports a token today.
 //   - RESIDUAL (boundary, not this package): authoritative branch-push restriction is the repo
 //     ruleset + egress wall; this provider's branch refusal and least-privilege token are
 //     defence-in-depth (GOAL.md tenet 2).

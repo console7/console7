@@ -24,6 +24,7 @@ type MemSCM struct {
 	mu        sync.Mutex
 	leases    map[string]scmLease
 	prs       []interfaces.PullRequest
+	pushed    []interfaces.PushBranchRequest
 	protected map[string]bool
 	ttl       time.Duration
 	now       func() time.Time
@@ -142,4 +143,64 @@ func (s *MemSCM) OpenPRCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.prs)
+}
+
+// FetchRepoBundle returns a deterministic synthetic bundle for the base branch (no real SCM). It
+// models the observable contract — non-empty content out — so the orchestrator's seed-the-sandbox
+// step has a payload on the bench.
+func (s *MemSCM) FetchRepoBundle(ctx context.Context, repo interfaces.RepoRef, baseBranch string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if repo.Host == "" || repo.Owner == "" || repo.Name == "" {
+		return nil, errors.New("devkit: FetchRepoBundle requires a fully-specified repo")
+	}
+	if baseBranch == "" {
+		return nil, errors.New("devkit: FetchRepoBundle requires a base branch")
+	}
+	return []byte("devkit-mem-base-bundle:" + repo.Host + "/" + repo.Owner + "/" + repo.Name + "@" + baseBranch), nil
+}
+
+// PushBranch records a control-plane-side push of the working branch. It enforces the same lineage
+// and protected-branch invariants as MintWorkingCredential, refuses an empty bundle, and never
+// merges/actuates — it only records that the branch would be pushed.
+func (s *MemSCM) PushBranch(ctx context.Context, req interfaces.PushBranchRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if req.Subject == "" || req.SessionID == "" {
+		return errors.New("devkit: PushBranch requires a subject and session for lineage")
+	}
+	if req.Repo.Host == "" || req.Repo.Owner == "" || req.Repo.Name == "" {
+		return errors.New("devkit: PushBranch requires a fully-specified repo")
+	}
+	if req.Branch == "" {
+		return errors.New("devkit: PushBranch requires a working branch")
+	}
+	if len(req.Bundle) == 0 {
+		return errors.New("devkit: PushBranch requires a non-empty bundle")
+	}
+	now := s.now()
+	if req.SessionDeadline.IsZero() || !req.SessionDeadline.After(now) {
+		return errors.New("devkit: PushBranch requires a SessionDeadline in the future")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.protected[req.Branch] {
+		return errors.New("devkit: refusing to push to a protected branch")
+	}
+	s.pushed = append(s.pushed, req)
+	return nil
+}
+
+// PushedBranches returns the working branches pushed so far — a test hook to assert the push
+// happened (exactly once, of the working branch) before OpenPullRequest.
+func (s *MemSCM) PushedBranches() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.pushed))
+	for _, p := range s.pushed {
+		out = append(out, p.Branch)
+	}
+	return out
 }

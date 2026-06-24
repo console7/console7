@@ -43,7 +43,9 @@ func New(cfg Config) (*Provider, error) {
 		perms:         cfg.Permissions,
 		baseURL:       cfg.BaseURL,
 	}
-	p := NewWithPorts(adapter, adapter, cfg.TTL, cfg.ProtectedBranches...)
+	// gitCLI is the real git-over-HTTPS transport for the control-plane push→PR bridge (shell-out,
+	// zero new dependency); the minted installation token reaches it in-env, never argv.
+	p := NewWithPorts(adapter, adapter, gitCLI{}, cfg.TTL, cfg.ProtectedBranches...)
 	// Use the configured (validated) granted-permission ceiling for minting.
 	p.perms = cfg.Permissions
 	// Scope the provider to the SCM host it actually talks to, so a RepoRef for a different host

@@ -126,3 +126,76 @@ func (o *InMemoryPullRequests) Count() int {
 	defer o.mu.Unlock()
 	return len(o.prs)
 }
+
+// RecordedPush is one PushBundle call the fake transport saw, for white-box assertions.
+type RecordedPush struct {
+	RemoteURL string
+	Branch    string
+	Bundle    []byte
+	Token     string
+}
+
+// InMemoryGitTransport is a fake GitTransport: CloneBundle returns a deterministic synthetic bundle
+// and PushBundle records the call. It gives none of git's real transfer — it models the observable
+// contract (a non-empty bundle out; a push the provider drove with a token) for the provider's
+// white-box tests and the conformance harness. Never wire one into a deployment.
+type InMemoryGitTransport struct {
+	mu        sync.Mutex
+	pushes    []RecordedPush
+	failClone bool
+	failPush  bool
+}
+
+// NewInMemoryGitTransport returns a ready fake.
+func NewInMemoryGitTransport() *InMemoryGitTransport { return &InMemoryGitTransport{} }
+
+// SetFailClone drives the provider's CloneBundle fail-closed path.
+func (g *InMemoryGitTransport) SetFailClone(b bool) { g.mu.Lock(); g.failClone = b; g.mu.Unlock() }
+
+// SetFailPush drives the provider's PushBundle fail-closed path.
+func (g *InMemoryGitTransport) SetFailPush(b bool) { g.mu.Lock(); g.failPush = b; g.mu.Unlock() }
+
+// CloneBundle returns a deterministic synthetic bundle, failing closed on an empty token (the
+// provider must always mint and hand one in) or when SetFailClone(true).
+func (g *InMemoryGitTransport) CloneBundle(ctx context.Context, remoteURL, baseBranch, token string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.failClone {
+		return nil, errors.New("scmgithub/fake: induced CloneBundle failure")
+	}
+	if token == "" {
+		return nil, errors.New("scmgithub/fake: CloneBundle called with an empty token")
+	}
+	return []byte("scmgithub-fake-base-bundle:" + remoteURL + "@" + baseBranch), nil
+}
+
+// PushBundle records the call, failing closed on an empty token/bundle or when SetFailPush(true).
+func (g *InMemoryGitTransport) PushBundle(ctx context.Context, remoteURL, branch string, bundle []byte, token string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.failPush {
+		return errors.New("scmgithub/fake: induced PushBundle failure")
+	}
+	if token == "" {
+		return errors.New("scmgithub/fake: PushBundle called with an empty token")
+	}
+	if len(bundle) == 0 {
+		return errors.New("scmgithub/fake: PushBundle called with an empty bundle")
+	}
+	g.pushes = append(g.pushes, RecordedPush{RemoteURL: remoteURL, Branch: branch, Bundle: bundle, Token: token})
+	return nil
+}
+
+// Pushes returns the recorded pushes, for white-box assertions (e.g. exactly one push, of the
+// working branch, never a protected ref).
+func (g *InMemoryGitTransport) Pushes() []RecordedPush {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]RecordedPush(nil), g.pushes...)
+}
