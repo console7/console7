@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -275,5 +278,74 @@ func TestNewAuthProxy_NilArgs(t *testing.T) {
 	}
 	if _, err := newAuthProxy(u, nil); err == nil {
 		t.Error("expected error for nil token source")
+	}
+}
+
+// TestFileTokenSource covers the DELIVERED-FILE token mode (the per-session deployment): read the
+// bearer from the file on each call (so a re-delivered/rotated token is picked up), trim whitespace,
+// set no Expiry, and fail closed on a missing or empty file (the handler turns that into a 503).
+func TestFileTokenSource(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "credential")
+	fts := fileTokenSource{path: p}
+
+	if _, err := fts.Token(); err == nil {
+		t.Error("missing file: want error (fail closed), got nil")
+	}
+
+	if err := os.WriteFile(p, []byte("  \n"), 0o600); err != nil {
+		t.Fatalf("write empty: %v", err)
+	}
+	if _, err := fts.Token(); err == nil {
+		t.Error("empty file: want error, got nil")
+	}
+
+	if err := os.WriteFile(p, []byte("  tok-abc\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tok, err := fts.Token()
+	if err != nil {
+		t.Fatalf("valid file: unexpected err %v", err)
+	}
+	if tok.AccessToken != "tok-abc" {
+		t.Errorf("AccessToken = %q, want %q (trimmed)", tok.AccessToken, "tok-abc")
+	}
+	if !tok.Expiry.IsZero() {
+		t.Errorf("Expiry = %v, want zero (freshness via re-delivery, not oauth2 refresh)", tok.Expiry)
+	}
+
+	// A re-delivered (rotated) token is picked up on the next call — no caching, no restart.
+	if err := os.WriteFile(p, []byte("tok-rotated"), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	tok2, err := fts.Token()
+	if err != nil {
+		t.Fatalf("rotated file: unexpected err %v", err)
+	}
+	if tok2.AccessToken != "tok-rotated" {
+		t.Errorf("after rotation AccessToken = %q, want %q", tok2.AccessToken, "tok-rotated")
+	}
+}
+
+// TestSelectTokenSource_FileMode covers the deterministic, no-network branch: a non-empty bearer-file
+// path selects the delivered-file source and reports the file mode. (The ambient-ADC branch needs a
+// real metadata server, so it is exercised in deployment, not here.)
+func TestSelectTokenSource_FileMode(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(p, []byte("tok-xyz"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	ts, mode, err := selectTokenSource(context.Background(), p)
+	if err != nil {
+		t.Fatalf("unexpected err %v", err)
+	}
+	if _, ok := ts.(fileTokenSource); !ok {
+		t.Errorf("source type = %T, want fileTokenSource", ts)
+	}
+	if !strings.Contains(mode, "delivered bearer file") {
+		t.Errorf("mode = %q, want it to mention the delivered bearer file", mode)
+	}
+	tok, err := ts.Token()
+	if err != nil || tok.AccessToken != "tok-xyz" {
+		t.Errorf("Token() = (%v, %v), want tok-xyz", tok, err)
 	}
 }

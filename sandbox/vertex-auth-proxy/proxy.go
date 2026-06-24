@@ -28,15 +28,18 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // cloudPlatformScope is the OAuth scope the minted token carries. Vertex AI
@@ -55,6 +58,52 @@ type tokenSource interface {
 	// Token returns a currently-valid access token, or an error. On error the
 	// handler MUST fail closed (it must never forward unauthenticated).
 	Token() (*oauth2.Token, error)
+}
+
+// fileTokenSource reads a bearer access token from a file on EACH call. In the
+// per-session deployment (the only model this repo can run — there is no persistent
+// in-cluster workload, so the proxy cannot hold its own Workload Identity), the
+// control plane MINTS the short-lived Vertex bearer (workload-SA self-impersonation)
+// and DELIVERS it into this proxy pod's token file, separate from the untrusted
+// sandbox pod. Re-reading per request means a re-delivered (refreshed) token is picked
+// up with no restart; we deliberately do NOT cache (a stale token would outlive a
+// rotation) and set NO Expiry (this is a pure consumer — there is no refresh token, so
+// freshness comes from re-delivery, not oauth2 refresh). Fail closed: a missing or
+// empty file returns an error, which the handler turns into a 503.
+type fileTokenSource struct{ path string }
+
+func (f fileTokenSource) Token() (*oauth2.Token, error) {
+	b, err := os.ReadFile(f.path) //nolint:gosec // G304: path is operator-supplied process config (the
+	// delivered-bearer file path), not request-derived taint; the proxy reads only this configured file.
+	if err != nil {
+		return nil, fmt.Errorf("read delivered token file: %w", err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if tok == "" {
+		return nil, errors.New("delivered token file is empty")
+	}
+	return &oauth2.Token{AccessToken: tok}, nil
+}
+
+// selectTokenSource picks where the Google bearer comes from, by deployment mode:
+//   - bearerFile != "" ⇒ DELIVERED-FILE mode (the per-session deployment this repo runs: there is NO
+//     persistent in-cluster workload, so the proxy holds no Workload Identity; the control plane mints
+//     the short-lived Vertex bearer and delivers it into this pod's token file, separate from the
+//     untrusted sandbox pod). Re-read per request so a re-delivered token is picked up.
+//   - else ⇒ AMBIENT ADC mode (the pod's own Workload Identity via the metadata server; for a future
+//     persistent/shared deployment). DefaultTokenSource caches+refreshes internally; built eagerly here
+//     so a misconfigured environment fails at startup, not on the first request.
+//
+// It returns the source and a human-readable mode label for the startup log (never the token).
+func selectTokenSource(ctx context.Context, bearerFile string) (tokenSource, string, error) {
+	if bearerFile != "" {
+		return fileTokenSource{path: bearerFile}, "delivered bearer file " + bearerFile, nil
+	}
+	adc, err := google.DefaultTokenSource(ctx, cloudPlatformScope)
+	if err != nil {
+		return nil, "", err
+	}
+	return oauth2.ReuseTokenSource(nil, adc), "ambient ADC", nil
 }
 
 // authProxy is the credential-attaching reverse proxy handler.
