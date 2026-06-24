@@ -207,6 +207,37 @@ Optional: `C7_ANTHROPIC_BASE_URL`, `C7_SECRET_PREFIX` (default `console7`),
 instead of Vertex — `C7_INFERENCE=anthropic` + `C7_ANTHROPIC_MODEL` (+ optional
 `C7_ORG_API_KEY`).
 
+#### Per-seam SA impersonation (restore the keybroker's distinct identity)
+
+By default every GCP-SDK seam runs under one ambient ADC identity — which fuses the
+keybroker's lineage-signing identity with the secrets/evidence workload identity. To
+un-fuse them (`GOAL.md` tenet 2, least-privilege boundary), set these optional knobs so
+each seam mints short-lived **impersonated** credentials for its own service account:
+
+```bash
+export C7_KEYBROKER_SA_EMAIL=<keybroker/CA SA email>   # the load-bearing one
+export C7_SECRETS_SA_EMAIL=<secrets SA email>          # optional
+export C7_EVIDENCE_SA_EMAIL=<evidence SA email>        # optional
+```
+
+Empty (the default) ⇒ ambient ADC, unchanged. With `C7_KEYBROKER_SA_EMAIL` set, the
+lineage CA signs as the **keybroker** SA, distinct from the workload SA used by
+secrets/evidence. The operator's ADC must hold `roles/iam.serviceAccountTokenCreator`
+on each impersonated SA.
+
+> **HONEST residual — this is not "clean".** Per-seam impersonation removes the static
+> CA key file and un-fuses the SAs, but the operator (or any principal) holding
+> `tokenCreator` on the keybroker SA can still mint a token for it and **sign as the
+> lineage CA**. Impersonation does not close that path; only moving the keybroker into
+> the in-cluster control plane (Option B), where no human holds `tokenCreator` on that
+> SA, closes it.
+
+> **cloud-gcp is excluded — it shells out to `kubectl`/`gcloud`** and has no Go GCP
+> client, so the knobs above do not apply to it. Its calls run under the operator's
+> ambient `gcloud` ADC. To run cloud-gcp **as** a specific SA, set gcloud's own
+> impersonation out of band, e.g.
+> `export CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=<sandbox-ops SA>`.
+
 The egress allowlist is **derived from the inference backend itself** — you do not set
 an endpoint string; the orchestrator narrows egress to exactly the Vertex host the
 backend resolves to, and re-checks the resolved URL at session time (the boundary is
