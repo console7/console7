@@ -354,9 +354,38 @@ func (s *session) injectInferenceCredential() error {
 	return nil
 }
 
+// pushWorkingBranch is the control-plane-side push of the engine's working branch (carried as the
+// CommitBundle) to the remote, write-ahead-logged around the side-effect. The sandbox holds no push
+// credential or SCM egress — the broker's SCM seam pushes with a short-lived, branch-scoped token
+// (tenet 6). It MUST run before OpenPullRequest, which proposes this head.
+func (o *Orchestrator) pushWorkingBranch(s *session, bundle []byte) error {
+	if err := s.stamp("branch-pushing", s.req.Branch); err != nil {
+		return s.abort(err, "push-intent-evidence")
+	}
+	if err := o.Broker.PushBranch(s.ctx, interfaces.PushBranchRequest{
+		Subject:         s.subject,
+		SessionID:       s.req.SessionID,
+		Repo:            s.req.Repo,
+		Branch:          s.req.Branch,
+		Bundle:          bundle,
+		SessionDeadline: s.deadline,
+	}); err != nil {
+		return s.abort(err, "push-branch")
+	}
+	if err := s.stamp("branch-pushed", s.req.Branch); err != nil {
+		return s.abort(err, "push-evidence")
+	}
+	return nil
+}
+
+// proposalBaseBranch is the branch a session proposes its change against: the base the control plane
+// seeds the engine from (FetchRepoBundle) and the PR base (OpenPullRequest). Phase-1 targets the
+// conventional default branch; resolving a repo's actual default branch is a later-phase refinement.
+const proposalBaseBranch = "main"
+
 // propose runs the genuine engine inside the sandbox via the Cloud seam, signs the digest of the
-// REAL commit it produced with the session NHI, and opens the change as a PR (the only outward
-// side-effect). Every failure path aborts.
+// REAL commit it produced with the session NHI, pushes the working branch to the remote from the
+// CONTROL PLANE, and opens the change as a PR (the only outward side-effect). Every failure aborts.
 func (o *Orchestrator) propose(s *session) error {
 	// 7. Do the work via the genuine Claude Code engine, INSIDE the already-provisioned,
 	// perimeter-narrowed sandbox (DESIGN.md §1.4 — wrap the engine, never reimplement it). The
@@ -364,13 +393,31 @@ func (o *Orchestrator) propose(s *session) error {
 	// PROPOSAL — a real commit digest — which it then signs. The engine never self-actuates (tenet
 	// 6); it runs under the already-narrowed default-deny perimeter (tenet 3) and is bounded by the
 	// time remaining to the session deadline (ephemeral by default, tenet 5).
-	remaining := time.Until(s.deadline)
-	if remaining <= 0 {
+	if time.Until(s.deadline) <= 0 {
 		// The session budget (consumed by identity minting, evidence stamps, inference resolution) is
 		// already spent — abort rather than hand the engine a non-positive timeout it could run
 		// unbounded under (ephemeral by default; the sandbox is torn down by abort).
 		return s.abort(errors.New("session deadline exceeded before the engine could run"), "run-task")
 	}
+
+	// 7a. Seed the engine with the REAL base content: the CONTROL PLANE fetches the base branch as a
+	// git bundle (the sandbox never reaches the SCM — boundary + least privilege, tenet 3/5) and hands
+	// it to the engine via the Cloud seam, so the engine works a real checkout and proposes a real diff.
+	baseBundle, err := o.Broker.FetchRepoBundle(s.ctx, s.req.Repo, proposalBaseBranch)
+	if err != nil {
+		return s.abort(err, "fetch-repo")
+	}
+	if err := s.stamp("repo-seeded", s.req.Repo.Owner+"/"+s.req.Repo.Name+"@"+proposalBaseBranch); err != nil {
+		return s.abort(err, "repo-seed-evidence")
+	}
+
+	// Recompute the engine budget AFTER the (network) base-fetch + stamp consumed wall-clock, so the
+	// engine is never handed a Timeout longer than the time actually left to the deadline (tenet 5).
+	remaining := time.Until(s.deadline)
+	if remaining <= 0 {
+		return s.abort(errors.New("session deadline exceeded before the engine could run"), "run-task")
+	}
+
 	result, err := o.Cloud.RunTask(s.ctx, s.sandbox, interfaces.EngineTask{
 		SessionID: s.req.SessionID,
 		Profile:   s.profile,
@@ -384,6 +431,9 @@ func (o *Orchestrator) propose(s *session) error {
 		InferenceBackend: s.endpoint.Kind,
 		VertexProjectID:  s.endpoint.VertexProjectID,
 		VertexRegion:     s.endpoint.VertexRegion,
+		// The base content, seeded into the sandbox by the provider before the engine runs — no SCM
+		// egress from the sandbox (cloud.go EngineTask.RepoBundle).
+		RepoBundle: baseBundle,
 	})
 	if err != nil {
 		return s.abort(err, "run-task")
@@ -415,31 +465,32 @@ func (o *Orchestrator) propose(s *session) error {
 		return s.abort(err, "commit-evidence")
 	}
 
-	// 8. PR-only exit: propose the change as a PR. The session never merges or actuates —
-	// author, approve, and actuate are separated (tenet 6).
+	// 8. Push the working branch to the real remote — the CONTROL-PLANE half of the bridge. The engine
+	// produced the commit INSIDE the sandbox and the Cloud seam returned it as result.CommitBundle; the
+	// orchestrator (not the sandbox) pushes it via the broker's SCM seam with a short-lived,
+	// branch-scoped credential, so no push credential or SCM egress ever enters the untrusted sandbox
+	// (tenet 6). It MUST land before OpenPullRequest, which proposes this head. The push is content-
+	// bearing — it is the pre-egress DLP enforcement point (DESIGN.md §6; the planned DLP control).
+	// Write-ahead the intent before the side-effect so the WORM log records it even if the push fails.
+	if err := o.pushWorkingBranch(s, result.CommitBundle); err != nil {
+		return err
+	}
+
+	// 9. PR-only exit: propose the change as a PR. The session never merges or actuates — author,
+	// approve, and actuate are separated (tenet 6).
 	//
-	// SCOPING (Tier-2 residual): the engine produced a real commit on the working branch INSIDE the
-	// sandbox, but the branch is NOT pushed to the real remote here — egress is narrowed to the
-	// inference endpoint and the sandbox holds no push credential (tenet 6), so the push is a
-	// control-plane-side action (the orchestrator holds the branch-scoped SCM working credential).
-	// Wiring that push + a real GitHub PR over result.HeadSHA is the Tier-2 follow-up; this spine
-	// signs the genuine engine commit digest and opens the PR through the broker's SCM seam (against
-	// the local-cloud remote for the Tier-1 demo). result.HeadSHA is the handle that follow-up
-	// consumes.
-	//
-	// Write-ahead the INTENT before the external side-effect: the PR is the one irreversible
-	// outward action, so the WORM log must durably record that we are opening it BEFORE the
-	// call, not only confirm it after. Otherwise a post-open evidence failure would leave a PR
-	// open with no record of it. (Residual for a real SCM provider: if the post-open
-	// confirmation cannot commit, a compensating close / idempotent reconcile is also needed;
-	// tracked for providers/scm-github.)
-	if err := s.stamp("pr-opening", s.req.Branch+" -> main"); err != nil {
+	// Write-ahead the INTENT before the external side-effect: the PR is the one irreversible outward
+	// action, so the WORM log must durably record that we are opening it BEFORE the call, not only
+	// confirm it after. Otherwise a post-open evidence failure would leave a PR open with no record of
+	// it. (Residual for a real SCM provider: if the post-open confirmation cannot commit, a
+	// compensating close / idempotent reconcile is also needed; tracked for providers/scm-github.)
+	if err := s.stamp("pr-opening", s.req.Branch+" -> "+proposalBaseBranch); err != nil {
 		return s.abort(err, "pr-intent-evidence")
 	}
 	prRef, err := o.Broker.OpenPullRequest(s.ctx, interfaces.PullRequest{
 		Repo:  s.req.Repo,
 		Head:  s.req.Branch,
-		Base:  "main",
+		Base:  proposalBaseBranch,
 		Title: "Console7 session " + string(s.req.SessionID),
 		Body:  proposalBody(s),
 	})

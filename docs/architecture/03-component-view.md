@@ -101,7 +101,7 @@ flowchart TB
     ST1["stamp 'session-start' (lineage anchor)"]
     PROV["Cloud.ProvisionSandbox(SandboxSpec, default-deny egress)"]
     RINF["resolveInference()<br/>Resolve &rarr; onAllowlist() &rarr; ApplyEgressPolicy(narrow) &rarr; branch on BackendKind:<br/>Vertex&rarr;InjectInferenceCredential · else Inject{Subscription if attended-opt-in, else Org}"]
-    PROP["propose()<br/>Cloud.RunTask(EngineTask) &rarr; SignSession(commitTBS(EngineResult.CommitDigest)) &rarr; stamp 'pr-opening' &rarr; OpenPullRequest &rarr; stamp 'pr-opened'<br/>(no-op run &rarr; stamp 'no-change', no PR)"]
+    PROP["propose()<br/>FetchRepoBundle(base) &rarr; Cloud.RunTask(EngineTask{RepoBundle}) &rarr; SignSession(commitTBS(EngineResult.CommitDigest)) &rarr; PushBranch(CommitBundle) &rarr; OpenPullRequest &rarr; stamps repo-seeded/commit-signed/branch-pushed/pr-opened<br/>(no-op run &rarr; stamp 'no-change', no push, no PR)"]
     TDN["teardown (cleanupCtx = WithoutCancel)<br/>DestroySandbox &rarr; stamp 'session-end'/'aborted' &rarr; sealCheckpoint"]
     APP["appendSigned()/stamp(): wrap each record's payload with NHI signature<br/>payloadTBS domain 'c7-evidence-v1'"]
     VRP["VerifyRecordPayload(caRoot, rec)<br/>checks lineage sig + persona&harr;NHI cert binding"]
@@ -117,7 +117,7 @@ flowchart TB
   PREP -->|"Authenticate / MintSessionIdentity"| BRK
   PREP --> PDPC
   RINF -->|"ResolveInference / Inject{Inference,Subscription,Org} cred"| BRK
-  PROP -->|"SignSession / OpenPullRequest"| BRK
+  PROP -->|"FetchRepoBundle / SignSession / PushBranch / OpenPullRequest"| BRK
   PROV --> CLOUD
   RINF -->|"ApplyEgressPolicy"| CLOUD
   TDN -->|"DestroySandbox"| CLOUD
@@ -143,6 +143,13 @@ flowchart TB
   control plane); otherwise → `InjectSubscriptionToken` when `UseSubscription && Attended`,
   else the adopter's shared `InjectOrgCredential`. Every inject seam re-checks attended +
   single-beneficiary + sandbox ownership.
+- **The push→PR bridge is control-plane-mediated; the sandbox stays SCM-free.** `propose()`
+  fetches the base as a git bundle (`FetchRepoBundle`, contents:read) and seeds it into the sandbox
+  via the Cloud seam (`EngineTask.RepoBundle`), then pushes the engine's working-branch bundle
+  (`EngineResult.CommitBundle`) with `PushBranch` (contents:write, branch-scoped) BEFORE
+  `OpenPullRequest`. All git I/O is control-plane-side — no SCM egress or push credential ever
+  enters the untrusted sandbox (tenet 6). The push is content-bearing → the pre-egress DLP point
+  (DESIGN.md §6; the planned DLP control).
 - **Teardown cannot be cancelled away.** All exit paths destroy the sandbox using a
   `context.WithoutCancel` clone, then seal a signed checkpoint — evidence is sealed even
   on error/abort.

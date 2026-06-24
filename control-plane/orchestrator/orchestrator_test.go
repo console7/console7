@@ -144,6 +144,10 @@ func TestSpike_SessionLifecycle(t *testing.T) {
 	if sum.PR.URL == "" && sum.PR.Number == 0 {
 		t.Error("expected a non-empty PR reference")
 	}
+	// The control-plane push→PR bridge ran: exactly the working branch was pushed (before the PR).
+	if got := b.scm.PushedBranches(); len(got) != 1 || got[0] != "feature/x" {
+		t.Errorf("PushedBranches = %v, want exactly [feature/x] (the working branch, pushed before the PR)", got)
+	}
 
 	// The crypto-attested output: the commit signature verifies the full lineage chain.
 	if err := signing.Verify(b.caRoot, sum.CommitDigest, sum.CommitSig); err != nil {
@@ -168,7 +172,8 @@ func TestSpike_SessionLifecycle(t *testing.T) {
 	}
 	wantEvents := []string{
 		"session-start", "sandbox-provisioned", "inference-resolved", "egress-narrowed",
-		"subscription-injected", "commit-signed", "pr-opening", "pr-opened", "session-end",
+		"subscription-injected", "repo-seeded", "commit-signed", "branch-pushing", "branch-pushed",
+		"pr-opening", "pr-opened", "session-end",
 	}
 	if b.evidence.Len() != len(wantEvents) {
 		t.Fatalf("evidence has %d records, want %d", b.evidence.Len(), len(wantEvents))
@@ -456,6 +461,81 @@ func (failingDestroyCloud) DestroySandbox(context.Context, interfaces.SandboxHan
 	return errors.New("simulated destroy failure")
 }
 
+// failingSCM wraps an SCMProvider to force the control-plane bridge's two remote steps to fail, so a
+// test can prove propose() aborts fail-closed (no PR, no real push) on a base-fetch or push failure.
+type failingSCM struct {
+	interfaces.SCMProvider
+	failFetch bool
+	failPush  bool
+}
+
+func (s failingSCM) FetchRepoBundle(ctx context.Context, repo interfaces.RepoRef, base string) ([]byte, error) {
+	if s.failFetch {
+		return nil, errors.New("simulated FetchRepoBundle failure")
+	}
+	return s.SCMProvider.FetchRepoBundle(ctx, repo, base)
+}
+
+func (s failingSCM) PushBranch(ctx context.Context, req interfaces.PushBranchRequest) error {
+	if s.failPush {
+		return errors.New("simulated PushBranch failure")
+	}
+	return s.SCMProvider.PushBranch(ctx, req)
+}
+
+// TestRun_FetchRepoBundleFailureAbortsBeforeEngine: a base-fetch failure aborts the session before
+// the engine runs — no PR, no push (fail closed, tenet 6).
+func TestRun_FetchRepoBundleFailureAbortsBeforeEngine(t *testing.T) {
+	b := newBench(t)
+	b.orch.Broker.SCM = failingSCM{SCMProvider: b.orch.Broker.SCM, failFetch: true}
+	_, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: b.authn(t, "alice"), SessionID: "s-fetchfail", Persona: interfaces.PersonaAuthor,
+		Repo: b.repo, Branch: "feature/x", Attended: false,
+	})
+	if err == nil {
+		t.Fatal("expected Run to fail closed on a base-fetch failure")
+	}
+	if b.scm.OpenPRCount() != 0 {
+		t.Error("a fetch failure must not open a PR")
+	}
+	if got := b.scm.PushedBranches(); len(got) != 0 {
+		t.Errorf("a fetch failure must not push: %v", got)
+	}
+}
+
+// TestRun_PushBranchFailureAbortsBeforePR: a push failure aborts AFTER the commit is signed but
+// BEFORE the PR opens — the signed commit exists in evidence, but no PR (fail closed, tenet 6).
+func TestRun_PushBranchFailureAbortsBeforePR(t *testing.T) {
+	b := newBench(t)
+	b.orch.Broker.SCM = failingSCM{SCMProvider: b.orch.Broker.SCM, failPush: true}
+	_, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn: b.authn(t, "alice"), SessionID: "s-pushfail", Persona: interfaces.PersonaAuthor,
+		Repo: b.repo, Branch: "feature/x", Attended: false,
+	})
+	if err == nil {
+		t.Fatal("expected Run to fail closed on a push failure")
+	}
+	if b.scm.OpenPRCount() != 0 {
+		t.Error("a push failure must not open a PR")
+	}
+	var sawCommitSigned, sawPROpened bool
+	for i := 0; i < b.evidence.Len(); i++ {
+		rec, _, _ := b.evidence.At(i)
+		switch rec.Type {
+		case "commit-signed":
+			sawCommitSigned = true
+		case "pr-opened":
+			sawPROpened = true
+		}
+	}
+	if !sawCommitSigned {
+		t.Error("expected the commit to have been signed before the push attempt")
+	}
+	if sawPROpened {
+		t.Error("a push failure must not reach pr-opened")
+	}
+}
+
 // countingSink wraps MemEvidence and counts Stream calls, to prove every appended record is
 // also forwarded to the SIEM hook.
 type countingSink struct {
@@ -580,6 +660,7 @@ func TestRun_SignsEngineProducedCommit(t *testing.T) {
 		HeadSHA:      "abc123def456",
 		FilesChanged: []string{"main.go", "README.md"},
 		Changed:      true,
+		CommitBundle: []byte("engine-produced-working-branch-bundle"), // the control plane pushes this
 	}
 	b.orch.Cloud = stubEngineCloud{MemCloud: b.cloud, result: want}
 	sum, err := b.orch.Run(context.Background(), orchestrator.LaunchRequest{
