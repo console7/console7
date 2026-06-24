@@ -68,7 +68,7 @@ func TestForwards_PrefixesV1_AddsBearer_PreservesMethodBody(t *testing.T) {
 	var got capture
 	_, upstream := newFakeUpstream(t, &got, `{"ok":true}`)
 
-	ap, err := newAuthProxy(upstream, fakeTokenSource{token: "fake-access-token"})
+	ap, err := newAuthProxy(upstream, fakeTokenSource{token: "fake-access-token"}, requestPin{})
 	if err != nil {
 		t.Fatalf("newAuthProxy: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestStreamRawPredict_PathRewrite(t *testing.T) {
 	var got capture
 	_, upstream := newFakeUpstream(t, &got, "data: {}\n\n")
 
-	ap, err := newAuthProxy(upstream, fakeTokenSource{token: "tok"})
+	ap, err := newAuthProxy(upstream, fakeTokenSource{token: "tok"}, requestPin{})
 	if err != nil {
 		t.Fatalf("newAuthProxy: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestFailsClosed_OnTokenError(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	ap, err := newAuthProxy(upstream, fakeTokenSource{err: errors.New("metadata server unavailable")})
+	ap, err := newAuthProxy(upstream, fakeTokenSource{err: errors.New("metadata server unavailable")}, requestPin{})
 	if err != nil {
 		t.Fatalf("newAuthProxy: %v", err)
 	}
@@ -189,14 +189,14 @@ func TestFailsClosed_OnEmptyToken(t *testing.T) {
 	t.Cleanup(srv.Close)
 	upstream, _ := url.Parse(srv.URL)
 
-	ap, err := newAuthProxy(upstream, fakeTokenSource{token: ""})
+	ap, err := newAuthProxy(upstream, fakeTokenSource{token: ""}, requestPin{})
 	if err != nil {
 		t.Fatalf("newAuthProxy: %v", err)
 	}
 	front := httptest.NewServer(ap)
 	t.Cleanup(front.Close)
 
-	resp, err := http.Post(front.URL+"/x:rawPredict", "application/json", strings.NewReader("{}"))
+	resp, err := http.Post(front.URL+"/projects/p/locations/us-central1/publishers/anthropic/models/m:rawPredict", "application/json", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -273,10 +273,10 @@ func TestResolveUpstream(t *testing.T) {
 
 func TestNewAuthProxy_NilArgs(t *testing.T) {
 	u, _ := url.Parse("https://x-aiplatform.googleapis.com")
-	if _, err := newAuthProxy(nil, fakeTokenSource{token: "t"}); err == nil {
+	if _, err := newAuthProxy(nil, fakeTokenSource{token: "t"}, requestPin{}); err == nil {
 		t.Error("expected error for nil upstream")
 	}
-	if _, err := newAuthProxy(u, nil); err == nil {
+	if _, err := newAuthProxy(u, nil, requestPin{}); err == nil {
 		t.Error("expected error for nil token source")
 	}
 }
@@ -347,5 +347,96 @@ func TestSelectTokenSource_FileMode(t *testing.T) {
 	tok, err := ts.Token()
 	if err != nil || tok.AccessToken != "tok-xyz" {
 		t.Errorf("Token() = (%v, %v), want tok-xyz", tok, err)
+	}
+}
+
+// TestRequestPin_allow pins the anti-open-relay contract: only an anthropic predict call passes, and
+// project/region/model tighten it when set; empty fields are wildcards.
+func TestRequestPin_allow(t *testing.T) {
+	const ok = "/projects/p1/locations/us-east5/publishers/anthropic/models/claude-x:rawPredict"
+	cases := []struct {
+		name string
+		pin  requestPin
+		path string
+		want bool
+	}{
+		{"matches with full pin", requestPin{project: "p1", region: "us-east5", model: "claude-x"}, ok, true},
+		{"matches streamRawPredict", requestPin{region: "us-east5"}, "/projects/p1/locations/us-east5/publishers/anthropic/models/m:streamRawPredict", true},
+		{"empty pin still requires predict shape", requestPin{}, ok, true},
+		{"wrong project", requestPin{project: "p2"}, ok, false},
+		{"wrong region", requestPin{region: "us-central1"}, ok, false},
+		{"wrong model", requestPin{model: "other"}, ok, false},
+		{"non-predict verb", requestPin{}, "/projects/p1/locations/us-east5/publishers/anthropic/models/m:countTokens", false},
+		{"non-anthropic publisher", requestPin{}, "/projects/p1/locations/us-east5/publishers/google/models/gemini:rawPredict", false},
+		{"path traversal / extra segment", requestPin{}, "/projects/p1/locations/us-east5/publishers/anthropic/models/m/evil:rawPredict", false},
+		{"root", requestPin{}, "/", false},
+		{"missing /v1 is correct (engine omits it); but a /v1-prefixed path must NOT pre-match", requestPin{}, "/v1/projects/p1/locations/us-east5/publishers/anthropic/models/m:rawPredict", false},
+	}
+	for _, c := range cases {
+		if got := c.pin.allow(c.path); got != c.want {
+			t.Errorf("%s: allow(%q) = %v, want %v", c.name, c.path, got, c.want)
+		}
+	}
+}
+
+// TestPin_RejectsAndNeverAttachesBearer asserts the SECURITY contract end-to-end: a request that fails
+// the pin gets 404, is NOT forwarded, and the bearer is never attached (the proxy is not an open relay).
+func TestPin_RejectsAndNeverAttachesBearer(t *testing.T) {
+	var got capture
+	forwarded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		forwarded = true
+		got.path = r.URL.Path
+		got.auth = r.Header.Get("Authorization")
+	}))
+	t.Cleanup(srv.Close)
+	upstream, _ := url.Parse(srv.URL)
+
+	ap, err := newAuthProxy(upstream, fakeTokenSource{token: "secret-bearer"}, requestPin{project: "allowed"})
+	if err != nil {
+		t.Fatalf("newAuthProxy: %v", err)
+	}
+	front := httptest.NewServer(ap)
+	t.Cleanup(front.Close)
+
+	for _, p := range []string{
+		"/projects/OTHER/locations/us-east5/publishers/anthropic/models/m:rawPredict", // wrong project
+		"/admin", // not a predict call at all
+		"/projects/allowed/locations/us-east5/publishers/anthropic/models/m:countTokens", // wrong verb
+	} {
+		resp, err := http.Post(front.URL+p, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatalf("post %s: %v", p, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404", p, resp.StatusCode)
+		}
+	}
+	if forwarded {
+		t.Errorf("SECURITY: a pin-rejected request was forwarded (path=%q, auth=%q)", got.path, got.auth)
+	}
+}
+
+// TestNoXForwardedFor asserts the "we add nothing" invariant actually holds: with Rewrite (not Director)
+// and no SetXForwarded, the forwarded request carries no X-Forwarded-For.
+func TestNoXForwardedFor(t *testing.T) {
+	var got capture
+	_, upstream := newFakeUpstream(t, &got, `{"ok":true}`)
+	ap, err := newAuthProxy(upstream, fakeTokenSource{token: "tok"}, requestPin{})
+	if err != nil {
+		t.Fatalf("newAuthProxy: %v", err)
+	}
+	front := httptest.NewServer(ap)
+	t.Cleanup(front.Close)
+
+	resp, err := http.Post(front.URL+"/projects/p/locations/us-east5/publishers/anthropic/models/m:rawPredict",
+		"application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+	if xff := got.hdr.Get("X-Forwarded-For"); xff != "" {
+		t.Errorf("X-Forwarded-For = %q, want empty (proxy must add nothing)", xff)
 	}
 }

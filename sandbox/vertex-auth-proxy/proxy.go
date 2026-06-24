@@ -10,21 +10,29 @@
 // it emits Vertex rawPredict/streamRawPredict requests with NO Google Authorization
 // header and, critically, with NO `/v1` prefix on the path (the engine only adds
 // `/v1` for its built-in `https://{region}-aiplatform.googleapis.com/v1` host). This
-// proxy is what closes that gap: it accepts the credential-free request, adds the
-// `/v1` prefix and a freshly-minted Google bearer token (from the pod's OWN ambient
-// Workload Identity), and streams the upstream response back.
+// proxy is what closes that gap: it accepts the credential-free request, validates it is a permitted
+// (pinned) Vertex predict call, adds the `/v1` prefix and a Google bearer, and streams the upstream
+// response back.
 //
-// TRUST TIER (ARCHITECTURE.md §6.4): this artifact HOLDS A CREDENTIAL — it mints and
-// attaches a cloud-platform Google access token. It is therefore a CONTROL-side /
-// credentialed data-plane artifact and MUST NOT share a build identity with the
-// untrusted sandbox base image (which stays metadata-/credential-free). It ships as
-// a DISTINCT, separately-signed image (auth-proxy-image-release.yml).
+// WHERE THE BEARER COMES FROM (deployment modes — see selectTokenSource): the PRIMARY, what-this-repo-runs
+// mode is DELIVERED-FILE — deploy/ is google-provider-only with NO persistent in-cluster workload, so this
+// proxy holds NO Workload Identity; the control plane mints the short-lived Vertex bearer (workload-SA
+// self-impersonation) and DELIVERS it (per session) into this pod's token file (C7_AUTHPROXY_BEARER_FILE),
+// in a pod SEPARATE from the untrusted sandbox. Ambient Workload Identity is a SECONDARY mode kept for a
+// future persistent/shared deployment that does not yet exist.
+//
+// TRUST TIER (ARCHITECTURE.md §6.4): this artifact HOLDS A CREDENTIAL — it attaches a cloud-platform
+// Google access token. It is therefore a CONTROL-side / credentialed data-plane artifact and MUST NOT
+// share a build identity with the untrusted sandbox base image (which stays metadata-/credential-free).
+// It ships as a DISTINCT, separately-signed image (auth-proxy-image-release.yml).
 //
 // SECURITY invariants enforced here:
-//   - Fail closed: if no token can be minted, return 503 and NEVER forward the
-//     request unauthenticated. An upstream that 401s and an upstream that is reached
-//     without a token are not the same failure; we never produce the latter.
-//   - Never log token material or request/response bodies.
+//   - PIN (anti-open-relay): only an anthropic-publisher Vertex predict call for the configured
+//     project/region/model is forwarded; anything else is 404'd with the bearer NEVER attached.
+//   - Fail closed: if no token is available, return 503 and NEVER forward the request unauthenticated.
+//     An upstream that 401s and an upstream reached without a token are not the same failure; we never
+//     produce the latter.
+//   - Never log token material, request/response bodies, or request-derived paths.
 package main
 
 import (
@@ -32,11 +40,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -106,6 +117,41 @@ func selectTokenSource(ctx context.Context, bearerFile string) (tokenSource, str
 	return oauth2.ReuseTokenSource(nil, adc), "ambient ADC", nil
 }
 
+// predictPathRE matches the ONLY request shape the engine sends and the ONLY one this proxy will attach
+// a bearer to: an Anthropic-publisher Vertex predict call (rawPredict | streamRawPredict), pre-`/v1`.
+// Anchored + single-segment captures so it cannot be widened with extra path segments.
+var predictPathRE = regexp.MustCompile(`^/projects/([^/]+)/locations/([^/]+)/publishers/anthropic/models/([^/:]+):(rawPredict|streamRawPredict)$`)
+
+// requestPin bounds what the credential-free sandbox can invoke THROUGH this proxy. Every request must
+// match predictPathRE (structure + publisher=anthropic + a predict verb); project/region/model further
+// pin it when set ("" = do not pin that field — e.g. region is empty under a C7_AUTHPROXY_UPSTREAM
+// override). This stops the proxy being an OPEN RELAY that attaches the org Vertex bearer to arbitrary
+// Vertex APIs — least privilege (GOAL.md tenet 4), defence-in-depth atop the predict-only IAM role on
+// the minting SA. A non-matching request is rejected (404) with the bearer NEVER attached.
+type requestPin struct {
+	project string // ANTHROPIC_VERTEX_PROJECT_ID the session is pinned to ("" = any)
+	region  string // CLOUD_ML_REGION ("global" for the global host; "" = any, e.g. upstream override)
+	model   string // the pinned model ("" = any anthropic model)
+}
+
+func (p requestPin) allow(path string) bool {
+	m := predictPathRE.FindStringSubmatch(path)
+	if m == nil {
+		return false
+	}
+	proj, region, model := m[1], m[2], m[3]
+	if p.project != "" && proj != p.project {
+		return false
+	}
+	if p.region != "" && region != p.region {
+		return false
+	}
+	if p.model != "" && model != p.model {
+		return false
+	}
+	return true
+}
+
 // authProxy is the credential-attaching reverse proxy handler.
 type authProxy struct {
 	// upstream is the validated absolute https base of the real Vertex host, e.g.
@@ -113,40 +159,54 @@ type authProxy struct {
 	upstream *url.URL
 	// tokens mints the Google bearer attached to each forwarded request.
 	tokens tokenSource
+	// pin bounds which Vertex calls may be forwarded (anti-open-relay; see requestPin).
+	pin requestPin
 	// rp is the underlying streaming reverse proxy (httputil.ReverseProxy streams by
 	// default — it does NOT buffer the whole body — so SSE for :streamRawPredict works).
 	rp *httputil.ReverseProxy
 }
 
-// newAuthProxy wires a streaming reverse proxy to upstream, minting+attaching a
-// bearer on every request via tokens. upstream MUST be an absolute https URL.
-func newAuthProxy(upstream *url.URL, tokens tokenSource) (*authProxy, error) {
+// newAuthProxy wires a streaming reverse proxy to upstream, minting+attaching a bearer on every
+// (pinned) request via tokens. upstream MUST be an absolute https URL.
+func newAuthProxy(upstream *url.URL, tokens tokenSource, pin requestPin) (*authProxy, error) {
 	if upstream == nil {
 		return nil, errors.New("vertex-auth-proxy: nil upstream")
 	}
 	if tokens == nil {
 		return nil, errors.New("vertex-auth-proxy: nil token source")
 	}
-	ap := &authProxy{upstream: upstream, tokens: tokens}
+	ap := &authProxy{upstream: upstream, tokens: tokens, pin: pin}
 
 	ap.rp = &httputil.ReverseProxy{
-		// Director sets the upstream host. Token minting and path rewriting happen in
-		// ServeHTTP BEFORE the request is handed to rp, so that a token error can fail
-		// closed (the Director cannot return an error). FlushInterval defaults to
-		// streaming for text/event-stream responses, so SSE is not buffered.
-		Director: func(r *http.Request) {
-			r.URL.Scheme = ap.upstream.Scheme
-			r.URL.Host = ap.upstream.Host
-			r.Host = ap.upstream.Host
-			// Strip any inbound Forwarded/X-Forwarded-* the engine never sets but a
-			// hostile target could; we are the authoritative front and add nothing.
-			r.Header.Del("X-Forwarded-For")
-			r.Header.Del("Forwarded")
+		// Rewrite (NOT Director): with Rewrite, ReverseProxy does NOT auto-append an
+		// X-Forwarded-For — so the "we add nothing" invariant actually holds. Token mint, path
+		// rewrite, and the pin check all happen in ServeHTTP BEFORE the request reaches rp, so a
+		// rejected/credential-less request fails closed (Rewrite cannot signal an error).
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(ap.upstream)         // scheme+host; upstream has no path, so the /v1 path is preserved
+			pr.Out.Host = ap.upstream.Host // Host header / SNI = the real Vertex host
+			// Strip any inbound forwarding headers a hostile caller could set; we deliberately do
+			// NOT call pr.SetXForwarded(), so none are added back.
+			for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
+				pr.Out.Header.Del(h)
+			}
 		},
-		// Stream SSE immediately rather than buffering (FlushInterval -1 = flush each
-		// write). rawPredict is unary; streamRawPredict is SSE — both are safe to flush.
+		// Stream SSE immediately rather than buffering (FlushInterval -1 = flush each write).
+		// rawPredict is unary; streamRawPredict is SSE — both are safe to flush.
 		FlushInterval: -1,
-		ErrorLog:      log.Default(),
+		// Bound the connect + time-to-first-byte so a wedged/hostile upstream cannot pin a
+		// connection forever; the STREAM body stays unbounded (no response deadline) for SSE.
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment, // honour HTTPS_PROXY if egress is routed via the per-session proxy
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConns:          10,
+		},
+		ErrorLog: log.Default(),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			// Never echo the error detail to the client (could leak upstream URL
 			// internals); log a generic line with no body/token material.
@@ -161,7 +221,18 @@ func newAuthProxy(upstream *url.URL, tokens tokenSource) (*authProxy, error) {
 // the engine omits under a base-URL override, attaches the bearer, and streams the
 // request to the real Vertex host.
 func (ap *authProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 1. Mint the token FIRST. If we cannot, fail closed with 503 and forward NOTHING.
+	// 1. PIN check FIRST — before minting or attaching anything. Only an Anthropic-publisher Vertex
+	// predict call for the pinned project/region/model may be forwarded; anything else is rejected with
+	// the bearer NEVER attached, so the proxy is not an open relay for the credential-free sandbox.
+	if !ap.pin.allow(r.URL.Path) {
+		// Do NOT log the request-derived path (log-injection taint); the security event — a request
+		// that is not a permitted, pinned Vertex predict call — is what matters.
+		log.Printf("vertex-auth-proxy: rejected a request that is not a permitted Vertex predict call (pin)")
+		http.Error(w, "vertex-auth-proxy: request not permitted", http.StatusNotFound)
+		return
+	}
+
+	// 2. Mint the token. If we cannot, fail closed with 503 and forward NOTHING.
 	tok, err := ap.tokens.Token()
 	if err != nil || tok == nil || tok.AccessToken == "" {
 		// Do not log the error object verbatim if it could carry token material; the
@@ -171,7 +242,7 @@ func (ap *authProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Rewrite the path: the engine omits `/v1` when the base URL is overridden, so
+	// 3. Rewrite the path: the engine omits `/v1` when the base URL is overridden, so
 	// the real Vertex host (which serves under /v1) needs it prepended. Done once,
 	// idempotently — never double-prefix if a future engine starts sending it. Clear
 	// RawPath so the rewritten (unescaped) Path is authoritative on re-encode — a stale
@@ -179,12 +250,12 @@ func (ap *authProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = withV1Prefix(r.URL.Path)
 	r.URL.RawPath = ""
 
-	// 3. Attach the bearer. tok.SetAuthHeader sets `Authorization: Bearer <token>`
+	// 4. Attach the bearer. tok.SetAuthHeader sets `Authorization: Bearer <token>`
 	// (honouring the token type). We overwrite any inbound Authorization (the engine
 	// sends none, but we are authoritative).
 	tok.SetAuthHeader(r)
 
-	// 4. Forward (streaming). The reverse proxy preserves method, body, and the
+	// 5. Forward (streaming). The reverse proxy preserves method, body, and the
 	// anthropic-* / content-type headers as-is.
 	ap.rp.ServeHTTP(w, r)
 }

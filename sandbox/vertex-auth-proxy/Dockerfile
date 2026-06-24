@@ -1,17 +1,19 @@
 # syntax=docker/dockerfile:1
 #
 # Console7 Vertex auth-proxy image — a tiny reverse proxy that bridges the
-# CREDENTIAL-FREE sandbox to a real Vertex AI host: it adds the `/v1` path prefix the
-# pinned Claude Code engine omits under an ANTHROPIC_VERTEX_BASE_URL override, and
-# attaches a Google bearer minted from the POD's OWN ambient Workload Identity.
+# CREDENTIAL-FREE sandbox to a real Vertex AI host: it validates the request is a permitted (pinned)
+# anthropic predict call, adds the `/v1` path prefix the pinned Claude Code engine omits under an
+# ANTHROPIC_VERTEX_BASE_URL override, and attaches a Google bearer. In the PRIMARY (per-session) mode the
+# bearer is DELIVERED by the control plane into this pod's token file (C7_AUTHPROXY_BEARER_FILE); ambient
+# Workload Identity is a secondary mode for a future persistent deployment.
 #
 # TRUST TIER (ARCHITECTURE.md §6.4; DESIGN.md §8): this artifact HOLDS A CREDENTIAL (it
-# mints + attaches a cloud-platform Google token), so it is a CONTROL-side /
+# attaches a cloud-platform Google token), so it is a CONTROL-side /
 # credentialed data-plane artifact and is a DISTINCT, separately-signed image from the
 # untrusted sandbox base image — "the thing that holds the keys must not share a build
-# identity with the thing that runs untrusted code." It is wired in as a per-session
-# sidecar so the sandbox itself stays metadata-/credential-free; the egress wall sends
-# only the sandbox's Vertex traffic to this proxy (F2c wiring; F2b deploy GSA/WI/role).
+# identity with the thing that runs untrusted code." It runs as a SEPARATE per-session pod (NOT a
+# sandbox sidecar — that would expose the delivered bearer to the untrusted engine); the egress wall sends
+# only the sandbox's Vertex traffic to this proxy (F2c wiring; F2b deploy least-priv predict role).
 
 # ---- Stage 1: build the static Go binary ----
 # Pinned to the module toolchain (go.mod `go 1.25.11`) AND by DIGEST (content-addressed
@@ -35,7 +37,7 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db0
 COPY --from=build /out/console7-vertex-auth-proxy /usr/local/bin/console7-vertex-auth-proxy
 
 LABEL org.opencontainers.image.title="console7-vertex-auth-proxy" \
-      org.opencontainers.image.description="Console7 Vertex auth-proxy: adds the /v1 prefix the engine omits under a base-URL override and attaches a Google bearer from the pod's own Workload Identity; HOLDS a Vertex credential, so a distinct build/signing identity from the untrusted sandbox base image." \
+      org.opencontainers.image.description="Console7 Vertex auth-proxy: pins to anthropic predict, adds the /v1 prefix the engine omits under a base-URL override, and attaches a Google bearer (delivered per-session by the control plane); HOLDS a Vertex credential, so a distinct build/signing identity from the untrusted sandbox base image." \
       org.opencontainers.image.source="https://github.com/console7/console7" \
       org.opencontainers.image.licenses="Apache-2.0" \
       dev.console7.trust-tier="data-plane-credentialed"
