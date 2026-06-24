@@ -256,6 +256,41 @@ func TestBroker_InjectInferenceCredential(t *testing.T) {
 	}
 }
 
+func TestBroker_FetchRepoBundleAndPushBranch(t *testing.T) {
+	ca := signing.NewDevCA()
+	scm := devkit.NewMemSCM(time.Minute)
+	b := broker.New(devkit.NewDevIdentity(nil, nil), devkit.NewMemSecrets(devkit.NewSandboxRegistry()), scm,
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	ctx := context.Background()
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "widgets"}
+
+	// FetchRepoBundle delegates to the SCM seam and returns its bundle.
+	base, err := b.FetchRepoBundle(ctx, repo, "main")
+	if err != nil || len(base) == 0 {
+		t.Fatalf("FetchRepoBundle via broker: err=%v len=%d", err, len(base))
+	}
+	// PushBranch delegates to the SCM seam (and the seam records the working branch).
+	if err := b.PushBranch(ctx, interfaces.PushBranchRequest{
+		Subject: "alice", SessionID: "s1", Repo: repo, Branch: "c7/work",
+		Bundle: []byte("wb"), SessionDeadline: time.Now().Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("PushBranch via broker: %v", err)
+	}
+	if got := scm.PushedBranches(); len(got) != 1 || got[0] != "c7/work" {
+		t.Errorf("broker did not forward the push to the SCM seam: %v", got)
+	}
+
+	// A broker missing the SCM seam fails closed (an error, never a panic) on both.
+	nob := broker.New(devkit.NewDevIdentity(nil, nil), devkit.NewMemSecrets(devkit.NewSandboxRegistry()), nil,
+		devkit.NewPolicyInference(devkit.SeamPolicy{}), signing.NewNHIBinder(ca))
+	if _, err := nob.FetchRepoBundle(ctx, repo, "main"); err == nil {
+		t.Error("FetchRepoBundle on a broker missing the scm seam should fail closed")
+	}
+	if err := nob.PushBranch(ctx, interfaces.PushBranchRequest{Subject: "a", SessionID: "s", Repo: repo, Branch: "c7/w", Bundle: []byte("x"), SessionDeadline: time.Now().Add(time.Minute)}); err == nil {
+		t.Error("PushBranch on a broker missing the scm seam should fail closed")
+	}
+}
+
 type countingSecrets struct {
 	interfaces.SecretsProvider
 	mints int

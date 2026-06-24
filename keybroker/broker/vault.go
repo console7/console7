@@ -82,3 +82,22 @@ func (b *Broker) OpenPullRequest(ctx context.Context, pr interfaces.PullRequest)
 	}
 	return b.SCM.OpenPullRequest(ctx, pr)
 }
+
+// FetchRepoBundle fetches the base branch as a git bundle via the SCM seam, for the control plane
+// to seed into the sandbox (the push→PR bridge; the sandbox never fetches from the SCM itself).
+func (b *Broker) FetchRepoBundle(ctx context.Context, repo interfaces.RepoRef, baseBranch string) ([]byte, error) {
+	if b.SCM == nil {
+		return nil, errors.New("broker: missing scm seam")
+	}
+	return b.SCM.FetchRepoBundle(ctx, repo, baseBranch)
+}
+
+// PushBranch pushes the session's working branch (carried as a git bundle) via the SCM seam — the
+// control-plane half of the push→PR bridge. The push credential stays in the SCM provider; the
+// broker only forwards the request (it holds no SCM token itself).
+func (b *Broker) PushBranch(ctx context.Context, req interfaces.PushBranchRequest) error {
+	if b.SCM == nil {
+		return errors.New("broker: missing scm seam")
+	}
+	return b.SCM.PushBranch(ctx, req)
+}

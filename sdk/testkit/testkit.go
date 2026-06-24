@@ -115,6 +115,8 @@ func registry() []check {
 		{Contract{"IdentityProvider", "ResolveGroups", "let a subject self-assert or widen its own group membership"}, hasIdentity, checkIdentityResolveGroups},
 		{Contract{"SCMProvider", "MintWorkingCredential", "issue a durable token, allow push beyond the working branch, or let the sandbox git client see long-lived material"}, hasSCM, checkSCMMintWorkingCredential},
 		{Contract{"SCMProvider", "OpenPullRequest", "push to/merge a protected branch, or self-approve or actuate the change"}, hasSCM, checkSCMOpenPullRequest},
+		{Contract{"SCMProvider", "FetchRepoBundle", "return a durable token or make the sandbox fetch from the SCM itself"}, hasSCM, checkSCMFetchRepoBundle},
+		{Contract{"SCMProvider", "PushBranch", "push to a protected branch, push an empty bundle, or deliver the push credential to the sandbox"}, hasSCM, checkSCMPushBranch},
 		{Contract{"InferenceBackend", "Resolve", "back an unattended or multi-beneficiary session with a subscription credential, or pool a subscription across beneficiaries"}, hasInference, checkInferenceResolve},
 		{Contract{"PolicySoR", "ResolveRepo", "fail open to a permissive default on an unknown target, or derive tier/stratum from an in-repo file"}, hasPolicySoR, checkPolicySoRResolveRepo},
 		{Contract{"PolicySoR", "ResolveResource", "let a permissive origin confer a stricter target's reach, or fail open on an unknown resource"}, hasPolicySoR, checkPolicySoRResolveResource},
@@ -561,6 +563,49 @@ func checkSCMOpenPullRequest(ctx context.Context, p ProviderUnderTest) error {
 	}
 	if ref.Number == 0 && ref.URL == "" {
 		return errors.New("returned an empty PRRef")
+	}
+	return nil
+}
+
+func checkSCMFetchRepoBundle(ctx context.Context, p ProviderUnderTest) error {
+	// Must return non-empty content (a bundle) for a valid repo + base branch.
+	b, err := p.SCM.FetchRepoBundle(ctx, confRepo, "main")
+	if err != nil {
+		return fmt.Errorf("FetchRepoBundle for a valid repo errored: %w", err)
+	}
+	if len(b) == 0 {
+		return errors.New("FetchRepoBundle returned an empty bundle")
+	}
+	// Must fail closed on a missing base branch.
+	if _, err := p.SCM.FetchRepoBundle(ctx, confRepo, ""); err == nil {
+		return errors.New("FetchRepoBundle accepted an empty base branch")
+	}
+	return nil
+}
+
+func checkSCMPushBranch(ctx context.Context, p ProviderUnderTest) error {
+	deadline := time.Now().Add(30 * time.Minute)
+	// Must refuse a protected/default branch (the change is proposed via a PR, never pushed onto a
+	// protected ref).
+	if err := p.SCM.PushBranch(ctx, interfaces.PushBranchRequest{
+		Subject: confSubject, SessionID: "conf", Repo: confRepo, Branch: "main",
+		Bundle: []byte("b"), SessionDeadline: deadline,
+	}); err == nil {
+		return errors.New("pushed to the protected branch main")
+	}
+	// Must fail closed on an empty bundle (nothing to push).
+	if err := p.SCM.PushBranch(ctx, interfaces.PushBranchRequest{
+		Subject: confSubject, SessionID: "conf", Repo: confRepo, Branch: "feature/conf",
+		Bundle: nil, SessionDeadline: deadline,
+	}); err == nil {
+		return errors.New("pushed an empty bundle")
+	}
+	// Must accept a valid working-branch push.
+	if err := p.SCM.PushBranch(ctx, interfaces.PushBranchRequest{
+		Subject: confSubject, SessionID: "conf", Repo: confRepo, Branch: "feature/conf",
+		Bundle: []byte("working-branch-bundle"), SessionDeadline: deadline,
+	}); err != nil {
+		return fmt.Errorf("PushBranch for a valid working-branch push errored: %w", err)
 	}
 	return nil
 }

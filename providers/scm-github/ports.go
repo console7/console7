@@ -43,6 +43,23 @@ type AppAuth interface {
 	MintInstallationToken(ctx context.Context, req InstallationTokenRequest) (token string, expiry time.Time, err error)
 }
 
+// GitTransport confines the git-over-HTTPS transfer (clone→bundle, and fetch-bundle→push) the
+// control-plane push→PR bridge needs. The real adapter (git_cli.go) shells out to `git` (Option A,
+// zero new Go dependency, like cloud-gcp's kubectl/gcloud); the in-memory fake (fakes.go) returns a
+// synthetic bundle and records pushes. The provider mints the short-lived installation token and
+// hands it in here — the token never leaves the provider→transport boundary (control-plane only).
+type GitTransport interface {
+	// CloneBundle clones remoteURL at baseBranch authenticated with token and returns a git bundle
+	// of that branch (base content + history). token is a short-lived installation token; the
+	// implementation MUST keep it out of the process argv (e.g. via a git credential helper reading
+	// it from the child env), never write it to disk, and never embed it in the bundle.
+	CloneBundle(ctx context.Context, remoteURL, baseBranch, token string) ([]byte, error)
+	// PushBundle imports the working branch from bundle and pushes ONLY that branch ref to remoteURL
+	// authenticated with token. Same token-handling rules as CloneBundle. It MUST push exactly the
+	// one branch (never --mirror/--all, never a protected ref the provider already refused).
+	PushBundle(ctx context.Context, remoteURL, branch string, bundle []byte, token string) error
+}
+
 // PullRequestOpener confines the pull-request REST call. The real adapter (github_pr.go)
 // authenticates as the installation and calls go-github's PullRequests.Create; the in-memory
 // fake records the request and returns a synthetic ref.
