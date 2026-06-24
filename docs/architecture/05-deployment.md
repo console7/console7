@@ -12,7 +12,7 @@ only. The cloud-specific pieces sit behind the provider seams so AWS/Azure are p
 targets. Reference cloud = GCP; reference inference = Vertex (the inference cloud is an axis
 **orthogonal** to the control-plane cloud — ADR-0004).
 
-Legend: solid = implemented & landed · **faded + dashed = target state** (not yet coded & landed). After #39/#41/#43, the only target box here is the out-of-band egress **proxy** (PR-3).
+Legend: solid = implemented & landed · **faded + dashed = target state** (not yet coded & landed). After #39/#41/#43/#57 every box here is landed — the per-session out-of-band egress **proxy** is rendered by `providers/cloud-gcp` (#57, B8), and its egress/metadata-deny was **live-proven** (B11 PoC, 2026-06-23).
 
 ```mermaid
 flowchart TB
@@ -22,7 +22,7 @@ flowchart TB
     subgraph VPC["VPC — default-deny egress (authoritative perimeter)"]
       direction TB
       FW{{"VPC firewall + Cloud NAT<br/>default-deny egress; IMDS 169.254.169.254 blocked"}}
-      PROXY["egress proxy / forward-proxy (planned, PR-3)<br/>allowlist: inference + registries + MCP"]
+      PROXY["per-session egress proxy — Squid (#57)<br/>out-of-band FQDN allowlist: inference (+ approved registries/MCP)"]
 
       subgraph GKE["GKE cluster"]
         direction TB
@@ -87,8 +87,7 @@ flowchart TB
   class KBP broker;
   class SBP dp;
   class KMS,KMSS,SM,GCSE,VTX,AR,TFS store;
-  class FW,WIF net;
-  class PROXY netPlan;
+  class FW,WIF,PROXY net;
 ```
 
 ## Nodes & hosting topology
@@ -105,7 +104,10 @@ flowchart TB
   cluster + sandbox node pool + Cloud NAT** for the *sanctioned* path are landed (`modules/gke`),
   and the `CloudProvider` that programs the **per-session egress NetworkPolicy** is landed
   (`providers/cloud-gcp`, PR #41). The **out-of-band egress proxy** that enforces the composed FQDN
-  allowlist (inference endpoint + approved registries + approved MCP) is **pending** (PR-3).
+  allowlist (inference endpoint + approved registries + approved MCP) is **landed** — `providers/cloud-gcp`
+  renders one per-session Squid per `<id>-proxy` namespace (`renderPerSessionProxy`/`renderSquidConf`,
+  #57/B8), the sandbox NetworkPolicy pins egress to it, and its egress/metadata-deny was **live-proven**
+  (B11 PoC, 2026-06-23).
 - **IMDS / metadata** (169.254.169.254, the IPv6 metadata address, metadata DNS) is **not** a VPC
   control — GCP always allows VM→metadata traffic — so the authoritative block is **node config**:
   the GKE metadata server in **`GKE_METADATA` mode** on the sandbox node pool, which *conceals* the
@@ -155,9 +157,9 @@ flowchart TB
   nodes) + gVisor sandbox node pool (`sandbox_config gvisor`; sandbox node tag; `GKE_METADATA`
   node-SA concealment; structural gVisor taint) + control-plane pool + least-privilege node SA +
   WI binding (control KSA → secrets SA) + Cloud Router/NAT for the sanctioned egress path +
-  namespace-TTL reaper. The per-session NetworkPolicy is programmed at runtime by
-  `providers/cloud-gcp` (PR #41). Only the **out-of-band egress proxy** + composed FQDN allowlist
-  remain pending (PR-3).
+  namespace-TTL reaper. The per-session NetworkPolicy **and** the out-of-band per-session Squid proxy
+  (composed FQDN allowlist) are programmed/rendered at runtime by `providers/cloud-gcp` (#41/#57);
+  the full sandbox boundary is landed and live-proven (B11 PoC).
 
 ## Deploy-time topology (provisioning identities)
 Provisioning is **keyless**: GitHub Actions in the adopter's `console7-deploy[-template]`
@@ -212,8 +214,9 @@ flowchart LR
 - The managed-service IAM/topology (KMS/SM/GCS/Vertex), the **VPC + sandbox subnet + default-DENY
   egress floor** (PR #39), and the **GKE cluster, node pools, Cloud NAT, WI binding, and reaper**
   (PR-2b) are grounded in real Terraform; the per-session **NetworkPolicy** is programmed at
-  runtime by `providers/cloud-gcp` (PR #41). Only the **out-of-band egress proxy** (and its
-  composed FQDN allowlist) remains **(planned/stub)** (PR-3) — treat the diagram's proxy as the
-  specified target, not yet-provisioned code.
+  runtime by `providers/cloud-gcp` (PR #41), as is the **out-of-band per-session Squid proxy** (its
+  composed FQDN allowlist, #57/B8). The whole sandbox egress boundary — VPC floor + NetworkPolicy +
+  per-session proxy + metadata concealment — is landed and was **live-proven end-to-end** (the B11 PoC
+  on 2026-06-23: genuine engine run with non-allowlisted-host and metadata deny verified through the proxy).
 - HA posture (single-region / multi-region active-active / break-glass) is an **adopter
   configuration choice**, not a fixed feature (`ARCHITECTURE.md` §4) — **(assumed)** here.
