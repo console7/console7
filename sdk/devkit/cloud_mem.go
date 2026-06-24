@@ -172,13 +172,17 @@ func (c *MemCloud) RunTask(ctx context.Context, h interfaces.SandboxHandle, task
 	if !ok || !sb.live {
 		return interfaces.EngineResult{}, errors.New("devkit: MemCloud cannot run a task in an unknown, destroyed, or expired sandbox")
 	}
-	c.lastTask = task // record the input so a test can assert the orchestrator threaded the right lane/env.
+	c.lastTask = task // record the input (incl. RepoBundle) so a test can assert the orchestrator threaded the right lane/env/seed.
 	digest := benchCommitDigest(task)
 	return interfaces.EngineResult{
 		CommitDigest: digest,
 		HeadSHA:      hex.EncodeToString(digest)[:40],
 		FilesChanged: []string{"(devkit MemCloud stand-in: no genuine engine run, deterministic digest over task coordinates)"},
 		Changed:      true,
+		// A non-empty, deterministic stand-in for the working-branch bundle the real provider extracts,
+		// so the orchestrator's control-plane-side push step (SCMProvider.PushBranch) has a payload to
+		// thread end to end on the bench. MemSCM accepts any non-empty bundle; the bytes are opaque here.
+		CommitBundle: append([]byte("devkit-mem-bundle:"), digest...),
 	}, nil
 }
 

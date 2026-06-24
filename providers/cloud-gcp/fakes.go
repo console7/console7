@@ -182,6 +182,9 @@ func (r *InMemoryEngineRunner) Run(_ context.Context, _ interfaces.SandboxHandle
 		HeadSHA:      "0000000000000000000000000000000000000001",
 		FilesChanged: []string{"(cloudgcp fake: no genuine engine run)"},
 		Changed:      true,
+		// Non-empty stand-in for the working-branch bundle the real runner extracts, so the conformance
+		// CommitBundle contract (Changed ⇒ non-empty) holds against the fake too.
+		CommitBundle: []byte("cloudgcp-fake-bundle"),
 	}, nil
 }
 

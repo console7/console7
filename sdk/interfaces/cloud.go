@@ -88,6 +88,20 @@ type EngineTask struct {
 	// to the sandbox as ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION and are NOT secrets.
 	VertexProjectID string
 	VertexRegion    string
+	// RepoBundle is the base repo content as a git bundle, which the implementation MUST seed into
+	// the sandbox BEFORE the engine runs (e.g. over its existing in-sandbox exec channel) so the
+	// engine works a REAL checkout of task.Branch's base and proposes a real diff. Empty is valid: the
+	// implementation then inits an empty fresh-branch workspace (the engine has no base to diff).
+	//
+	// SECURITY: RepoBundle is the adopter's OWN repo content moving WITHIN the tenancy (control plane
+	// → sandbox), NOT a credential and NOT secret. It MUST be seeded WITHOUT giving the sandbox any
+	// SCM network reach or push credential — the control plane fetches it (SCMProvider) and hands it
+	// in, so the untrusted sandbox never holds an SCM egress path or token (boundary authoritative +
+	// least privilege, tenet 3/5; the lethal-trifecta surface is unchanged). It MUST influence only the
+	// engine's working tree, never the egress perimeter or the locked policy. (Size is currently
+	// unbounded; a max-bundle cap is a tracked hardening — the bytes are first-party, control-plane-
+	// produced, so this is a resource bound, not a confidentiality one.)
+	RepoBundle []byte
 }
 
 // EngineResult is what a completed engine run yields back to the control plane: the PROPOSAL the
@@ -99,9 +113,24 @@ type EngineResult struct {
 	// non-empty when Changed is true; a run that produced no commit MUST set Changed false rather
 	// than return a zero digest the orchestrator would sign as if work had happened.
 	CommitDigest []byte
-	// HeadSHA is the engine-produced commit's object id on the working branch. It is the head a
-	// later (Tier-2) control-plane-side push + PR consumes; this seam never pushes to a remote.
+	// HeadSHA is the engine-produced commit's object id on the working branch. It is the head the
+	// control-plane-side push + PR consumes; this seam never pushes to a remote.
 	HeadSHA string
+	// CommitBundle is a git bundle of the working branch (the engine's commit plus the base history it
+	// builds on), which the implementation extracts AFTER the commit. The CONTROL PLANE — never the
+	// sandbox — pushes this branch to the remote with a short-lived, branch-scoped working credential
+	// and then opens the PR, so the push credential and SCM egress never enter the untrusted sandbox
+	// (observe≠actuate, tenet 6; see HeadSHA's "control-plane-side push"). It MUST be a complete,
+	// fetchable bundle for task.Branch when Changed is true, and is empty when Changed is false.
+	//
+	// SECURITY: unlike FilesChanged (a paths-only summary, explicitly NOT an exfil channel), CommitBundle
+	// is CONTENT-BEARING — it is the actual diff/objects the untrusted engine produced leaving the
+	// sandbox. That is the same exposure as any agent-authored commit and is mitigated downstream by the
+	// human PR review (tenet 5/6); the CONTROL-PLANE PUSH PATH is the enforcement point that MUST
+	// DLP-scan the diff before it reaches the remote (DESIGN.md §10; the planned pre-egress DLP control),
+	// mirroring the `git add -A` note in the cloud-gcp adapter. (Size is currently unbounded — a tracked
+	// hardening on both bundle legs.)
+	CommitBundle []byte
 	// FilesChanged is a short, human-auditable summary of the proposed change (paths / counts) for
 	// the PR body and the evidence record. It MUST NOT carry secret material or file CONTENTS — it
 	// is a summary for an auditor, never a data-exfiltration channel out of the sandbox (tenet 1).
