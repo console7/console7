@@ -237,7 +237,16 @@ func (k *kubeRuntime) Provision(ctx context.Context, h interfaces.SandboxHandle,
 		return err
 	}
 	expiresAt := nowUTC().Add(spec.MaxTTL).Format(time.RFC3339)
-	return k.run.kubectlAnnotate(ctx, "namespace", h.ID, "console7.dev/expires-at="+expiresAt)
+	if err := k.run.kubectlAnnotate(ctx, "namespace", h.ID, "console7.dev/expires-at="+expiresAt); err != nil {
+		return err
+	}
+	// Wait for the pod to be Ready before Provision returns. Credential delivery (DeliverIfOwned) is
+	// bounded to a short deliverTimeout and runs right after provision/egress-narrow, so without this
+	// it races the pod's startup — on a cold gVisor scale-from-zero the node + pod can take minutes,
+	// far longer than the delivery budget, and the `kubectl exec` write fails ("pod not running"). The
+	// gate makes a provisioned sandbox immediately usable for injection; the RunTask gate then re-checks
+	// cheaply. Bounded by readyTimeout (cold-scale headroom) within the caller's ctx (session deadline).
+	return k.run.waitReady(ctx, "pod/"+h.ID, h.ID, "condition=Ready", readyTimeout)
 }
 
 // Destroy deletes the sandbox pod (the workload). The namespace and its NetworkPolicy are reaped

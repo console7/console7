@@ -3,6 +3,8 @@ package scmgithub
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
@@ -10,14 +12,27 @@ import (
 	"github.com/console7/console7/sdk/interfaces"
 )
 
+// prCreateAttempts / prCreateBackoff bound the retry on GitHub's post-push eventual-consistency 422
+// ("not all refs are readable"): when the control plane pushes the head branch and immediately opens
+// the PR, the PR API can briefly not yet see the just-pushed ref. We retry only that transient.
+const prCreateAttempts = 6
+const prCreateBackoff = 750 * time.Millisecond
+
+// isTransientRefRace reports whether err is GitHub's "the head ref I just pushed isn't readable yet"
+// 422 — a timing race after a push, safe to retry (NOT a genuine validation failure like head==base).
+func isTransientRefRace(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not all refs are readable")
+}
+
 var _ PullRequestOpener = (*ghApp)(nil)
 
 // CreatePullRequest opens a pull request as the installation. OpenPullRequest carries no
 // credential, so this adapter mints its OWN repository-scoped installation token (via the App
-// transport) for the call. The token is narrowed to pullRequestPermissions (pull_requests:write
-// only — NOT contents:write): opening a PR does not need write access to contents, so the
-// actuation-adjacent token stays minimal. It opens a PR ONLY — it never merges, approves, or
-// actuates (author/approve/actuate stay separated; GOAL.md tenet 6).
+// transport) for the call. The token is narrowed to pullRequestPermissions (pull_requests:write to
+// open the PR, plus contents:READ — GitHub must read the head + base refs to validate the PR; a
+// pull_requests-only token 422s with "not all refs are readable"). It is contents:READ, never write
+// (the push already happened), so the actuation-adjacent token stays minimal. It opens a PR ONLY —
+// it never merges, approves, or actuates (author/approve/actuate stay separated; GOAL.md tenet 6).
 //
 // NOTE: this token is necessarily NOT session-bound — the OpenPullRequest seam carries no Subject
 // or SessionID — so the human->NHI lineage stamped at MintWorkingCredential does not extend to the
@@ -27,8 +42,9 @@ func (g *ghApp) CreatePullRequest(ctx context.Context, pr interfaces.PullRequest
 	if err != nil {
 		return "", 0, err
 	}
-	// pull_requests:write only, intersected with the granted ceiling so a narrowed
-	// Config.Permissions tightens (or fails closed) PR opening rather than being overridden.
+	// pull_requests:write plus contents:READ (to validate the PR's head/base refs), intersected with
+	// the granted ceiling so a narrowed Config.Permissions tightens (or fails closed) PR opening
+	// rather than being overridden.
 	perms, err := toInstallationPermissions(intersectPermissions(pullRequestPermissions, g.perms))
 	if err != nil {
 		return "", 0, err
@@ -46,14 +62,45 @@ func (g *ghApp) CreatePullRequest(ctx context.Context, pr interfaces.PullRequest
 	if err != nil {
 		return "", 0, err
 	}
-	created, _, err := client.PullRequests.Create(ctx, pr.Repo.Owner, pr.Repo.Name, &github.NewPullRequest{
+	newPR := &github.NewPullRequest{
 		Title: github.Ptr(pr.Title),
 		Head:  github.Ptr(pr.Head),
 		Base:  github.Ptr(pr.Base),
 		Body:  github.Ptr(pr.Body),
-	})
-	if err != nil {
-		return "", 0, fmt.Errorf("scmgithub: PullRequests.Create: %w", err)
 	}
-	return created.GetHTMLURL(), created.GetNumber(), nil
+	// Retry ONLY the post-push eventual-consistency race (the head ref we just pushed isn't readable
+	// by the PR API yet); any other error (e.g. a genuine validation failure) returns immediately.
+	return retryTransientRefRace(ctx, prCreateAttempts, prCreateBackoff, func(ctx context.Context) (string, int, error) {
+		created, _, err := client.PullRequests.Create(ctx, pr.Repo.Owner, pr.Repo.Name, newPR)
+		if err != nil {
+			return "", 0, err
+		}
+		return created.GetHTMLURL(), created.GetNumber(), nil
+	})
+}
+
+// retryTransientRefRace calls create up to attempts times, retrying ONLY isTransientRefRace errors
+// (the post-push "not all refs are readable" 422) with a linear backoff (attempt*backoff between
+// tries) bounded by ctx. Any other error returns immediately (a genuine validation failure must NOT
+// be retried), and the loop gives up — surfacing the last error — after the attempt bound. It is the
+// extracted, port-free core of the retry so it is unit-testable against a fake create closure without
+// a real GitHub client (the ghApp adapter is the CI blind spot). attempts < 1 is treated as 1.
+func retryTransientRefRace(ctx context.Context, attempts int, backoff time.Duration, create func(context.Context) (string, int, error)) (string, int, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 1; ; attempt++ {
+		url, number, err := create(ctx)
+		if err == nil {
+			return url, number, nil
+		}
+		if attempt >= attempts || !isTransientRefRace(err) {
+			return "", 0, fmt.Errorf("scmgithub: PullRequests.Create: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return "", 0, ctx.Err()
+		case <-time.After(time.Duration(attempt) * backoff):
+		}
+	}
 }

@@ -3,6 +3,7 @@ package scmgithub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,109 @@ func TestIntersectPermissions(t *testing.T) {
 	// A permission the ceiling does not grant is dropped (downstream fails closed).
 	if got := intersectPermissions(map[string]string{"pull_requests": "write"}, map[string]string{"contents": "write"}); len(got) != 0 {
 		t.Fatalf("ungranted permission should be dropped, got %v", got)
+	}
+}
+
+// The PR-open token MUST request pull_requests:write AND contents:READ (never write): GitHub can
+// only validate a PR if it can read the head + base refs, so a pull_requests-only token 422s with
+// "not all refs are readable" (the E4 live-run finding). contents must be READ, not write — the push
+// already happened and the PR-open token must not be able to mutate contents.
+func TestPullRequestPermissions_RequestsContentsRead(t *testing.T) {
+	if pullRequestPermissions["pull_requests"] != "write" {
+		t.Errorf("pullRequestPermissions must request pull_requests:write, got %q", pullRequestPermissions["pull_requests"])
+	}
+	if pullRequestPermissions["contents"] != "read" {
+		t.Errorf("pullRequestPermissions must request contents:read (GitHub reads head/base refs to validate the PR), got %q", pullRequestPermissions["contents"])
+	}
+	if len(pullRequestPermissions) != 2 {
+		t.Errorf("pullRequestPermissions must be exactly {pull_requests:write, contents:read}, got %v", pullRequestPermissions)
+	}
+}
+
+// The PR-open permissions must intersect correctly against the granted ceiling: under the full
+// install ceiling they pass through unchanged (write+read), and a narrowed ceiling tightens — never
+// widens — them. A ceiling that grants contents but not pull_requests drops pull_requests (the
+// downstream PR-open then fails closed rather than acting over-privileged).
+func TestPullRequestPermissions_IntersectsCeiling(t *testing.T) {
+	// Full install ceiling (DefaultPermissions: contents:write, pull_requests:write): the PR-open
+	// request passes through as pull_requests:write + contents:read (read is below the write ceiling).
+	got := intersectPermissions(pullRequestPermissions, DefaultPermissions)
+	if got["pull_requests"] != "write" || got["contents"] != "read" || len(got) != 2 {
+		t.Fatalf("pullRequestPermissions ∩ full ceiling = %v, want {pull_requests:write, contents:read}", got)
+	}
+	// A ceiling that caps contents to read leaves contents:read unchanged (read ∩ read = read).
+	got = intersectPermissions(pullRequestPermissions, map[string]string{"pull_requests": "write", "contents": "read"})
+	if got["contents"] != "read" {
+		t.Fatalf("contents:read ∩ read ceiling = %v, want contents:read", got)
+	}
+	// A ceiling missing pull_requests drops it (the PR-open token cannot be over-privileged past the
+	// install) — only contents:read survives, and the downstream open fails closed.
+	got = intersectPermissions(pullRequestPermissions, map[string]string{"contents": "write"})
+	if _, hasPR := got["pull_requests"]; hasPR {
+		t.Fatalf("a ceiling without pull_requests must drop it, got %v", got)
+	}
+	if got["contents"] != "read" {
+		t.Fatalf("contents:read should survive a contents:write ceiling, got %v", got)
+	}
+}
+
+// The PR-open retry MUST retry the transient post-push "not all refs are readable" 422 and give up
+// after the attempt bound, returning the last error. It must NOT retry a genuine validation failure.
+// The real opener is the ghApp adapter (a live GitHub client, not unit-testable here), so the retry
+// loop was extracted into retryTransientRefRace, tested directly against a fake create closure that
+// fails N times then succeeds. (See concerns: the small refactor of CreatePullRequest's loop.)
+func TestRetryTransientRefRace(t *testing.T) {
+	transient := errors.New("422 Validation Failed: not all refs are readable")
+
+	// Succeeds after a few transient failures, WITHIN the attempt bound: the loop retries and wins.
+	calls := 0
+	url, number, err := retryTransientRefRace(context.Background(), 5, time.Microsecond,
+		func(context.Context) (string, int, error) {
+			calls++
+			if calls < 3 {
+				return "", 0, transient
+			}
+			return "https://github.com/acme/app/pull/7", 7, nil
+		})
+	if err != nil {
+		t.Fatalf("expected success after retrying the transient race, got %v", err)
+	}
+	if url == "" || number != 7 {
+		t.Fatalf("expected the eventual success (url, #7), got (%q, %d)", url, number)
+	}
+	if calls != 3 {
+		t.Fatalf("expected exactly 3 attempts (2 transient + 1 success), got %d", calls)
+	}
+
+	// Always transient: the loop gives up after exactly `attempts` tries and surfaces the last error.
+	calls = 0
+	_, _, err = retryTransientRefRace(context.Background(), 4, time.Microsecond,
+		func(context.Context) (string, int, error) {
+			calls++
+			return "", 0, transient
+		})
+	if err == nil {
+		t.Fatal("expected the retry to give up and return an error after the attempt bound")
+	}
+	if calls != 4 {
+		t.Fatalf("expected exactly the attempt bound (4) tries, got %d", calls)
+	}
+	if !strings.Contains(err.Error(), "not all refs are readable") {
+		t.Errorf("the surfaced error should wrap the underlying 422, got %v", err)
+	}
+
+	// A genuine (non-transient) validation failure must NOT be retried — it returns on the FIRST try.
+	calls = 0
+	_, _, err = retryTransientRefRace(context.Background(), 5, time.Microsecond,
+		func(context.Context) (string, int, error) {
+			calls++
+			return "", 0, errors.New("422 Validation Failed: A pull request already exists")
+		})
+	if err == nil {
+		t.Fatal("expected a non-transient error to be returned, not retried")
+	}
+	if calls != 1 {
+		t.Fatalf("a non-transient error must not be retried; expected 1 attempt, got %d", calls)
 	}
 }
 

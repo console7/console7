@@ -24,9 +24,11 @@ in-band guards are defence-in-depth). GitHub-side, this provider **does** enforc
 - **Per-operation least-privilege.** `DefaultPermissions` is the *granted ceiling* (what the App is
   installed with). Each operation requests only the subset it needs, **intersected** with that
   ceiling: a working credential gets `contents: write` **only** (it can't open/merge PRs);
-  `OpenPullRequest` mints a separate `pull_requests: write`-only token. The adapter rejects any key
-  outside its allowlist **and** any level beyond `read`/`write`, so a `Config.Permissions` override
-  only ever tightens — never widens.
+  `OpenPullRequest` mints a separate token narrowed to `pull_requests: write` plus `contents: read`
+  — GitHub must read the head/base refs to validate the PR, so a `pull_requests`-only token fails
+  with `422 "not all refs are readable"`; `contents` is **read**, never write (the push already
+  happened). The adapter rejects any key outside its allowlist **and** any level beyond
+  `read`/`write`, so a `Config.Permissions` override only ever tightens — never widens.
 - **No durable token leaves the provider.** `MintWorkingCredential` returns only an opaque,
   expiring `CredentialRef`; the token is held behind that ref and never returned to a caller.
 - **PR-only exit.** `OpenPullRequest` opens a PR and never merges, approves, or actuates; it

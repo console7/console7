@@ -41,12 +41,14 @@ var DefaultPermissions = map[string]string{"contents": "write", "pull_requests":
 // PRs; OpenPullRequest mints its own narrower token). Intersected with the granted ceiling.
 var workingCredentialPermissions = map[string]string{"contents": "write"}
 
-// pullRequestPermissions is the per-operation subset OpenPullRequest needs: pull_requests write
-// only, NOT contents (the push already happened). Intersected with the granted ceiling, so an
-// adopter who narrows pull_requests below write tightens (or fails closed) PR opening rather than
-// being silently overridden. Keeping this token minimal limits what an actuation-adjacent token
-// can do (GOAL.md tenets 4, 6).
-var pullRequestPermissions = map[string]string{"pull_requests": "write"}
+// pullRequestPermissions is the per-operation subset OpenPullRequest needs: pull_requests write to
+// open the PR, plus contents READ — GitHub must read the head + base refs to validate the PR, and a
+// pull_requests-only token cannot (it fails with 422 "not all refs are readable"). contents is READ,
+// never write (the push already happened; the PR-open token must not be able to mutate contents).
+// Intersected with the granted ceiling, so an adopter who narrows below this tightens (or fails
+// closed) PR opening rather than being silently overridden. Minimal for an actuation-adjacent token
+// (GOAL.md tenets 4, 6).
+var pullRequestPermissions = map[string]string{"pull_requests": "write", "contents": "read"}
 
 // readContentsPermissions is the per-operation subset FetchRepoBundle needs: contents READ only (to
 // clone the base) — never write, never pull_requests. Intersected with the granted ceiling.
