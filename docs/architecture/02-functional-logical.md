@@ -130,6 +130,7 @@ flowchart TB
   classDef tier1 fill:#cfe3f7,stroke:#1168bd,color:#11304a;
   classDef tier1Plan fill:#eef3f8,stroke:#9bb3cf,color:#8a97a6,stroke-dasharray:5 4;
   classDef broker fill:#e7d6f5,stroke:#7b3fab,color:#3a1d52;
+  classDef dp fill:#f7d6d6,stroke:#c0392b,color:#5b1b14;
   classDef dpPlan fill:#fbeeee,stroke:#e2a7a1,color:#b08a86,stroke-dasharray:5 4;
   classDef seam fill:#d8f0dd,stroke:#27ae60,color:#13502a;
   classDef prov fill:#fff3cd,stroke:#b8860b,color:#5c4500;
@@ -139,7 +140,8 @@ flowchart TB
   class ORCH,PDP,EV tier1;
   class UI,IR,DLP tier1Plan;
   class BRK,SIGN broker;
-  class SB,PX,OG dpPlan;
+  class SB,PX dp;
+  class OG dpPlan;
   class S1,S2,S3,S4,S5,S6,S7,S8,S9 seam;
   class PCloud,PSec,PScm,PVx,PAnt,PGcs prov;
   class POpa provPlan;
@@ -168,7 +170,7 @@ flowchart TB
 | Container | Status | Responsibility |
 |---|---|---|
 | `base-image` | ✅ Dockerfile + `policyhelper` | Wraps the **genuine**, pinned Claude Code engine (distinct build identity, non-root, fail-closed); `policyHelper` renders the locked managed-settings + the operate mutating-command tripwire binary per persona × tier (PR-3). Engine-invocation seam landed (`Cloud.RunTask`→`EngineResult`, #47) + in-sandbox `git`/`ca-certificates` (#48); live in-pod engine integration ◻ Tier-2; Signing/SBOM ◻. |
-| `egress-proxy` | ✅ per-session Squid (rendered by `cloud-gcp`) | The **authoritative** default-deny FQDN perimeter: one Squid per session (`renderPerSessionProxy`/`renderSquidConf`) in its own `<id>-proxy` namespace; the sandbox NetworkPolicy pins egress to that per-session `proxy-for:<id>` proxy only, reached by IP via `HTTPS_PROXY` (no in-sandbox DNS). Node-local IMDS blocked by GKE_METADATA, *not* this proxy. The `sandbox/egress-proxy/` dir is the requirements README. Live egress/metadata-deny proof ◻ B11. |
+| `egress-proxy` | ✅ per-session Squid (rendered by `cloud-gcp`) | The **authoritative** default-deny FQDN perimeter: one Squid per session (`renderPerSessionProxy`/`renderSquidConf`) in its own `<id>-proxy` namespace; the sandbox NetworkPolicy pins egress to that per-session `proxy-for:<id>` proxy only, reached by IP via `HTTPS_PROXY` (no in-sandbox DNS). Node-local IMDS blocked by GKE_METADATA, *not* this proxy. The `sandbox/egress-proxy/` dir is the requirements README. Live egress/metadata-deny proof ✅ (B11 PoC, 2026-06-23). |
 | `observe-gateway` | ◻ README | Operate-lane redacting, query-audited, rate-limited façade over production telemetry. |
 
 ### The nine seams (`sdk/interfaces/`) and their reference providers
@@ -194,7 +196,7 @@ flowchart TB
   behaviour is shown per the normative spec and marked ◻ (faded). `cloud-gcp` **landed**
   (#41) — the `CloudProvider` is no longer MemCloud-only — and now **renders the per-session
   egress proxy** (B8: a Squid per `<id>-proxy` namespace, default-deny FQDN ACLs, NetworkPolicy-pinned);
-  the live egress/metadata-deny proof is ◻ B11. Everything marked ✅ was read in source.
+  the live egress/metadata-deny proof landed too (✅ B11 PoC, 2026-06-23). Everything marked ✅ was read in source.
 - `IdentityProvider` and `PolicySoR` have **real dev/in-memory** implementations
   (`devkit.DevIdentity`, `devkit.FixedPolicySoR`); their *production* references
   (OIDC/JWKS, GRC registry adapter) are **(assumed/planned)** for later phases.
