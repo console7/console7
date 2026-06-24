@@ -90,7 +90,8 @@ func TestComposition_SigningLineageWORM_OverEvidenceGCSStore(t *testing.T) {
 	// (3) Per-record SSO->NHI lineage verifies for every record, in the expected order.
 	wantEvents := []string{
 		"session-start", "sandbox-provisioned", "inference-resolved", "egress-narrowed",
-		"org-credential-injected", "commit-signed", "pr-opening", "pr-opened", "session-end",
+		"org-credential-injected", "repo-seeded", "commit-signed", "branch-pushing", "branch-pushed",
+		"pr-opening", "pr-opened", "session-end",
 	}
 	if sink.Len() != len(wantEvents) {
 		t.Fatalf("evidence has %d records, want %d", sink.Len(), len(wantEvents))
