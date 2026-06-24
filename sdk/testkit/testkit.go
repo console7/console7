@@ -262,6 +262,17 @@ func checkCloudRunTask(ctx context.Context, p ProviderUnderTest) error {
 		_ = p.Cloud.DestroySandbox(ctx, h)
 		return errors.New("reported a changed run with an empty commit digest")
 	}
+	// A changed run must also carry a non-empty CommitBundle — the working branch the control plane
+	// pushes; a no-op run must NOT (nothing to push). Without this a provider could claim a change the
+	// control-plane-side push has no payload for (cloud.go EngineResult.CommitBundle).
+	if res.Changed && len(res.CommitBundle) == 0 {
+		_ = p.Cloud.DestroySandbox(ctx, h)
+		return errors.New("reported a changed run with an empty commit bundle (nothing for the control plane to push)")
+	}
+	if !res.Changed && len(res.CommitBundle) != 0 {
+		_ = p.Cloud.DestroySandbox(ctx, h)
+		return errors.New("a no-change run must return an empty commit bundle")
+	}
 	// No run after destroy: the load-bearing invariant — a task must never execute in a torn-down
 	// (perimeter-gone) sandbox.
 	if err := p.Cloud.DestroySandbox(ctx, h); err != nil {

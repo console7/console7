@@ -15,7 +15,7 @@ func seedTask(branch string) interfaces.EngineTask {
 }
 
 func TestWorkspaceSeedScript_Scaffolding(t *testing.T) {
-	s, err := workspaceSeedScript("/workspace", seedTask("c7/session-abc"))
+	s, err := workspaceSeedScript("/workspace", seedTask("c7/session-abc"), "")
 	if err != nil {
 		t.Fatalf("workspaceSeedScript: %v", err)
 	}
@@ -31,11 +31,41 @@ func TestWorkspaceSeedScript_Scaffolding(t *testing.T) {
 			t.Errorf("seed script missing %q\n---\n%s", want, s)
 		}
 	}
-	// The script must NOT fetch/clone — content seeding is the live B11 step (no token/egress here).
+	// With NO bundle, the script must NOT do any git network/transfer I/O — it is a pure scaffold.
 	for _, forbidden := range []string{"git clone", "git fetch", "git pull"} {
 		if strings.Contains(s, forbidden) {
-			t.Errorf("seed script unexpectedly performs network I/O (%q) — that is B11\n%s", forbidden, s)
+			t.Errorf("no-bundle seed script unexpectedly transfers content (%q)\n%s", forbidden, s)
 		}
+	}
+}
+
+func TestWorkspaceSeedScript_WithBundle(t *testing.T) {
+	// When the control plane hands in a base bundle, the seed fetches the base content FROM THE LOCAL
+	// BUNDLE FILE (never the network), branches the working branch off it, and removes the bundle so it
+	// is never committed. The remote URL (github.com) is still only recorded, never reached.
+	bp := "/workspace/.console7-base.bundle"
+	s, err := workspaceSeedScript("/workspace", seedTask("c7/session-abc"), bp)
+	if err != nil {
+		t.Fatalf("workspaceSeedScript(bundle): %v", err)
+	}
+	for _, want := range []string{
+		"git init -q",
+		"git fetch -q '" + bp + "' 'refs/heads/*:refs/heads/c7base/*'", // fetch from the FILE, not origin
+		`if [ "$c7n" != "1" ]`,                // fail closed unless EXACTLY ONE base head (no silent-wrong-base)
+		"git checkout -q -B 'c7/session-abc'", // branch the working branch off the base
+		"rm -f '" + bp + "'",                  // bundle never lands in the commit
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("bundle seed script missing %q\n---\n%s", want, s)
+		}
+	}
+	// The fetch must target the local bundle PATH, never the origin remote (no SCM egress from the sandbox).
+	if strings.Contains(s, "git fetch -q origin") || strings.Contains(s, "git fetch origin") {
+		t.Errorf("bundle seed must fetch the local file, never origin:\n%s", s)
+	}
+	// With a base checked out, there is no unborn-HEAD symbolic-ref (checkout -B sets the branch).
+	if strings.Contains(s, "git symbolic-ref HEAD") {
+		t.Errorf("bundle seed should checkout -B the base, not set an unborn HEAD:\n%s", s)
 	}
 }
 
@@ -53,7 +83,7 @@ func TestWorkspaceSeedScript_Validation(t *testing.T) {
 		{"protected Master (case)", seedTask("Master")},
 		{"protected production", seedTask("production")},
 	} {
-		if _, err := workspaceSeedScript("/workspace", tc.task); err == nil {
+		if _, err := workspaceSeedScript("/workspace", tc.task, ""); err == nil {
 			t.Errorf("%s: expected a validation error", tc.name)
 		}
 	}

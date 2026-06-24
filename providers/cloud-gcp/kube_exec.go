@@ -61,6 +61,24 @@ func (r *kubeRunner) run(ctx context.Context, name string, stdin []byte, args ..
 	return out, nil
 }
 
+// runOut is run's sibling for a BINARY stdout payload (a git bundle): it returns STDOUT ONLY, with
+// stderr captured separately and surfaced only on error. CombinedOutput would interleave any stderr
+// (git's progress/notices) into the bundle bytes and corrupt it, so the extract path uses this.
+func (r *kubeRunner) runOut(ctx context.Context, name string, stdin []byte, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204 — literal command ("kubectl"); validated args; RISKS R-3
+	cmd.Env = r.env()
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("cloudgcp: %s %s: %w: %s", name, strings.Join(args, " "), err, bytes.TrimSpace(stderr.Bytes()))
+	}
+	return out, nil
+}
+
 // env inherits the process environment (so kubectl/gcloud find their binaries and ambient
 // Workload-Identity config) but pins KUBECONFIG to the provider's private kubeconfig, dropping
 // any inherited KUBECONFIG so a call can never fall back to the operator's ambient config.
@@ -346,6 +364,41 @@ func (k *kubeEngineRunner) execIn(ctx context.Context, h interfaces.SandboxHandl
 	return k.run.run(ctx, "kubectl", stdin, append(base, args...)...)
 }
 
+// execInOut is execIn for a BINARY stdout payload (the working-branch git bundle): same `kubectl exec`
+// shape, but stdout-only (via runOut) so the bundle bytes are not corrupted by interleaved stderr.
+func (k *kubeEngineRunner) execInOut(ctx context.Context, h interfaces.SandboxHandle, stdin []byte, args ...string) ([]byte, error) {
+	base := []string{"exec", "-n", h.ID, h.ID}
+	if stdin != nil {
+		base = append(base, "-i")
+	}
+	base = append(base, "--")
+	return k.run.runOut(ctx, "kubectl", stdin, append(base, args...)...)
+}
+
+// seedWorkspace establishes the engine's working repo at Workdir on the fresh working branch. If the
+// control plane handed in the base repo content (task.RepoBundle), it writes the bundle into the pod
+// over the SAME exec channel (stdin) FIRST so the seed script can branch off the real base and the
+// engine proposes a real diff. Either way the sandbox gets NO SCM egress and NO SCM credential — the
+// content moved control-plane→sandbox within the tenancy (boundary + least privilege, tenet 3/5;
+// cloud.go EngineTask.RepoBundle SECURITY).
+func (k *kubeEngineRunner) seedWorkspace(ctx context.Context, h interfaces.SandboxHandle, task interfaces.EngineTask) error {
+	var bundlePath string
+	if len(task.RepoBundle) > 0 {
+		bundlePath = k.cfg.Workdir + "/.console7-base.bundle"
+		if _, err := k.execIn(ctx, h, task.RepoBundle, "/bin/sh", "-c", "cat > "+shquote(bundlePath)); err != nil {
+			return fmt.Errorf("cloudgcp: seed base bundle into sandbox: %w", err)
+		}
+	}
+	seed, err := workspaceSeedScript(k.cfg.Workdir, task, bundlePath)
+	if err != nil {
+		return fmt.Errorf("cloudgcp: build workspace seed: %w", err)
+	}
+	if _, err := k.execIn(ctx, h, nil, "/bin/sh", "-c", seed); err != nil {
+		return fmt.Errorf("cloudgcp: seed workspace: %w", err)
+	}
+	return nil
+}
+
 // Run verifies the locked managed-settings are present (fail closed otherwise), runs `claude -p`
 // headless under them, and captures the commit the engine produced on the working branch. It NEVER
 // pushes, merges, or widens egress; it returns only the digest/head/summary (cloud.go EngineResult
@@ -387,12 +440,8 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	// tree. Fetching origin's CONTENT (a short-lived SCM token via the Injector + egress to the SCM
 	// host) is the live step the integration wiring adds (B11); this scaffolding is what makes the
 	// commit/HEAD read succeed and keeps the engine's scaffolding out of the proposal.
-	seed, err := workspaceSeedScript(k.cfg.Workdir, task)
-	if err != nil {
-		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: build workspace seed: %w", err)
-	}
-	if _, err := k.execIn(ctx, h, nil, "/bin/sh", "-c", seed); err != nil {
-		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: seed workspace: %w", err)
+	if err := k.seedWorkspace(ctx, h, task); err != nil {
+		return interfaces.EngineResult{}, err
 	}
 
 	// 3. Run the genuine engine headless UNDER THE DELIVERED CREDENTIAL (the B9 file→env bridge). The
@@ -443,6 +492,16 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	}
 	headSHA := strings.TrimSpace(string(head))
 	files, _ := k.gitExec(ctx, h, "show", "--stat", "--name-only", "--format=", "HEAD")
+
+	// Extract the working branch as a self-contained git bundle (the new commit plus the base history
+	// it builds on) for the CONTROL-PLANE-side push + PR. stdout-only (execInOut) so the binary bundle
+	// is not corrupted by git's stderr progress. The push credential and SCM egress stay OUT of the
+	// sandbox: this only READS the branch the engine already produced (cloud.go EngineResult.CommitBundle).
+	commitBundle, err := k.execInOut(ctx, h, nil,
+		"git", "-c", "safe.directory="+k.cfg.Workdir, "-C", k.cfg.Workdir, "bundle", "create", "-", task.Branch)
+	if err != nil {
+		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: extract commit bundle for control-plane push: %w", err)
+	}
 	return interfaces.EngineResult{
 		// The commit SHA uniquely identifies the engine's real output; the orchestrator domain-tags
 		// it (commitTBS) before the NHI signs it, so the raw identity is all this seam returns.
@@ -450,6 +509,7 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		HeadSHA:      headSHA,
 		FilesChanged: nonEmptyLines(string(files)),
 		Changed:      true,
+		CommitBundle: commitBundle,
 	}, nil
 }
 
@@ -464,7 +524,7 @@ func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHand
 // transcripts, caches) that must NOT appear in the proposed commit — the commit is the task diff
 // only, not the agent's scaffolding (the local-dogfood lesson). They go in .git/info/exclude, an
 // in-repo ignore that is itself never committed and that a target repo's own .gitignore cannot undo.
-var engineDotfileExcludes = []string{".claude/", ".config/", ".cache/"}
+var engineDotfileExcludes = []string{".claude/", ".config/", ".cache/", ".console7-base.bundle"}
 
 // protectedBranches is a DEFENCE-IN-DEPTH seed-time pre-check, NOT the control of record: the
 // authoritative tenet-6 (observe/propose, never actuate) enforcement is the SCMProvider seam, which
@@ -493,7 +553,7 @@ func shquote(s string) string {
 // emits an idempotent script that git-inits the repo on the fresh branch, records the origin remote
 // (no network — the content fetch is the live B11 step), and writes .git/info/exclude. Every embedded
 // value is shell-quoted.
-func workspaceSeedScript(workdir string, task interfaces.EngineTask) (string, error) {
+func workspaceSeedScript(workdir string, task interfaces.EngineTask, bundlePath string) (string, error) {
 	if task.Repo.Host == "" || task.Repo.Owner == "" || task.Repo.Name == "" {
 		return "", errors.New("cloudgcp: EngineTask.Repo requires Host, Owner, and Name to seed the workspace")
 	}
@@ -510,12 +570,30 @@ func workspaceSeedScript(workdir string, task interfaces.EngineTask) (string, er
 	b.WriteString("set -eu\n")
 	b.WriteString("cd " + shquote(workdir) + "\n")
 	b.WriteString("if [ ! -d .git ]; then git init -q; fi\n")
-	// Set the unborn HEAD to the fresh branch (idempotent; works before any commit exists).
-	b.WriteString("git symbolic-ref HEAD " + shquote("refs/heads/"+branch) + "\n")
 	b.WriteString(`git config user.email "console7-agent@console7.dev"` + "\n")
 	b.WriteString(`git config user.name "Console7 Agent"` + "\n")
-	// Record origin without fetching (the content fetch with a short-lived SCM token + egress is B11).
+	// Record origin without fetching from it — the sandbox never reaches the SCM (tenet 3/6). When a
+	// base bundle is provided, the CONTROL PLANE has already fetched the content and handed it in.
 	b.WriteString("git remote add origin " + shquote(remote) + " 2>/dev/null || git remote set-url origin " + shquote(remote) + "\n")
+	if bundlePath != "" {
+		// Seed the REAL base content from the control-plane-provided bundle (EngineTask.RepoBundle,
+		// written to bundlePath before this runs) — NO SCM egress from the sandbox. Import the bundle's
+		// base head(s) under a namespace, branch the fresh working branch off the (single) base head, then
+		// delete the bundle file so it never reaches `git add -A`.
+		bp := shquote(bundlePath)
+		b.WriteString("git fetch -q " + bp + " 'refs/heads/*:refs/heads/c7base/*'\n")
+		// Require EXACTLY ONE base head — fail closed on zero (empty/garbage bundle) or many (an
+		// over-broad bundle), so the engine can never silently work the wrong base. Picking the
+		// lexically-first of several heads would be a silent-wrong-base bug.
+		b.WriteString("c7refs=\"$(git for-each-ref --format='%(refname)' refs/heads/c7base/)\"\n")
+		b.WriteString("c7n=\"$(printf '%s\\n' \"$c7refs\" | grep -c .)\"\n")
+		b.WriteString("if [ \"$c7n\" != \"1\" ]; then echo \"cloudgcp: base bundle must contain exactly one base branch, found $c7n\" >&2; exit 1; fi\n")
+		b.WriteString("git checkout -q -B " + shquote(branch) + " \"$c7refs\"\n")
+		b.WriteString("rm -f " + bp + "\n")
+	} else {
+		// No base content: set the unborn HEAD to the fresh branch (idempotent; works before any commit).
+		b.WriteString("git symbolic-ref HEAD " + shquote("refs/heads/"+branch) + "\n")
+	}
 	// (Re)write .git/info/exclude so the engine's own dropfiles stay out of `git add -A`.
 	b.WriteString(": > .git/info/exclude\n")
 	for _, e := range engineDotfileExcludes {
