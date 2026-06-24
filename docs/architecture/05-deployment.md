@@ -41,6 +41,7 @@ flowchart TB
     subgraph APIS["Google API surface — guarded by VPC Service Controls"]
       direction LR
       KMS[("Cloud KMS<br/>per-user KEK (rotated)")]
+      KMSS[("Cloud KMS — keybroker signing key<br/>EC-P256 AsymmetricSign (distinct identity)")]
       SM[("Secret Manager<br/>sealed subscription tokens")]
       GCSE[("GCS evidence bucket<br/>bucket-lock WORM + retention")]
       VTX[("Vertex AI endpoint")]
@@ -65,6 +66,7 @@ flowchart TB
   CPP -->|"stream"| SIEM
   KBP -->|"Authenticate"| IDP
   KBP -->|"GitHub App tokens"| GH
+  KBP -->|"AsymmetricSign (EC-P256, key never leaves KMS)"| KMSS
 
   %% sandbox image pull (kubelet, node SA, repo-scoped reader)
   NPSB -->|"repo-scoped pull (node SA)"| AR
@@ -84,7 +86,7 @@ flowchart TB
   class CPP tier1;
   class KBP broker;
   class SBP dp;
-  class KMS,SM,GCSE,VTX,AR,TFS store;
+  class KMS,KMSS,SM,GCSE,VTX,AR,TFS store;
   class FW,WIF net;
   class PROXY netPlan;
 ```
@@ -93,7 +95,7 @@ flowchart TB
 | Plane | Runs on | Isolation / key boundary |
 |---|---|---|
 | Control plane | GKE namespace `control-plane` | Tier-1, hardened; **holds no keys at rest**; Workload Identity (KSA→GSA), no stored cloud keys. |
-| Key broker | GKE namespace `keybroker` (separate) | Highest isolation; **distinct** GSA, **distinct image + signing identity**; the only component that handles key material. |
+| Key broker | GKE namespace `keybroker` (separate) | Highest isolation; **distinct** GSA, **distinct image**, and a **distinct KMS-backed signing identity** (EC-P256 Cloud KMS key, `signerVerifier` only — the CA private key never leaves KMS); the only component that handles key material. |
 | Sandboxes | dedicated node pool, **gVisor `RuntimeClass=runsc`** (microVM alt.) | Untrusted, ephemeral pods; kernel/syscall confinement; `NetworkPolicy` permits egress to the proxy only. |
 | Managed data services | GCP project (Google API surface) | Cloud KMS, Secret Manager, GCS evidence bucket, Vertex — fronted by **VPC Service Controls** (guards the **API surface only**, not arbitrary TCP egress). |
 
@@ -121,7 +123,15 @@ flowchart TB
 - **secrets module** (✅ real): KMS key ring + auto-rotated **KEK** (`prevent_destroy`); a
   workload SA with **no human-impersonation binding**; two custom roles split by scope —
   project-scoped `secrets.create` and a name-prefix-conditioned `versions.add/access/delete`
-  on `{prefix}-sub-*` only.
+  on `{prefix}-sub-*` only. The SA also holds `roles/iam.serviceAccountTokenCreator`
+  **scoped to itself** (self-impersonation) so it can mint the short-lived GCP access token
+  the Vertex inference lane injects (`InjectInferenceCredential`) — no broader impersonation.
+- **keybroker-signing module** (✅ real): a **separate** Cloud KMS asymmetric **EC-P256**
+  signing key in its own key ring, plus a **distinct** signing SA holding
+  `roles/cloudkms.signerVerifier` on that key only. This is the keybroker's CA root — the
+  lineage trust anchor (NHI binding certs + evidence checkpoints sign under it) — kept
+  cryptographically and by-identity **distinct from the secrets KEK** (tenet: the key
+  broker is a separate artifact with a distinct signing identity; never fused).
 - **evidence module** (✅ real): hardened GCS bucket (UBLA, public-access-prevention,
   versioning, retention) with an **authoritative** bucket IAM policy and a custom
   `evidence_writer` role = **create/get/list only (no delete/update/setIamPolicy)**;
