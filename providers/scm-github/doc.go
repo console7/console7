@@ -21,7 +21,10 @@
 //   - PER-OPERATION LEAST-PRIVILEGE permissions. DefaultPermissions is the GRANTED ceiling (what
 //     the App is installed with). Each operation requests only the subset it needs, INTERSECTED
 //     with that ceiling: a working credential gets contents:write ONLY (it must not be able to
-//     open/merge PRs); OpenPullRequest mints a separate pull_requests:write-only token. The adapter
+//     open/merge PRs); OpenPullRequest mints a separate token narrowed to pull_requests:write plus
+//     contents:READ — GitHub must read the head + base refs to validate the PR, so a
+//     pull_requests-only token fails with 422 "not all refs are readable"; contents is READ, never
+//     write (the push already happened; the PR-open token cannot mutate contents). The adapter
 //     rejects any permission key outside its allowlist AND any level beyond read/write, so a
 //     Config.Permissions override only ever tightens — never widens — every operation;
 //   - PR-ONLY exit (OpenPullRequest opens a pull request and never merges, approves, or actuates —
@@ -81,7 +84,8 @@
 //   - RESIDUAL (interface shape): OpenPullRequest carries no Subject/SessionID, so the token it
 //     mints to open the PR cannot be bound to the session — the human->NHI lineage stamped at
 //     MintWorkingCredential does not extend to the PR-open call. The token is minimised
-//     (pull_requests:write only) to limit the blast radius of that unavoidable gap.
+//     (pull_requests:write plus contents:READ — the minimum GitHub requires to validate the PR's
+//     head/base refs, never contents:write) to limit the blast radius of that unavoidable gap.
 //   - RESIDUAL (lifecycle): RevokeRef is not yet called by the broker's session-release path, so
 //     early session end relies on the expiry sweep to reap the in-process copy; and revoking the
 //     GitHub-side installation token before its ~1h expiry (Apps.RevokeInstallationToken) is part
