@@ -101,10 +101,18 @@ func buildInference(p *prodEnv) (interfaces.InferenceBackend, cloudgcp.Config, e
 	cfg := cloudgcp.Config{ProjectID: p.project, Location: p.location, Cluster: p.cluster, SandboxImage: p.sandboxImage}
 	switch p.inferenceKind {
 	case "vertex":
-		inf, err := inferencevertex.New(inferencevertex.Config{
-			ProjectID: envOr("C7_VERTEX_PROJECT", p.project),
-			Region:    envOr("C7_VERTEX_REGION", p.region),
-		})
+		// "global" is the engine's location-independent endpoint, NOT a GCP regional location:
+		// it fails inference-vertex's regional-host grammar guard (regionPattern). Select it via
+		// Config.Global (which normalize() maps to GlobalHost + CLOUD_ML_REGION="global") rather
+		// than threading "global" through Config.Region. Any other value stays the regional lane.
+		vertexRegion := envOr("C7_VERTEX_REGION", p.region)
+		vertexCfg := inferencevertex.Config{ProjectID: envOr("C7_VERTEX_PROJECT", p.project)}
+		if vertexRegion == "global" {
+			vertexCfg.Global = true
+		} else {
+			vertexCfg.Region = vertexRegion
+		}
+		inf, err := inferencevertex.New(vertexCfg)
 		cfg.VertexModel = os.Getenv("C7_VERTEX_MODEL")
 		return inf, cfg, err
 	case "anthropic":

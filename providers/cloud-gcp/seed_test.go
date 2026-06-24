@@ -25,7 +25,8 @@ func TestWorkspaceSeedScript_Scaffolding(t *testing.T) {
 		"git symbolic-ref HEAD 'refs/heads/c7/session-abc'",
 		"git remote add origin 'https://github.com/acme/widgets.git'",
 		".git/info/exclude",
-		"echo '.claude/'", // the engine's dotfiles are excluded from the proposed commit
+		"echo '.claude/'",      // the engine's dotfiles are excluded from the proposed commit
+		"echo '.claude.json*'", // ...including its project-state file and its .backup sibling (one glob)
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("seed script missing %q\n---\n%s", want, s)

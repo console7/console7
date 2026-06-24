@@ -533,7 +533,9 @@ func (k *kubeEngineRunner) gitExec(ctx context.Context, h interfaces.SandboxHand
 // transcripts, caches) that must NOT appear in the proposed commit — the commit is the task diff
 // only, not the agent's scaffolding (the local-dogfood lesson). They go in .git/info/exclude, an
 // in-repo ignore that is itself never committed and that a target repo's own .gitignore cannot undo.
-var engineDotfileExcludes = []string{".claude/", ".config/", ".cache/", ".console7-base.bundle"}
+// The `.claude.json*` glob (a gitignore-syntax pattern, valid in .git/info/exclude) covers BOTH the
+// engine's project state file `.claude.json` and its `.claude.json.backup` sibling in one entry.
+var engineDotfileExcludes = []string{".claude/", ".claude.json*", ".config/", ".cache/", ".console7-base.bundle"}
 
 // protectedBranches is a DEFENCE-IN-DEPTH seed-time pre-check, NOT the control of record: the
 // authoritative tenet-6 (observe/propose, never actuate) enforcement is the SCMProvider seam, which
