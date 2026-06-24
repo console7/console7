@@ -25,6 +25,7 @@ require (
 	cloud.google.com/go/storage v1.62.3
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/google/go-github/v88 v88.0.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.274.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -68,7 +69,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
