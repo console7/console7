@@ -37,8 +37,14 @@ github.com/console7/console7/providers/secrets-gcp 63
 github.com/console7/console7/sandbox/policyhelper 90
 github.com/console7/console7/sandbox/policyhelper/cmd/policyhelper 60
 github.com/console7/console7/sandbox/policyhelper/cmd/tripwire 70
+github.com/console7/console7/sandbox/vertex-auth-proxy 66
 github.com/console7/console7/sdk/devkit 86
 "
+# vertex-auth-proxy: the testable handler (proxy.go: /v1 rewrite, bearer attach,
+# fail-closed 503-no-forward, upstream resolution) is fully unit-covered; the floor
+# sits below 100 only for main.go's run() — ambient ADC (google.DefaultTokenSource)
+# + ListenAndServe — which needs a real metadata server/network, exercised in deploy,
+# not CI. Same class as the policyhelper cmd/* main packages above.
 
 echo "Running test suite with coverage ..."
 # -count=1 disables the test cache so coverage is freshly measured every run.

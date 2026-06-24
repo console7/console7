@@ -1,0 +1,216 @@
+name: vertex auth-proxy image release
+
+# CO-05 (supply chain) / CO-08 (build integrity) — build, SBOM, provenance, and KEYLESS-SIGN the
+# Vertex auth-proxy image as a DISTINCT, separately-signed release artifact (DESIGN.md §8;
+# ARCHITECTURE.md §6.4). This component HOLDS a Vertex credential (it mints + attaches a Google
+# bearer from the pod's Workload Identity), so it must NOT share a build identity with the untrusted
+# sandbox base image — "the thing that holds the keys must not share a build identity with the thing
+# that runs untrusted code." This is the signed-release pipeline; it mirrors sandbox-image-release.yml.
+#
+# Publish model: the MAINTAINER builds the REFERENCE image and signs it KEYLESS (GitHub Actions OIDC
+# -> Sigstore/Fulcio, no long-lived key), publishing to ghcr.io. The signing identity is this
+# workflow's OIDC identity, PINNED on verify. An adopter MIRRORS the verified, digest-pinned image
+# into their OWN in-tenancy Artifact Registry at deploy time; the GKE node pulls it in-region. No
+# adopter data/code/credentials/sessions ever leave their tenancy (GOAL.md tenet 1).
+#
+# "Distinct signing identity" is ENFORCED, not asserted: the always-on identity-enforcement job below
+# proves on every push that cosign rejects a WRONG signing identity. scripts/verify-auth-proxy-image.sh
+# is the same pinned verification an adopter runs before mirroring.
+
+on:
+  push:
+    tags: ['auth-proxy/v*']   # the operator-triggered release
+    branches: [main]          # + the identity-pin enforcement self-test (post-merge canary)
+  # NB: deliberately NOT on pull_request. The self-test needs id-token: write to mint a keyless
+  # OIDC identity; running it on PRs would hand a usable console7/console7 OIDC token to PR-authored
+  # workflow code. So it runs only on push (main + release tags). Workflow changes are still reviewed.
+
+# Least privilege by default; jobs elevate only what they need.
+permissions:
+  contents: read
+
+concurrency:
+  group: auth-proxy-image-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/vertex-auth-proxy
+  # The pinned keyless trust anchors. The release identity is THIS workflow on a release tag; the
+  # OIDC issuer is GitHub's Actions token service. scripts/verify-auth-proxy-image.sh embeds the same.
+  COSIGN_IDENTITY_REGEXP: '^https://github\.com/${{ github.repository }}/\.github/workflows/auth-proxy-image-release\.yml@refs/tags/auth-proxy/v'
+  COSIGN_OIDC_ISSUER: 'https://token.actions.githubusercontent.com'
+
+jobs:
+  # --- The release: build -> push -> SBOM + provenance -> keyless sign -> verify (incl. negative) ---
+  release:
+    name: build, sign & publish (release tag)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/auth-proxy/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io
+      id-token: write   # keyless signing (OIDC -> Fulcio)
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          # audit (not block): a docker build legitimately reaches the registry, Go module proxy, and
+          # Sigstore; blocking egress around buildx is brittle. The signature + digest are the proof.
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign BINARY to the 2.x line (matches sandbox-image-release.yml). cosign 3.x
+          # replaced the service-URL flags with a bundled "signing config" and REJECTS
+          # `--tlog-upload=false`; the sign/verify flags here target 2.x semantics, so pin to match.
+          cosign-release: 'v2.6.3'
+
+      - name: Derive image tag from the git tag
+        id: ref
+        run: |
+          # refs/tags/auth-proxy/v1.2.3 -> image tag v1.2.3
+          tag="${GITHUB_REF_NAME#auth-proxy/}"
+          case "$tag" in
+            v*) : ;;
+            *) echo "::error::unexpected tag '$GITHUB_REF_NAME' (want auth-proxy/v*)"; exit 1 ;;
+          esac
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Build & push (SBOM + SLSA provenance attestations)
+        id: build
+        env:
+          IMAGE_TAG: ${{ steps.ref.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+          # docker-container driver is required to push SBOM + provenance attestations as OCI referrers.
+          docker buildx create --name c7builder --driver docker-container --use
+          docker buildx build \
+            --file sandbox/vertex-auth-proxy/Dockerfile \
+            --tag "$image" \
+            --platform linux/amd64 \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file /tmp/build-meta.json \
+            --push \
+            .
+          digest="$(jq -er '."containerimage.digest"' /tmp/build-meta.json)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$REGISTRY/$IMAGE_NAME@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the image (keyless)
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+        run: cosign sign --yes "$IMAGE_REF"
+
+      - name: Verify the signature (pinned identity) + negative assertion
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # Positive: the pinned release identity must verify (full tlog + SCT — this is a real release).
+          scripts/verify-auth-proxy-image.sh "$IMAGE_REF"
+          # Negative: a WRONG identity must be rejected, AND rejected for the IDENTITY (not some
+          # unrelated cosign error that would otherwise read as a false "rejected"). Fail closed.
+          if out="$(cosign verify \
+              --certificate-identity 'https://github.com/evil/repo/.github/workflows/pwn.yml@refs/heads/main' \
+              --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+              "$IMAGE_REF" 2>&1)"; then
+            echo "::error::cosign verify ACCEPTED a wrong signing identity — identity pin not enforced"
+            exit 1
+          fi
+          if ! grep -qi 'none of the expected identities matched' <<<"$out"; then
+            echo "::error::wrong-identity verify failed, but NOT for an identity mismatch — inconclusive:"
+            echo "$out"
+            exit 1
+          fi
+          echo "signature verified against the pinned release identity; wrong identity rejected for identity mismatch"
+
+      - name: Publish the digest
+        env:
+          IMAGE_REF: ${{ steps.build.outputs.ref }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Vertex auth-proxy image released"
+            echo ""
+            echo "- Reference (digest-pinned): \`$IMAGE_REF\`"
+            echo "- Digest: \`$DIGEST\`"
+            echo ""
+            echo "Mirror into the adopter AR and wire it in as the per-session Vertex sidecar (F2c)."
+            echo "Verify first: \`scripts/verify-auth-proxy-image.sh $IMAGE_REF\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --- push-only: prove the keyless IDENTITY PIN is enforced, with no release needed. ---
+  identity-enforcement:
+    name: cosign identity-pin enforcement (self-test)
+    if: github.event_name == 'push'   # see the on: note — not on PRs (no id-token to PR-authored code)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # keyless sign-blob (OIDC -> Fulcio)
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign BINARY to the 2.x line (matches sandbox-image-release.yml).
+          cosign-release: 'v2.6.3'
+
+      - name: Sign a throwaway blob, then prove wrong identities are rejected
+        run: |
+          set -euo pipefail
+          blob="$(mktemp)"
+          bundle="$(mktemp)"
+          printf 'console7 vertex-auth-proxy-image identity-pin enforcement self-test %s\n' "$GITHUB_SHA" > "$blob"
+
+          # Keyless sign with THIS job's OIDC identity. The pin we test lives in the Fulcio
+          # CERTIFICATE, not the transparency log or the SCT, so we sign without a Rekor entry
+          # (--tlog-upload=false) and verify ignoring BOTH tlog and SCT. This isolates the test to the
+          # cert identity — the actual thing under test — and keeps it offline-of-Rekor and robust.
+          cosign sign-blob --yes --tlog-upload=false --bundle "$bundle" "$blob"
+
+          verify_blob() {  # usage: verify_blob <identity-flag> <value>
+            cosign verify-blob --insecure-ignore-tlog --insecure-ignore-sct --bundle "$bundle" \
+              "$1" "$2" --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" "$blob"
+          }
+          assert_rejected() {  # usage: assert_rejected <desc> <identity-flag> <value>
+            local desc="$1" out
+            if out="$(verify_blob "$2" "$3" 2>&1)"; then
+              echo "::error::$desc — cosign ACCEPTED a wrong identity (pin NOT enforced)"; exit 1
+            fi
+            if ! grep -qi 'none of the expected identities matched' <<<"$out"; then
+              echo "::error::$desc — verify failed, but NOT for an identity mismatch (inconclusive):"
+              echo "$out"; exit 1
+            fi
+            echo "ok (rejected for identity mismatch): $desc"
+          }
+
+          # Positive: our real identity — THIS workflow file in THIS repo — must verify.
+          verify_blob --certificate-identity-regexp \
+            '^https://github\.com/${{ github.repository }}/\.github/workflows/auth-proxy-image-release\.yml@'
+          echo "ok (accepted): the real signing identity"
+
+          # Negative 1 — a foreign org/repo must be rejected.
+          assert_rejected "foreign org/repo" --certificate-identity \
+            'https://github.com/evil/repo/.github/workflows/pwn.yml@refs/heads/main'
+          # Negative 2 — SAME repo but a DIFFERENT workflow file must be rejected (proves the pin
+          # binds the workflow path, not just the org — the distinct-build-identity class). This is
+          # what proves the auth-proxy and the sandbox image have DISTINCT signing identities.
+          assert_rejected "same repo, wrong workflow" --certificate-identity-regexp \
+            '^https://github\.com/${{ github.repository }}/\.github/workflows/sandbox-image-release\.yml@'
+          # Negative 3 — on a NON-release ref, the RELEASE pin (which requires @refs/tags/
+          # auth-proxy/v...) must reject this ref, proving it discriminates ref TYPE not just org.
+          if [[ "$GITHUB_REF" != refs/tags/auth-proxy/* ]]; then
+            assert_rejected "release pin rejects a non-release ref" \
+              --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"
+          fi
+
+          echo "identity-pin enforcement verified: real identity accepted; org/workflow/ref lookalikes rejected"
