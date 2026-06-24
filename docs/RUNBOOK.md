@@ -58,10 +58,15 @@ job; everything after is keyless and automated (ADR-0002).
    ```
 3. A **GitHub repo** you control to hold the thin deploy config (it will be created
    from `console7-deploy-template`).
-4. A **GitHub App** installed on the target code repo, with permission to open PRs
-   (you will need its **App ID**, an **installation ID**, and a **private key PEM**).
-5. `terraform`, `kubectl`, `gke-gcloud-auth-plugin`, and `cosign >= 3.0` on PATH for
-   the operator-side verification steps.
+4. A **GitHub App** installed on the target code repo. The control plane (not the
+   sandbox) does all git I/O — it fetches the base, pushes the session's working
+   branch, and opens the PR — so the App needs **Repository permissions: Contents =
+   Read & write, Pull requests = Read & write, Metadata = Read-only**. From its
+   settings you need the **App ID**, the **installation ID** (in the install URL,
+   `.../installations/<id>`), and a generated **private-key `.pem`** (store the path;
+   never commit it). The sandbox holds no SCM credential and has no SCM egress.
+5. `terraform`, `kubectl`, `gke-gcloud-auth-plugin`, `git`, and `cosign >= 3.0` on
+   PATH for the deploy + operator-side verification steps.
 
 > ⚠️ **Cost.** A GKE cluster bills continuously. Plan to **apply, prove, and destroy
 > the same day** unless you intend to keep the deployment.
@@ -216,11 +221,15 @@ authoritative, `GOAL.md` tenet 2).
 
 The CLI prints the PRODUCTION banner (and its Phase-1 residuals), then drives one
 session: mint per-session NHI (binding cert signed by the **KMS** root) → provision a
-gVisor sandbox → narrow egress to the Vertex host → mint a short-lived GCP token,
-delivered into the sandbox by file (never via metadata) → genuine `claude -p` against
-Vertex → real commit → orchestrator signs the commit + stamps lineage (KMS) → opens the
-GitHub PR → seals WORM evidence to GCS. On success it reports the proposed commit, the
-PR URL, and **`evidence chain VERIFIED`**.
+gVisor sandbox → narrow egress to the Vertex host → **control plane fetches the base
+branch** (as a git bundle, via the GitHub App) and seeds it into the sandbox → mint a
+short-lived GCP token, delivered into the sandbox by file (never via metadata) →
+genuine `claude -p` against Vertex on the real checkout → real commit → orchestrator
+signs the commit + stamps lineage (KMS) → **control plane pushes the working branch**
+to the remote (branch-scoped App token — the sandbox never holds it) → opens the GitHub
+PR → seals WORM evidence to GCS. On success it reports the proposed commit, the PR URL,
+and **`evidence chain VERIFIED`**. (All GitHub I/O is control-plane-side; the sandbox
+stays SCM-free.)
 
 ---
 
