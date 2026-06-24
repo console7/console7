@@ -24,6 +24,9 @@ import (
 	secretsgcp "github.com/console7/console7/providers/secrets-gcp"
 	"github.com/console7/console7/sdk/devkit"
 	"github.com/console7/console7/sdk/interfaces"
+	"golang.org/x/oauth2"
+	"google.golang.org/api/impersonate"
+	"google.golang.org/api/option"
 )
 
 const spineBanner = "PRODUCTION wiring (real GCP/GitHub/inference + KMS-backed keybroker CA + GCS WORM evidence). " +
@@ -48,6 +51,84 @@ func envOr(name, def string) string {
 	return def
 }
 
+// cloudPlatformScope is the OAuth scope the per-seam impersonated tokens carry. The EFFECTIVE
+// authority is bounded by each SA's IAM roles (least privilege is a deploy concern), not this scope.
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+
+// impersonatedTokenSource builds a short-lived impersonated-credentials token source for saEmail,
+// rooted in the ambient ADC base identity (the operator/control-plane principal that holds
+// tokenCreator on the target SA). It is a package var so tests can substitute a static source
+// without ADC or network. Uses google.golang.org/api/impersonate (the supported package; the older
+// option.ImpersonateCredentials is deprecated).
+var impersonatedTokenSource = func(ctx context.Context, saEmail string) (oauth2.TokenSource, error) {
+	return impersonate.CredentialsTokenSource(ctx, impersonate.CredentialsConfig{
+		TargetPrincipal: saEmail,
+		Scopes:          []string{cloudPlatformScope},
+	})
+}
+
+// impersonationOpts turns an optional per-seam SA email into the variadic client option that makes
+// that GCP-SDK seam mint and use short-lived impersonated credentials for the named SA. An empty
+// saEmail ⇒ no option (nil, nil) ⇒ the seam keeps its ambient-ADC behaviour unchanged. This is how
+// each seam runs under its OWN least-privilege identity (GOAL.md tenet 2) instead of one fused
+// ambient SA; it is the mechanism that restores the keybroker CA's DISTINCT signing identity.
+//
+// HONEST residual: impersonation does NOT make the keybroker key unreachable. The operator (or any
+// principal) holding `roles/iam.serviceAccountTokenCreator` on the keybroker SA can still mint a
+// token for it and sign as the lineage CA. Per-seam impersonation removes the static CA key file and
+// un-fuses the SAs; it does not close that token-creator path. Only moving the keybroker into the
+// in-cluster control plane (Option B), where no human holds tokenCreator on that SA, closes it.
+func impersonationOpts(ctx context.Context, saEmail string) ([]option.ClientOption, error) {
+	if saEmail == "" {
+		return nil, nil
+	}
+	ts, err := impersonatedTokenSource(ctx, saEmail)
+	if err != nil {
+		return nil, fmt.Errorf("impersonate %q: %w", saEmail, err)
+	}
+	return []option.ClientOption{option.WithTokenSource(ts)}, nil
+}
+
+// seamClientOpts holds the per-seam impersonation client options (each nil ⇒ that seam uses ambient
+// ADC, unchanged). Built once up front so wireSpine threads opts.<seam> into each New rather than
+// repeating the build+error-check inline (keeps wireSpine within the gocyclo budget).
+type seamClientOpts struct{ secrets, keybroker, evidence []option.ClientOption }
+
+func (p *prodEnv) buildSeamClientOpts(ctx context.Context) (seamClientOpts, error) {
+	var s seamClientOpts
+	var err error
+	if s.secrets, err = impersonationOpts(ctx, p.secretsSA); err != nil {
+		return s, fmt.Errorf("secrets-gcp impersonation: %w", err)
+	}
+	if s.keybroker, err = impersonationOpts(ctx, p.keybrokerSA); err != nil {
+		return s, fmt.Errorf("keybroker-gcp impersonation: %w", err)
+	}
+	if s.evidence, err = impersonationOpts(ctx, p.evidenceSA); err != nil {
+		return s, fmt.Errorf("evidence-gcs impersonation: %w", err)
+	}
+	return s, nil
+}
+
+// resolveBackends does the config-side prep for wireSpine: build the inference backend (+ the derived
+// cloud-gcp config), derive the egress allowlist from the backend itself (fail closed if empty), and
+// build the per-seam impersonation client options. Pulled out of wireSpine to keep that assembly
+// function within the linters' length/complexity budget.
+func (p *prodEnv) resolveBackends(ctx context.Context) (interfaces.InferenceBackend, cloudgcp.Config, []string, seamClientOpts, error) {
+	inference, cloudCfg, err := buildInference(p)
+	if err != nil {
+		return nil, cloudgcp.Config{}, nil, seamClientOpts{}, fmt.Errorf("inference backend (%s): %w", p.inferenceKind, err)
+	}
+	allowlist := inferenceAllowlist(ctx, inference)
+	if len(allowlist) == 0 {
+		return nil, cloudgcp.Config{}, nil, seamClientOpts{}, fmt.Errorf("inference backend (%s) resolved no endpoints to allow — check C7_INFERENCE and the model/region config", p.inferenceKind)
+	}
+	seamOpts, err := p.buildSeamClientOpts(ctx)
+	if err != nil {
+		return nil, cloudgcp.Config{}, nil, seamClientOpts{}, err
+	}
+	return inference, cloudCfg, allowlist, seamOpts, nil
+}
+
 // prodEnv is the validated production configuration read from the environment.
 type prodEnv struct {
 	project, location, cluster, sandboxImage string
@@ -56,6 +137,13 @@ type prodEnv struct {
 	ghKey                                    []byte
 	kmsKeyVersion, evidenceBucket            string
 	inferenceKind                            string
+
+	// Per-seam SA-impersonation knobs (all optional; empty ⇒ ambient ADC for that seam). They restore
+	// the keybroker's DISTINCT signing identity by letting each GCP-SDK seam run as its OWN service
+	// account rather than the one fused ambient identity (GOAL.md tenet 2 — boundary least-privilege).
+	// keybrokerSA is the load-bearing one: the lineage CA then signs as the KEYBROKER SA, distinct from
+	// the workload SA used by secrets/evidence. secretsSA / evidenceSA are optional refinements.
+	keybrokerSA, secretsSA, evidenceSA string
 }
 
 // loadProdEnv reads + validates every required variable (and parses the GitHub App integers/key),
@@ -74,6 +162,11 @@ func loadProdEnv() (*prodEnv, error) {
 		kmsKeyVersion:  e.req("C7_KMS_KEY_VERSION"),
 		evidenceBucket: e.req("C7_EVIDENCE_BUCKET"),
 		inferenceKind:  e.req("C7_INFERENCE"), // "anthropic" | "vertex"
+
+		// Optional per-seam impersonation targets (envOr ⇒ default empty = ambient ADC, unchanged).
+		keybrokerSA: envOr("C7_KEYBROKER_SA_EMAIL", ""),
+		secretsSA:   envOr("C7_SECRETS_SA_EMAIL", ""),
+		evidenceSA:  envOr("C7_EVIDENCE_SA_EMAIL", ""),
 	}
 	ghAppIDStr := e.req("C7_GH_APP_ID")
 	ghInstallStr := e.req("C7_GH_INSTALLATION_ID")
@@ -159,15 +252,18 @@ func wireSpine(repo interfaces.RepoRef, user string) (*orchestrator.Orchestrator
 	if err != nil {
 		return nil, "", nil, err
 	}
-	inference, cloudCfg, err := buildInference(p)
+	// Resolve the inference backend, derive the egress allowlist from it, and build the per-seam
+	// impersonation client options — all the config-side prep, off wireSpine's critical path.
+	inference, cloudCfg, allowlist, seamOpts, err := p.resolveBackends(ctx)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("inference backend (%s): %w", p.inferenceKind, err)
-	}
-	allowlist := inferenceAllowlist(ctx, inference)
-	if len(allowlist) == 0 {
-		return nil, "", nil, fmt.Errorf("inference backend (%s) resolved no endpoints to allow — check C7_INFERENCE and the model/region config", p.inferenceKind)
+		return nil, "", nil, err
 	}
 
+	// cloud-gcp SHELLS OUT to kubectl/gcloud — it has no Go GCP client, so option.ClientOption (and
+	// thus the per-seam impersonation knobs above) does NOT apply to it. Its calls run under the
+	// operator's ambient gcloud ADC. To run cloud-gcp AS a specific SA, the operator sets gcloud's
+	// own impersonation out of band (e.g. CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=<sandbox-ops SA>);
+	// Console7 does not (and cannot) thread it through this constructor. See docs/RUNBOOK.md.
 	cloud, err := cloudgcp.New(ctx, cloudCfg)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("cloud-gcp: %w", err)
@@ -179,7 +275,7 @@ func wireSpine(repo interfaces.RepoRef, user string) (*orchestrator.Orchestrator
 	secrets, err := secretsgcp.New(ctx, secretsgcp.Config{
 		ProjectID: p.project, KEKResourceName: p.kekResource, SecretPrefix: envOr("C7_SECRET_PREFIX", "console7"),
 		Region: p.region, WorkloadSAEmail: p.workloadSA,
-	})
+	}, seamOpts.secrets...)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("secrets-gcp: %w", err)
 	}
@@ -199,7 +295,10 @@ func wireSpine(repo interfaces.RepoRef, user string) (*orchestrator.Orchestrator
 
 	// The lineage trust root: the KMS-backed CA (private key never leaves KMS). The NHI binder and the
 	// evidence sink signer both certify under it; the sink + orchestrator pin its EC-P256 public anchor.
-	kmsCA, err := keybrokergcp.New(ctx, keybrokergcp.Config{KeyVersionName: p.kmsKeyVersion})
+	// The keybroker CA impersonates C7_KEYBROKER_SA_EMAIL (when set) so the lineage trust root is
+	// rooted in the KEYBROKER's own SA, DISTINCT from the workload SA used by secrets/evidence —
+	// restoring the separate signing identity (GOAL.md tenet 2). Empty ⇒ ambient ADC, unchanged.
+	kmsCA, err := keybrokergcp.New(ctx, keybrokergcp.Config{KeyVersionName: p.kmsKeyVersion}, seamOpts.keybroker...)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("keybroker-gcp CA: %w", err)
 	}
@@ -217,7 +316,7 @@ func wireSpine(repo interfaces.RepoRef, user string) (*orchestrator.Orchestrator
 	}
 	b := broker.New(devkit.NewDevIdentity(idpPub, nil), secrets, scm, inference, signing.NewNHIBinder(kmsCA))
 
-	store, err := evidencegcs.New(ctx, evidencegcs.Config{Bucket: p.evidenceBucket, ObjectPrefix: envOr("C7_EVIDENCE_PREFIX", "records")})
+	store, err := evidencegcs.New(ctx, evidencegcs.Config{Bucket: p.evidenceBucket, ObjectPrefix: envOr("C7_EVIDENCE_PREFIX", "records")}, seamOpts.evidence...)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("evidence-gcs: %w", err)
 	}
