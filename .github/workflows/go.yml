@@ -66,6 +66,12 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # The c7_live production wiring (control-plane/ui/cmd/c7/wire_production.go) is behind a build
+      # tag and is never RUN in CI (it needs a real tenancy), so a default build/test would not catch
+      # it bit-rotting against a provider/interface change. Compile it explicitly so it can't.
+      - name: go build -tags c7_live (production wiring compiles)
+        run: go build -tags c7_live ./...
+
       - name: go test + coverage floors
         run: ./scripts/coverage-gate.sh coverage.out
 
@@ -97,3 +103,8 @@ jobs:
 
       - name: Lint (whole tree)
         run: golangci-lint run ./...
+
+      # Lint the c7_live production wiring too (the default run does not see build-tagged files), so a
+      # lint regression in wire_production.go is caught even though it is never run in CI.
+      - name: Lint (c7_live build tag)
+        run: golangci-lint run --build-tags c7_live ./...
