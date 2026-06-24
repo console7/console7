@@ -8,7 +8,7 @@ pull, where does each land in the runtime, and how is the surface kept small?*
 The headline property: **the core is import-free of third-party code.** `sdk/`,
 `control-plane/`, and `keybroker/` build on the **Go standard library only** (Ed25519,
 AES-256-GCM, SHA-256, `encoding/*`, `context`, `sync`). Every third-party dependency is
-confined to **three reference providers**, and the two inference backends are deliberately
+confined to **four reference providers**, and the two inference backends are deliberately
 **dependency-free** (pure routing — `docs/adr/0004`). This is a Tier-1, public,
 security-sensitive codebase keeping the smallest dependency surface that still ships a real
 GCP reference set.
@@ -19,13 +19,14 @@ flowchart TB
     direction TB
     cp_fp["✅ orchestrator · pdp · evidence<br/>stdlib only (sha256, ed25519 verify)"]
     cp_inf["✅ inference-vertex · inference-anthropic<br/>dependency-free (ADR-0004)"]
-    cp_sec["secrets-gcp<br/>OSS: cloud.google.com/go/kms + /secretmanager"]
+    cp_sec["secrets-gcp<br/>OSS: cloud.google.com/go/kms + /secretmanager + /iam (token mint)"]
     cp_ev["evidence-gcs<br/>OSS: cloud.google.com/go/storage"]
   end
   subgraph KB["Key-broker image (Tier-1, separate)"]
     direction TB
-    kb_fp["✅ broker · signing<br/>stdlib crypto: ed25519, aes-gcm, sha256"]
+    kb_fp["✅ broker · signing<br/>stdlib crypto: ed25519, aes-gcm, sha256<br/>pluggable CA root (dev DevCA / prod keybroker-gcp)"]
     kb_scm["scm-github<br/>OSS: ghinstallation/v2, go-github/v88"]
+    kb_kms["keybroker-gcp (prod CA root)<br/>OSS: cloud.google.com/go/kms"]
   end
   subgraph DP["Sandbox base image (untrusted)"]
     dp_eng["genuine Claude Code engine (Node/Python)<br/>pinned upstream · canaried · run as-is"]
@@ -36,20 +37,22 @@ flowchart TB
   cp_sec --> sh
   cp_ev --> sh
   kb_scm --> sh
+  kb_kms --> sh
 
   classDef fp fill:#cfe3f7,stroke:#1168bd,color:#11304a;
   classDef oss fill:#fff3cd,stroke:#b8860b,color:#5c4500;
   classDef eng fill:#f7d6d6,stroke:#c0392b,color:#5b1b14;
   class cp_fp,cp_inf,kb_fp fp;
-  class cp_sec,cp_ev,kb_scm,sh oss;
+  class cp_sec,cp_ev,kb_scm,kb_kms,sh oss;
   class dp_eng eng;
 ```
 
 ## Direct dependencies (from `go.mod`, all pinned, `go.sum` committed)
 | Module | Version | Used by | Runtime plane | Purpose |
 |---|---|---|---|---|
-| `cloud.google.com/go/kms` | v1.31.0 | `secrets-gcp` | control plane | envelope-encrypt per-user DEK under KEK |
+| `cloud.google.com/go/kms` | v1.31.0 | `secrets-gcp`, `keybroker-gcp` | control plane / key broker | envelope-encrypt per-user DEK under KEK (`secrets-gcp`); EC-P256 `AsymmetricSign` CA root (`keybroker-gcp`) |
 | `cloud.google.com/go/secretmanager` | v1.20.0 | `secrets-gcp` | control plane | sealed subscription-token storage |
+| `cloud.google.com/go/iam` | v1.7.0 | `secrets-gcp` | control plane | IAM Credentials `generateAccessToken` — mint the ephemeral Vertex/GCP bearer injected into the sandbox |
 | `cloud.google.com/go/storage` | v1.62.3 | `evidence-gcs` | control plane | append-only WORM object store |
 | `github.com/bradleyfalzon/ghinstallation/v2` | v2.19.0 | `scm-github` | key broker | GitHub App → installation tokens |
 | `github.com/google/go-github/v88` | v88.0.0 | `scm-github` | key broker | GitHub REST (PRs, installs) |
@@ -68,10 +71,12 @@ specifically so `govulncheck` stays clean of `.0` stdlib CVEs.
 - **First-party, zero third-party imports:** `sdk/interfaces`, `sdk/testkit`, `sdk/devkit`,
   all of `control-plane/`, all of `keybroker/`, and `providers/inference-{vertex,anthropic}`.
 - **First-party that pulls OSS (confined behind hexagonal *ports*, faked for tests):**
-  `providers/secrets-gcp`, `providers/evidence-gcs`, `providers/scm-github`. The GCP/GitHub
-  SDK clients never leak outside the adapter files (`*_gcp.go`, `ghapp_auth.go`); the rest of
-  the provider is testable with in-memory fakes — and the conformance suite runs the real
-  provider *logic* against those fakes, no cloud/network needed.
+  `providers/secrets-gcp`, `providers/evidence-gcs`, `providers/scm-github`, and
+  `providers/keybroker-gcp` (the KMS-backed EC-P256 CA root; dev keeps the in-process
+  `ca_dev.go`). The GCP/GitHub SDK clients never leak outside the adapter files (`*_gcp.go`,
+  `ghapp_auth.go`, the keybroker-gcp KMS adapter); the rest of the provider is testable with
+  in-memory fakes — and the conformance suite runs the real provider *logic* against those
+  fakes, no cloud/network needed.
 - **Out-of-tree / community providers** (e.g. `cloud-aws`, `secrets-vault`, `scm-gitlab`)
   live in their own repos against the published SDK — **(assumed/future)**; core ships the
   **reference set only**.

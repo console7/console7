@@ -30,7 +30,7 @@ flowchart TB
     subgraph SIGNPKG["signing"]
       BIND["NHIBinder.Bind(subject, sessionID, persona)<br/>&rarr; ephemeral Ed25519 keypair + Cert"]
       SS["SessionSigner{priv, cert}<br/>.Sign(payload) &rarr; Signature"]
-      CA["DevCA{rootPriv}<br/>.Issue(nhi, session, subject, pub)<br/>domain tag 'c7-cert-v1'"]
+      CA["CA root (pluggable)<br/>dev: DevCA Ed25519 · prod: keybroker-gcp EC-P256 via KMS<br/>.Issue(nhi, session, subject, pub)<br/>domain tag 'c7-cert-v1'"]
       SINK["SinkSigner (long-lived)<br/>.SignCheckpoint &rarr; SinkSignature<br/>domain tag 'c7-sinkcert-v1'"]
     end
   end
@@ -75,8 +75,12 @@ flowchart TB
   Cert}` and `Verify` checks the CA-root → NHI-key → payload chain *and* that the cert's
   Subject/SessionID match. Domain-separation tags (`c7-cert-v1`, `c7-sinkcert-v1`,
   `c7-evidence-v1`, `c7-ckpt-v1`) prevent cross-context signature reuse.
-- **`DevCA` is dev-only.** Ed25519 root generated in-process; production Sigstore-keyless
-  / org CA is **(assumed/planned)**.
+- **The CA root is pluggable and verification dispatches on algorithm.** Dev uses an
+  in-process Ed25519 `DevCA`; production uses `providers/keybroker-gcp` — an **EC P-256**
+  root that signs via Cloud KMS `AsymmetricSign`, so the private key never leaves KMS. The
+  long-lived root **and** the `SinkSigner` move to KMS; per-session NHI keys stay ephemeral
+  Ed25519. `Verify` accepts either algorithm off the cert (`signer.go` type-switches on the
+  `crypto.PublicKey`).
 
 ---
 
@@ -96,7 +100,7 @@ flowchart TB
     REL["defer ReleaseSession()<br/>(registered before any fallible step)"]
     ST1["stamp 'session-start' (lineage anchor)"]
     PROV["Cloud.ProvisionSandbox(SandboxSpec, default-deny egress)"]
-    RINF["resolveInference()<br/>Resolve &rarr; onAllowlist() &rarr; ApplyEgressPolicy(narrow) &rarr; InjectSubscription?"]
+    RINF["resolveInference()<br/>Resolve &rarr; onAllowlist() &rarr; ApplyEgressPolicy(narrow) &rarr; branch on BackendKind:<br/>Vertex&rarr;InjectInferenceCredential · else Inject{Subscription if attended-opt-in, else Org}"]
     PROP["propose()<br/>Cloud.RunTask(EngineTask) &rarr; SignSession(commitTBS(EngineResult.CommitDigest)) &rarr; stamp 'pr-opening' &rarr; OpenPullRequest &rarr; stamp 'pr-opened'<br/>(no-op run &rarr; stamp 'no-change', no PR)"]
     TDN["teardown (cleanupCtx = WithoutCancel)<br/>DestroySandbox &rarr; stamp 'session-end'/'aborted' &rarr; sealCheckpoint"]
     APP["appendSigned()/stamp(): wrap each record's payload with NHI signature<br/>payloadTBS domain 'c7-evidence-v1'"]
@@ -112,7 +116,7 @@ flowchart TB
   PREP --> REL --> ST1 --> PROV --> RINF --> PROP --> TDN
   PREP -->|"Authenticate / MintSessionIdentity"| BRK
   PREP --> PDPC
-  RINF -->|"ResolveInference / InjectSubscription"| BRK
+  RINF -->|"ResolveInference / Inject{Inference,Subscription,Org} cred"| BRK
   PROP -->|"SignSession / OpenPullRequest"| BRK
   PROV --> CLOUD
   RINF -->|"ApplyEgressPolicy"| CLOUD
@@ -133,9 +137,12 @@ flowchart TB
 - **The boundary is narrowed before work runs.** The sandbox is provisioned default-deny;
   `resolveInference()` only widens egress to the *exact* resolved endpoint after
   `onAllowlist()` confirms it — a resolved URL that is not allowlisted aborts the session.
-- **Subscription injection is gated.** Tokens are injected by reference only when
-  `UseSubscription && Attended` (and the seam re-checks attended + single-beneficiary +
-  sandbox ownership).
+- **Credential injection branches on the resolved backend kind, fail-closed.** Vertex →
+  `InjectInferenceCredential` mints a short-lived GCP token *inside* the SecretsProvider and
+  delivers it into the owning sandbox by file (never via metadata, never returned to the
+  control plane); otherwise → `InjectSubscriptionToken` when `UseSubscription && Attended`,
+  else the adopter's shared `InjectOrgCredential`. Every inject seam re-checks attended +
+  single-beneficiary + sandbox ownership.
 - **Teardown cannot be cancelled away.** All exit paths destroy the sandbox using a
   `context.WithoutCancel` clone, then seal a signed checkpoint — evidence is sealed even
   on error/abort.

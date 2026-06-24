@@ -8,5 +8,9 @@ crash.log
 *.tfvars
 !*.tfvars.example
 
-# The dependency lock is the supply-chain pin — keep it committed.
+# The dependency lock is the supply-chain pin — keep it committed, but only at the
+# root working dir (where `terraform init` runs). Terraform consults only the root
+# lock; a lock generated inside a module subdir (e.g. from validating a module in
+# place) is spurious and would drift, so ignore those.
 !.terraform.lock.hcl
+modules/*/.terraform.lock.hcl

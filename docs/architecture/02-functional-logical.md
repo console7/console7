@@ -36,7 +36,7 @@ flowchart TB
     subgraph KB["key broker &mdash; Tier-1, separately hardened, DISTINCT signing identity"]
       direction TB
       BRK["✅ broker<br/>mint per-session NHI; subscription + org-cred<br/>inject pass-through; sign session; route inference"]
-      SIGN["✅ signing<br/>SSO&rarr;NHI bind; Ed25519 DevCA<br/>commit/record/checkpoint signatures"]
+      SIGN["✅ signing<br/>SSO&rarr;NHI bind; pluggable CA root<br/>(dev Ed25519 / prod KMS EC-P256)<br/>commit/record/checkpoint signatures"]
     end
 
     %% ---------- SDK seams ----------
@@ -154,7 +154,7 @@ flowchart TB
 | `ui` | ✅ `cli.go` + `cmd/c7` (thin CLI) | The thin `c7 launch` client: build a `LaunchRequest` → `orchestrator.Run` → render the proposed PR + evidence-chain verdict (B10). The SSO login + **SSE**-stream browser gateway is ◻ deferred. Thin; holds no secrets. |
 | `orchestrator` | ✅ `orchestrator.go` | Owns the session lifecycle; calls PDP, broker, cloud, evidence **in order**; **stamps the human→NHI→action lineage** (the engine's sub-agent lineage is leaky); fully **synchronous** `Run()`. |
 | `pdp` | ✅ `pdp.go` | Resolves the **target's** `TierStratum` (via `PolicySoR`) into a `SessionProfile` (egress allowlist, autonomy ceiling, human-gate). P1 enforces only the Author × T3/S1 lane, fail-closed on anything else; cross-repo take-the-max is P3. |
-| `inference-router` | ◻ README | Logical home of subscription-vs-org-API selection; the **decision** is implemented in `broker.ResolveInference` + the `InferenceBackend` reference providers today. |
+| `inference-router` | ◻ README | Logical home of subscription-vs-org-API selection **and backend routing (Anthropic-API vs Vertex)**; the **decision** is implemented in `broker.ResolveInference` + the `InferenceBackend` reference providers today, and credential delivery branches three ways — `InjectSubscriptionToken` / `InjectOrgCredential` / `InjectInferenceCredential` (the Vertex lane mints an ephemeral GCP token into the sandbox). |
 | `dlp` | ◻ README | Pre-egress secret/PII/classification scan; **blocks for T1/T2** at the boundary, never a bypassable hook. |
 | `evidence` | ✅ `evidence/*.go` | The real WORM **Sink**: append-only `Store` (next-sequence-only), SHA-256 **hash chain**, signed **checkpoints**, and `Verify`/`VerifyChain`/`VerifyCheckpoints`. SIEM `Stream` is a fail-closed ref check (real webhook later). |
 
@@ -162,7 +162,7 @@ flowchart TB
 | Container | Status | Responsibility |
 |---|---|---|
 | `broker` | ✅ `broker.go`, `vault.go` | Mints the per-session **NHI**, mints short-lived cloud + SCM credentials (opaque `CredentialRef`), custodies the session signing keys, and proxies subscription store/inject, **org-credential inject (the org-API lane, B9b)**, inference routing, and PR opening to the seams. **Never returns key material to the control plane.** |
-| `signing` | ✅ `signer.go`, `nhi.go`, `ca_dev.go`, `sink.go` | Binds SSO subject → per-session NHI (`nhi/<sessionID>/<persona>`), issues an Ed25519 cert from a **DevCA** (dev-only; Sigstore/org-CA later — *(assumed)*), and produces lineage-stamped `Signature` and `SinkSignature` with domain-separation tags. |
+| `signing` | ✅ `signer.go` (`CA`/`Signer` interfaces), `nhi.go`, `ca_dev.go`, `sink.go`; prod CA in `providers/keybroker-gcp` | Binds SSO subject → per-session NHI (`nhi/<sessionID>/<persona>`) and issues its cert from a **pluggable CA root** — dev: in-process **Ed25519 `DevCA`**; prod: **EC P-256 via Cloud KMS** (`providers/keybroker-gcp`, never leaves KMS). Per-session NHI keys stay ephemeral Ed25519; `Verify` dispatches on algorithm. Produces lineage-stamped `Signature` and `SinkSignature` with domain-separation tags. |
 
 ### Data plane (`sandbox/`) — untrusted, ephemeral, distinct base image
 | Container | Status | Responsibility |
