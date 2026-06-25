@@ -9,6 +9,9 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: "0 6 1 * *"   # monthly — refresh the dep track-record ledger (idempotent per quarter)
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -48,3 +51,36 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
+
+  # Strategic dependency track-record capture (docs/strategy/dependency-lifecycle-model.md
+  # §§5-6). Populates the noise(OSV)/signal(govulncheck)/health(deps.dev,proxy) ledger.
+  # OBSERVE, not actuate (GOAL.md tenet 5): it surfaces the would-be ledger update in the
+  # run log as evidence; a human lands the change via PR. Runs on schedule/dispatch only.
+  capture:
+    name: dep track-record capture
+    needs: detect
+    if: needs.detect.outputs.has_gomod == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod   # builds govulncheck with the module's go1.25 toolchain
+
+      - name: Capture track-record (OSV + govulncheck + deps.dev + proxy)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          python3 scripts/dep-capture.py
+
+      - name: Surface ledger drift (evidence, non-blocking)
+        run: |
+          if ! git diff --quiet -- docs/strategy/dep-track-record.json; then
+            echo "::notice::dep-track-record.json changed this period — land via PR."
+            git --no-pager diff -- docs/strategy/dep-track-record.json
+          else
+            echo "No change to the dependency track-record this period."
+          fi

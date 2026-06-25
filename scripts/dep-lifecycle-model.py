@@ -29,6 +29,11 @@ import collections
 
 CONSOLE = "github.com/console7/console7"
 
+# Live health/drift feed: OpenSSF Scorecard (deps.dev) + libyear (proxy.golang.org),
+# captured into the track-record ledger by scripts/dep-capture.py. Read here to wire
+# the H axis to real data, replacing the offline H=1 neutral hold (doc §6).
+HEALTH_LEDGER = "docs/strategy/dep-track-record.json"
+
 # --- Substitutability: a TWO-LEVER index (the "unfilled gap", Part III). ---
 # "Effort to replace" is not one number; it is two orthogonal barriers:
 #
@@ -69,6 +74,33 @@ SUB_DEFAULT = dict(fronts="code", vendors="multi", cap="utility", note="(unclass
 
 # Lever-B KLoC bands -> effort score (reachable LoC of the slice we'd rebuild).
 KLOC_BANDS = [(500, 0), (5000, 1), (50000, 2)]  # else 3
+
+
+def load_health(path=HEALTH_LEDGER):
+    """Live H feed: {module: {scorecard, libyear_days, mirror, ...}} from the
+    captured track-record ledger. Empty if the file is absent (offline fallback)."""
+    try:
+        return json.load(open(path)).get("health", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def health_H(h):
+    """H axis (0..3 health-drift; higher ⇒ more carry). Wired to live data (doc §6):
+    the canary that turns 'substitutable' into 'substitutable AND drifting ⇒ migrate'.
+    Driven by libyear (high-confidence, real version dates); OpenSSF Scorecard adds a
+    penalty ONLY for a genuinely low-scoring, non-mirror repo. golang.org/x repos
+    develop on Gerrit and their GitHub mirror under-reads on Scorecard — treated as
+    low-confidence (mirror=true), never inflating H. No data ⇒ 1 (neutral, offline)."""
+    ly, sc = (h or {}).get("libyear_days"), (h or {}).get("scorecard")
+    if not h or (ly is None and sc is None):
+        return 1  # no data (or a present-but-empty row from a failed capture) ⇒ neutral
+    ly_band = 0 if ly is None else (0 if ly < 90 else 1 if ly < 365 else 2 if ly < 730 else 3)
+    # Scorecard penalty fires only for a genuinely low (<5), non-mirror repo. NB this
+    # 5.0 cut is DELIBERATELY below track_verdict's 6.0 "trust-the-quiet" bar: a [5,6)
+    # repo is good enough not to add carry, not good enough to declare its silence safe.
+    sc_pen = 1 if (sc is not None and not h.get("mirror") and sc < 5) else 0
+    return min(ly_band + sc_pen, 3)
 
 
 def _loc(path):
@@ -192,7 +224,7 @@ def classify(mod):
     return SUB_DEFAULT
 
 
-def score(mod, d):
+def score(mod, d, health=None):
     info = classify(mod)
     areas = sorted(d["areas"].get(mod, []))
     reachable = mod in d["reachable"]
@@ -214,8 +246,9 @@ def score(mod, d):
     benefit = 3 if info["cap"] == "core" else 1
 
     # Substitutability-weighted carry cost (Part III: reachable-vuln × blast × effort / benefit).
-    # H (health/drift) is the live-data slot — set to 1 (neutral) offline; see doc.
-    H = 1
+    # H (health/drift) is now wired to LIVE data (Scorecard + libyear); 1 (neutral) only
+    # when no health row exists (offline fallback). See doc §6 + dep-track-record.json.
+    H = health_H((health or {}).get(mod))
     carry = round((R * max(C, 1) * (S + H)) / benefit, 1) if reachable else 0.0
 
     disposition = decide(reachable, sub, C)
@@ -301,10 +334,26 @@ def track_measures(series):
     )
 
 
-def track_verdict(m, t, indeg):
+def track_verdict(m, t, indeg, health=None):
     high_fanout = indeg > 5
     n, s = t["cum_noise"], t["cum_signal"]
     if n == 0 and s == 0:
+        # noise=0 is AMBIGUOUS (Part III) — cross-check the live Health feed before
+        # trusting the quiet. With Scorecard/libyear wired, we can now resolve it.
+        h = (health or {}).get(m)
+        sc, ly = (h or {}).get("scorecard"), (h or {}).get("libyear_days")
+        lyd = "?" if ly is None else f"{ly}d"
+        # Corroborating quiet needs at least one real health signal; an all-None row
+        # (capture failed) is still a blind spot, not a clean bill. The trust bar is
+        # Scorecard ≥ 6 (stricter than health_H's <5 carry cut — see health_H).
+        if h and (sc is not None or ly is not None):
+            healthy = ((sc is None or h.get("mirror") or sc >= 6)
+                       and (ly is None or ly < 365))
+            if healthy:
+                return ("quiet (corroborated)", f"noise=0 AND health checks out "
+                        f"(Scorecard {sc}, libyear {lyd}) — trustworthy quiet, not a blind spot")
+            return ("blind-spot?", f"noise=0 but health is weak (Scorecard {sc}, "
+                    f"libyear {lyd}) — quiet may be unscanned; verify before trusting")
         return ("blind-spot?", "zero noise may mean nobody is looking — cross-check "
                 "Scorecard activity / libyear before trusting the quiet")
     if s == 0:
@@ -334,11 +383,12 @@ def track_verdict(m, t, indeg):
 
 def report_track(path, d, as_json):
     track = load_track(path)
+    health = load_health(path)
     rows = []
     for m, series in sorted(track.items()):
         t = track_measures(series)
         indeg = d["indeg"].get(m, 0)
-        tag, why = track_verdict(m, t, indeg)
+        tag, why = track_verdict(m, t, indeg, health)
         rows.append(dict(module=m, indeg=indeg, **t, verdict=tag, why=why))
     if as_json:
         print(json.dumps({"track_record": rows}, indent=2))
@@ -370,8 +420,9 @@ def main():
         report_track(path, load(), as_json)
         return
     d = load()
-    directs = sorted(d["areas"], key=lambda m: (-score(m, d)["carry"], m))
-    rows = [score(m, d) for m in directs]
+    health = load_health()
+    directs = sorted(d["areas"], key=lambda m: (-score(m, d, health)["carry"], m))
+    rows = [score(m, d, health) for m in directs]
 
     summary = dict(
         modules_in_closure=len(d["closure"]),
@@ -393,15 +444,16 @@ def main():
     print(f"Tier-1 core (keybroker/control-plane/sdk) direct external imports: "
           f"{summary['core_direct_imports']}  (tenet: must be 0)")
     print("-" * 78)
-    print(f"{'carry':>5} {'R':>1}{'C':>2}{'S':>2}{'F':>2}  {'sub':<11}{'reachLoC':>9}  module")
+    h_live = "live (Scorecard+libyear)" if health else "offline (H=1 neutral)"
+    print(f"{'carry':>5} {'R':>1}{'C':>2}{'S':>2}{'F':>2}{'H':>2}  {'sub':<11}{'reachLoC':>9}  module")
     for r in rows:
-        print(f"{r['carry']:>5} {r['R']:>1}{r['C']:>2}{r['S']:>2}{r['F']:>2}  "
+        print(f"{r['carry']:>5} {r['R']:>1}{r['C']:>2}{r['S']:>2}{r['F']:>2}{r['H']:>2}  "
               f"{r['sub']:<11}{r['reach_loc']:>9}  {r['module']}  [{','.join(r['areas'])}]")
         print(f"       -> {r['disposition']}")
     print("-" * 78)
-    print("R=reachability C=concentration/fan-out S=substitutability-effort F=function-tier")
+    print("R=reachability C=concentration/fan-out S=substitutability-effort F=function-tier H=health/drift")
     print("sub via two levers: A=opacity (code/service/proprietary x vendors) B=reachLoC (rebuild cost)")
-    print("carry = R x max(C,1) x (S + H) / benefit ; H is the live health/drift slot (=1 offline)")
+    print(f"carry = R x max(C,1) x (S + H) / benefit ; H feed: {h_live}")
 
 
 if __name__ == "__main__":

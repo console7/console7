@@ -1,5 +1,13 @@
 # Handoff — capturing the live CVE/health data (broader-access env)
 
+> **STATUS: ✅ CAPTURED (2026-06-25).** All three feeds were reachable in this env
+> (OSV/deps.dev/proxy = 200; `vuln.go.dev` reachable). Live data landed in
+> `dep-track-record.json` via `scripts/dep-capture.py`; `govulncheck` (built with
+> go1.25.11) measured **0 reachable** at t0 (13 present-but-unreached in `x/crypto`);
+> `H` is wired to live Scorecard + libyear in `scripts/dep-lifecycle-model.py`; capture
+> is wired into `.github/workflows/dep-scan.yml`. The notes below are the original brief,
+> kept for provenance.
+
 > Scratch handoff for resuming the dependency-lifecycle-model work in an
 > environment with broader egress. This branch
 > (`claude/dependency-maintainability-model-4n4xum`) is **disposable** —

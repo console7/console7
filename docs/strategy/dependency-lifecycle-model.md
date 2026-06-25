@@ -131,25 +131,42 @@ package. Console7 already does this by construction (§4).
 ## 4. Testing it on Console7
 
 Run live against the module graph — regenerate any time with
-`python3 scripts/dep-lifecycle-model.py [--json]`. Snapshot (this branch):
+`python3 scripts/dep-lifecycle-model.py [--json]`. Snapshot (this branch), with the
+**H axis now wired to live data** (OpenSSF Scorecard + libyear, captured into
+`dep-track-record.json` by `scripts/dep-capture.py`; H was held neutral `=1` before):
 
 ```
 closure = 203 modules   build-reachable = 53   graph-only = 150   directly-imported = 10
 Tier-1 core (keybroker / control-plane / sdk) direct external imports: 0   (tenet: must be 0)
+H feed: live (Scorecard + libyear)
 ```
 
-| carry | R | C | S | F | sub (2‑lever) | reachLoC | module | disposition |
-|------:|:-:|:-:|:-:|:-:|-----|--------:|--------|-------------|
-| 8.0 | 2 | 3 | 3 | 2 | `fork-hard` | 79 039 | `google.golang.org/grpc` | TCO + quarantine (spine); fork‑readiness |
-| 6.0 | 3 | 2 | 2 | 2 | `fork` | 22 092 | `google.golang.org/api` | TCO + quarantine (spine); fork‑readiness |
-| 6.0 | 2 | 3 | 2 | 2 | `fork` | 46 581 | `google.golang.org/protobuf` | TCO + quarantine (spine); fork‑readiness |
-| 4.0 | 2 | 1 | 1 | 2 | `vendor-swap` | 99 982 | `github.com/google/go-github/v88` | swap behind SCMProvider — not a rebuild |
-| 4.0 | 2 | 2 | 2 | 2 | `fork` | 5 131 | `golang.org/x/oauth2` | fork (KLoC overstates — OAuth2 is spec‑backed) |
-| 2.7 | 2 | 2 | 1 | 2 | `vendor-swap` | 4 326 | `cloud.google.com/go/iam` | swap behind the seam (high fan‑out: MTTR bar) |
-| 2.0 | 2 | 0 | 0 | 2 | `inline` | 432 | `…/ghinstallation/v2` | inline the slice — shed the inheritance |
-| 1.3 | 2 | 1 | 1 | 2 | `vendor-swap` | 30 114 | `cloud.google.com/go/kms` | swap behind SecretsProvider — not a rebuild |
-| 1.3 | 2 | 1 | 1 | 2 | `vendor-swap` | 6 236 | `cloud.google.com/go/secretmanager` | swap behind SecretsProvider |
-| 1.3 | 2 | 1 | 1 | 2 | `vendor-swap` | 32 466 | `cloud.google.com/go/storage` | swap behind EvidenceSink |
+| carry | R | C | S | F | H | sub (2‑lever) | reachLoC | module | disposition |
+|------:|:-:|:-:|:-:|:-:|:-:|-----|--------:|--------|-------------|
+| 6.0 | 2 | 3 | 3 | 2 | 0 | `fork-hard` | 79 039 | `google.golang.org/grpc` | TCO + quarantine (spine); fork‑readiness |
+| 4.0 | 3 | 2 | 2 | 2 | 0 | `fork` | 22 092 | `google.golang.org/api` | TCO + quarantine (spine); fork‑readiness |
+| 4.0 | 2 | 3 | 2 | 2 | 0 | `fork` | 46 581 | `google.golang.org/protobuf` | TCO + quarantine (spine); fork‑readiness |
+| 2.7 | 2 | 2 | 2 | 2 | 0 | `fork` | 5 131 | `golang.org/x/oauth2` | fork (KLoC overstates — OAuth2 is spec‑backed) |
+| 2.0 | 2 | 1 | 1 | 2 | 0 | `vendor-swap` | 99 982 | `github.com/google/go-github/v88` | swap behind SCMProvider — not a rebuild |
+| 1.3 | 2 | 2 | 1 | 2 | 0 | `vendor-swap` | 4 326 | `cloud.google.com/go/iam` | swap behind the seam (high fan‑out: MTTR bar) |
+| 0.7 | 2 | 1 | 1 | 2 | 0 | `vendor-swap` | 30 114 | `cloud.google.com/go/kms` | swap behind SecretsProvider — not a rebuild |
+| 0.7 | 2 | 1 | 1 | 2 | 0 | `vendor-swap` | 6 236 | `cloud.google.com/go/secretmanager` | swap behind SecretsProvider |
+| 0.7 | 2 | 1 | 1 | 2 | 0 | `vendor-swap` | 32 466 | `cloud.google.com/go/storage` | swap behind EvidenceSink |
+| 0.0 | 2 | 0 | 0 | 2 | 0 | `inline` | 432 | `…/ghinstallation/v2` | inline the slice — shed the inheritance |
+
+The live H **lowers carry uniformly across a fresh, healthy, well‑pinned set** — every
+direct scores **H = 0** at t0 (`grpc` falls 8.0 → 6.0, the GCP clients to 0.7), because
+each is either well‑maintained (libyear within the 90‑day band; Scorecard 7.1–8.7 for
+the GCP/`go‑github`/`grpc` base) **or** a low‑confidence Gerrit mirror that is excluded
+from penalty. The capture detects mirrors by the **canonical VCS host** (`?go-get=1` →
+`go.googlesource.com`), not a path prefix — which correctly catches not just
+`golang.org/x/*` (`oauth2` 3.5, `crypto` 5.0) but also `google.golang.org/protobuf`
+(developed on Gerrit, GitHub is a read‑only mirror), so its under‑read Scorecard never
+inflates H. The one non‑mirror module whose Scorecard *is* notably low — `ghinstallation`
+(5.9) — clears the H penalty cut (`< 5`) but is still flagged in the **track record**
+(trust‑the‑quiet bar `≥ 6`, §5). H is the live regression hook the doc promised: when a
+non‑mirror Scorecard drops below 5 or libyear grows past a quarter, carry rises and the
+disposition tips toward *migrate*.
 
 ### What the readout says — strategically
 
@@ -258,31 +275,76 @@ The discriminations that matter: `grpc` has a *noisier* canary than the legacy p
 noise, reaches 67% of it, is rising, and is behind on MTTR → **migrate**. Noise count
 alone would have ranked them together; the signal track record splits them.
 
-### Console7's record, honestly
+### Console7's record, measured
 
-Console7's dependency set is **brand new and pinned `govulncheck`‑clean** (`go.mod`
-header), so its true starting record is **signal = 0 at t0** — a clean reachable
-history, with the spine (`grpc`/`protobuf`/`x/net`/`oauth2`) expected to behave like
-the `grpc`/`oauth2` archetypes above: a chirping canary, a flat signal, because §4
-already showed the reach is shallow and quarantined behind the seam. The honest gap:
-the **live feeds that populate the series are egress‑policy‑blocked in this session** —
-`vuln.go.dev` and `api.osv.dev` both return 403 — so the real numbers begin accruing
-once those hosts are allowlisted in the supply‑chain lane (a destination an adopter's
-default‑deny egress must permit anyway). The tool therefore *ingests a committed
-observations ledger* rather than fetching live: the series is evidence, versioned with
-the code, regenerated as `govulncheck` (signal) and OSV (noise) append each period.
+The series are no longer illustrative — they are **live‑captured** into
+[`dep-track-record.json`](dep-track-record.json) by `scripts/dep-capture.py` (OSV for
+noise, `govulncheck` for signal, deps.dev + `proxy.golang.org` for health) and read by
+`--track`. The headline result confirms the prediction with real data:
+
+```
+cumN cumS   rho  noiseTr sigTr  module                    verdict
+  19    0  0.00  rising  flat   golang.org/x/crypto       INSULATED
+   2    0  0.00  flat    flat   google.golang.org/grpc    INSULATED
+   1    0  0.00  falling flat   golang.org/x/oauth2       INSULATED
+   1    0  0.00  falling flat   google.golang.org/protobuf INSULATED
+   0    0     -  flat    flat   cloud.google.com/go/*     quiet (corroborated)
+   0    0     -  flat    flat   github.com/bradleyfalzon/ghinstallation/v2  blind-spot?
+```
+
+**Signal = 0 across the whole build, measured, not assumed.** `govulncheck v1.1.4`
+(built with `go1.25.11`) over `./...` returns **zero reachable** findings — Console7 is
+`govulncheck`‑clean *by reach*, exactly as the `go.mod` header claims. The capture is
+not vacuous: it found **13 advisories present at module‑required level** in
+`golang.org/x/crypto` (the `ssh/*` audit batch disclosed 2026‑Q2, fixed in `v0.52.0`),
+all **unreached** because Console7 imports no `ssh` package — so they are *noise, not
+signal*. This is the INSULATED archetype made real and dramatic: `x/crypto`'s canary
+**spiked to 13 in one quarter** (cumN 19, rising) while signal stayed flat at 0 — the
+seam and shallow usage doing exactly their job. (Hygiene note: bump `x/crypto` to
+`≥ v0.52.0` anyway as defence‑in‑depth, even though unreached.)
+
+**The noise canary is real and per‑package.** `grpc` (HTTP/2 Rapid Reset, the
+private‑token log leak, the 2026 `:path` authz bypass), `protobuf` (the 2023/2024
+parser DoS pair), and `oauth2` (CVE‑2025‑22868) all chirped — and every one of those
+advisories is **fixed at or below Console7's pinned version**, so none reaches the
+current build. The `grpc` 2026‑Q1 advisory (`CVE‑2026‑33186`, alias `GO‑2026‑4762`,
+fixed `1.79.3` — recorded in the ledger's `advisories` block) does not affect our
+`v1.80.0` pin; `govulncheck` agrees by omitting it.
+
+**`noise = 0` is now resolved by Health, not left ambiguous.** The quiet modules cross‑
+check against the live Scorecard/libyear feed: the GCP set (8.2), `go‑github` (8.7) and
+`api` (7.1) read **quiet (corroborated)** — trustworthy quiet, not a blind spot —
+whereas `ghinstallation` (Scorecard 5.9) stays flagged **blind‑spot?**, the one place
+the quiet is *not yet* trustworthy. That is the doc's own rule — "*a quiet series must
+be cross‑checked against Health before it is trusted*" — now executed on real data.
+
+The series is **evidence, versioned with the code**: `scripts/dep-capture.py` appends a
+period each run (and is wired into `.github/workflows/dep-scan.yml`), so the ledger
+self‑populates and the first real `signal > 0` will be a tracked event, not a surprise.
 
 ## 6. Where live data plugs in (the honest gaps)
 
-This snapshot runs **offline** against the toolchain. Three terms are proxies until
-wired to live data; none change the *shape* of the model, only sharpen scores:
+The structural axes run against the toolchain; the two live‑data terms below are now
+**captured**, by `scripts/dep-capture.py`, into `dep-track-record.json` (OSV, deps.dev,
+`proxy.golang.org`) — closing the gaps the offline snapshot left open. `S` remains the
+documented judgment axis.
 
-- **H (health/drift)** — held neutral (`H=1`). Wire to **OpenSSF Scorecard +
-  Criticality Score** and **libyear** drift (CO‑05/CO‑11). This is what turns
-  "substitutable" into "substitutable **and drifting** ⇒ migrate now."
-- **R (reachable‑CVE fraction)** — today it scores *build*‑reachability (binary, per
-  module). A reachability‑aware SCA (call‑graph to the vulnerable symbol) upgrades it
-  to the *fraction* of inherited CVEs on the call path, and emits the VEX directly.
+- **H (health/drift) — ✅ wired.** Was held neutral (`H=1`); now computed from **OpenSSF
+  Scorecard** (deps.dev) + **libyear** drift (`proxy.golang.org` version dates), CO‑05/
+  CO‑11. libyear is the high‑confidence driver; Scorecard adds a penalty only for a
+  genuinely low‑scoring **non‑mirror** repo (the `golang.org/x/*` Gerrit mirrors
+  under‑read on Scorecard and are treated as low‑confidence). This is the term that
+  turns "substitutable" into "substitutable **and drifting** ⇒ migrate now," and it is
+  what now lets `--track` resolve an ambiguous `noise = 0` into *quiet (corroborated)*
+  vs *blind‑spot?* (§5).
+- **R (reachable‑CVE fraction) — live signal captured; structural R retained.** The
+  ledger's `signal` series is now real `govulncheck` output (measured **0 reachable** at
+  t0; 13 present‑but‑unreached in `x/crypto`). The `score()` ledger keeps *build*‑
+  reachability as the **standing‑posture** R (binary, per module — "would a CVE here
+  matter"), because per‑symbol reachable‑CVE fraction is `0/0` for every direct at t0
+  and would erase the strategic ledger; the two are deliberately distinct (the standing
+  posture vs the period's realised exposure). Upgrading `score()` R to a live
+  call‑graph fraction is the natural next step once `signal > 0` exists to measure.
 - **S (substitutability)** — capability class is human judgment in
   `CAPABILITY_REGISTRY`, reviewed as code. The API‑depth proxy is computed; richer
   signals (distinct symbols, not just packages; whether the surface is an interface we

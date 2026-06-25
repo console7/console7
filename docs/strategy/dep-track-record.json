@@ -1,0 +1,658 @@
+{
+  "_status": "MEASURED — live capture 2026-06-25. Real OSV/govulncheck/deps.dev/proxy.golang.org data, NOT illustrative.",
+  "_schema": "scripts/dep-lifecycle-model.py --track. observations[].{module,period,noise,signal[,remediated_days]}; health{module}.{scorecard,libyear_days,...}.",
+  "_comment": [
+    "noise[t]  = NEW CVEs disclosed in the module that quarter (the canary). Source:",
+    "  api.osv.dev /v1/query, deduped by alias cluster (GHSA<->GO<->CVE = one advisory),",
+    "  earliest `published` date sets the quarter. A property of the PACKAGE.",
+    "signal[t] = of those, how many are REACHABLE on Console7's call path (the toil owed).",
+    "  Source: govulncheck v1.1.4 (built with go1.25.11) `-json ./...` at t0=2026-06-25.",
+    "  RESULT: 0 reachable across the whole build. 13 advisories are present at",
+    "  module-required level (golang.org/x/crypto v0.51.0, ssh/* fixed in v0.52.0) but",
+    "  UNREACHED (ssh packages not imported) => signal 0. Console7 is govulncheck-clean by",
+    "  reach, exactly as the go.mod header claims. This is the measured t0, not an assumption.",
+    "Window: 2024-Q1..2026-Q2 (contiguous quarters). Advisories predating the window:",
+    "  grpc +1 (2023-Q4 HTTP/2 Rapid Reset), protobuf +1 (2023-Q1), x/crypto +9 (2021-2023).",
+    "signal=0 for every period: pre-adoption (Console7 took these deps at 2026-Q2 t0) there",
+    "  was no call path; at t0 govulncheck measures 0 reachable. Both are honestly 0 -- the",
+    "  series is Console7's TRUE starting record, and will accrue real signal>0 only if a",
+    "  future reachable CVE lands. Quiet (noise=0) modules carry one t0 anchor; their verdict",
+    "  is cross-checked against `health` (Scorecard/libyear) per the model -- noise=0 alone is",
+    "  ambiguous (could mean nobody is looking).",
+    "health{}: OpenSSF Scorecard (api.deps.dev) + libyear drift (proxy.golang.org version",
+    "  dates). mirror=true marks modules developed on Gerrit (go.googlesource.com) whose",
+    "  GitHub mirror Scorecard under-reads -- detected via the ?go-get=1 VCS host, so it",
+    "  catches x/* AND google.golang.org/protobuf; treated LOW-CONFIDENCE, never inflates H.",
+    "advisories{}: per-module advisory detail (CVE/GO id, published, fix version) so each",
+    "  noise count is traceable to the specific CVEs behind it (e.g. grpc CVE-2026-33186",
+    "  fixed 1.79.3, below our v1.80.0 pin -> unreached)."
+  ],
+  "_capture": {
+    "date": "2026-06-25",
+    "govulncheck": {
+      "version": "v1.1.4",
+      "toolchain": "go1.25.11",
+      "reachable_findings": 0,
+      "present_only_findings": 13,
+      "present_only_module": "golang.org/x/crypto (ssh/*, fixed v0.52.0)"
+    },
+    "sources": {
+      "noise": "api.osv.dev/v1/query",
+      "signal": "govulncheck -json ./...",
+      "scorecard": "api.deps.dev/v3",
+      "libyear": "proxy.golang.org @latest/@v/*.info"
+    },
+    "tool": "scripts/dep-capture.py",
+    "last_period": "2026-Q2"
+  },
+  "observations": [
+    {
+      "module": "cloud.google.com/go/iam",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "cloud.google.com/go/kms",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "cloud.google.com/go/secretmanager",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "cloud.google.com/go/storage",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "github.com/bradleyfalzon/ghinstallation/v2",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "github.com/google/go-github/v88",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2024-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2024-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2024-Q3",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2024-Q4",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2025-Q1",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2025-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2025-Q3",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2025-Q4",
+      "noise": 3,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2026-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "period": "2026-Q2",
+      "noise": 13,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2024-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2024-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2024-Q3",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2024-Q4",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2025-Q1",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2025-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2025-Q3",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2025-Q4",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2026-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "golang.org/x/oauth2",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/api",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2024-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2024-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2024-Q3",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2024-Q4",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2025-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2025-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2025-Q3",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2025-Q4",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2026-Q1",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2024-Q1",
+      "noise": 1,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2024-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2024-Q3",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2024-Q4",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2025-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2025-Q2",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2025-Q3",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2025-Q4",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2026-Q1",
+      "noise": 0,
+      "signal": 0
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "period": "2026-Q2",
+      "noise": 0,
+      "signal": 0
+    }
+  ],
+  "health": {
+    "cloud.google.com/go/iam": {
+      "scorecard": 8.2,
+      "pinned": "v1.7.0",
+      "pinned_date": "2026-04-02",
+      "latest": "v1.11.0",
+      "latest_date": "2026-05-07",
+      "libyear_days": 35,
+      "sc_src": "github.com/googleapis/google-cloud-go",
+      "mirror": false
+    },
+    "cloud.google.com/go/kms": {
+      "scorecard": 8.2,
+      "pinned": "v1.31.0",
+      "pinned_date": "2026-05-07",
+      "latest": "v1.31.0",
+      "latest_date": "2026-05-07",
+      "libyear_days": 0,
+      "sc_src": "github.com/googleapis/google-cloud-go",
+      "mirror": false
+    },
+    "cloud.google.com/go/secretmanager": {
+      "scorecard": 8.2,
+      "pinned": "v1.20.0",
+      "pinned_date": "2026-04-30",
+      "latest": "v1.20.0",
+      "latest_date": "2026-04-30",
+      "libyear_days": 0,
+      "sc_src": "github.com/googleapis/google-cloud-go",
+      "mirror": false
+    },
+    "cloud.google.com/go/storage": {
+      "scorecard": 8.2,
+      "pinned": "v1.62.3",
+      "pinned_date": "2026-06-04",
+      "latest": "v1.62.3",
+      "latest_date": "2026-06-04",
+      "libyear_days": 0,
+      "sc_src": "github.com/googleapis/google-cloud-go",
+      "mirror": false
+    },
+    "github.com/google/go-github/v88": {
+      "scorecard": 8.7,
+      "pinned": "v88.0.0",
+      "pinned_date": "2026-05-21",
+      "latest": "v88.0.0",
+      "latest_date": "2026-05-21",
+      "libyear_days": 0,
+      "sc_src": "github.com/google/go-github",
+      "mirror": false
+    },
+    "github.com/bradleyfalzon/ghinstallation/v2": {
+      "scorecard": 5.9,
+      "pinned": "v2.19.0",
+      "pinned_date": "2026-06-11",
+      "latest": "v2.19.0",
+      "latest_date": "2026-06-11",
+      "libyear_days": 0,
+      "sc_src": "github.com/bradleyfalzon/ghinstallation",
+      "mirror": false
+    },
+    "google.golang.org/api": {
+      "scorecard": 7.1,
+      "pinned": "v0.274.0",
+      "pinned_date": "2026-04-02",
+      "latest": "v0.286.0",
+      "latest_date": "2026-06-22",
+      "libyear_days": 81,
+      "sc_src": "github.com/googleapis/google-api-go-client",
+      "mirror": false
+    },
+    "google.golang.org/grpc": {
+      "scorecard": 7.7,
+      "pinned": "v1.80.0",
+      "pinned_date": "2026-04-01",
+      "latest": "v1.81.1",
+      "latest_date": "2026-05-13",
+      "libyear_days": 42,
+      "sc_src": "github.com/grpc/grpc-go",
+      "mirror": false
+    },
+    "google.golang.org/protobuf": {
+      "scorecard": 4.5,
+      "pinned": "v1.36.11",
+      "pinned_date": "2025-12-12",
+      "latest": "v1.36.11",
+      "latest_date": "2025-12-12",
+      "libyear_days": 0,
+      "sc_src": "github.com/golang/protobuf (Gerrit mirror)",
+      "mirror": true
+    },
+    "golang.org/x/oauth2": {
+      "scorecard": 3.5,
+      "pinned": "v0.36.0",
+      "pinned_date": "2026-02-11",
+      "latest": "v0.36.0",
+      "latest_date": "2026-02-11",
+      "libyear_days": 0,
+      "sc_src": "github.com/golang/oauth2 (Gerrit mirror)",
+      "mirror": true
+    },
+    "golang.org/x/crypto": {
+      "scorecard": 5,
+      "pinned": "v0.51.0",
+      "pinned_date": "2026-05-08",
+      "latest": "v0.53.0",
+      "latest_date": "2026-06-08",
+      "libyear_days": 31,
+      "sc_src": "github.com/golang/crypto (Gerrit mirror)",
+      "mirror": true
+    }
+  },
+  "advisories": {
+    "golang.org/x/oauth2": [
+      {
+        "id": "CVE-2025-22868",
+        "published": "2025-02-26",
+        "quarter": "2025-Q1",
+        "fixed": "0.27.0"
+      }
+    ],
+    "google.golang.org/grpc": [
+      {
+        "id": "GO-2023-2153",
+        "published": "2023-10-25",
+        "quarter": "2023-Q4",
+        "fixed": "1.56.3"
+      },
+      {
+        "id": "GO-2024-2978",
+        "published": "2024-07-05",
+        "quarter": "2024-Q3",
+        "fixed": "1.64.1"
+      },
+      {
+        "id": "CVE-2026-33186",
+        "published": "2026-03-18",
+        "quarter": "2026-Q1",
+        "fixed": "1.79.3"
+      }
+    ],
+    "google.golang.org/protobuf": [
+      {
+        "id": "CVE-2023-24535",
+        "published": "2023-03-14",
+        "quarter": "2023-Q1",
+        "fixed": "1.29.1"
+      },
+      {
+        "id": "CVE-2024-24786",
+        "published": "2024-03-05",
+        "quarter": "2024-Q1",
+        "fixed": "1.33.0"
+      }
+    ],
+    "golang.org/x/crypto": [
+      {
+        "id": "CVE-2017-3204",
+        "published": "2021-04-14",
+        "quarter": "2021-Q2",
+        "fixed": "0.0.0-20170330155735-e4e2799dd7aa"
+      },
+      {
+        "id": "CVE-2020-9283",
+        "published": "2021-04-14",
+        "quarter": "2021-Q2",
+        "fixed": "0.0.0-20200220183623-bac4c82f6975"
+      },
+      {
+        "id": "CVE-2020-7919",
+        "published": "2021-06-23",
+        "quarter": "2021-Q2",
+        "fixed": "0.0.0-20200124225646-8b5121be2f68"
+      },
+      {
+        "id": "CVE-2020-29652",
+        "published": "2022-02-17",
+        "quarter": "2022-Q1",
+        "fixed": "0.0.0-20201216223049-8b5274cf687f"
+      },
+      {
+        "id": "CVE-2022-27191",
+        "published": "2022-03-19",
+        "quarter": "2022-Q1",
+        "fixed": "0.0.0-20220314234659-1baeb1ce4c0b"
+      },
+      {
+        "id": "CVE-2019-11840",
+        "published": "2022-05-24",
+        "quarter": "2022-Q2",
+        "fixed": "0.0.0-20190320223903-b7391e95e576"
+      },
+      {
+        "id": "CVE-2019-11841",
+        "published": "2022-05-24",
+        "quarter": "2022-Q2",
+        "fixed": "0.0.0-20190424203555-c05e17bb3b2d"
+      },
+      {
+        "id": "CVE-2021-43565",
+        "published": "2022-09-07",
+        "quarter": "2022-Q3",
+        "fixed": "0.0.0-20211202192323-5770296d904e"
+      },
+      {
+        "id": "CVE-2023-48795",
+        "published": "2023-12-18",
+        "quarter": "2023-Q4",
+        "fixed": "0.0.0-20231218163308-9d2ee975ef9f"
+      },
+      {
+        "id": "CVE-2022-30636",
+        "published": "2024-07-02",
+        "quarter": "2024-Q3",
+        "fixed": "0.0.0-20220525230936-793ad666bf5e"
+      },
+      {
+        "id": "CVE-2024-45337",
+        "published": "2024-12-11",
+        "quarter": "2024-Q4",
+        "fixed": "0.31.0"
+      },
+      {
+        "id": "CVE-2025-22869",
+        "published": "2025-02-26",
+        "quarter": "2025-Q1",
+        "fixed": "0.35.0"
+      },
+      {
+        "id": "CVE-2025-47913",
+        "published": "2025-11-13",
+        "quarter": "2025-Q4",
+        "fixed": "0.43.0"
+      },
+      {
+        "id": "CVE-2025-47914",
+        "published": "2025-11-19",
+        "quarter": "2025-Q4",
+        "fixed": "0.45.0"
+      },
+      {
+        "id": "CVE-2025-58181",
+        "published": "2025-11-19",
+        "quarter": "2025-Q4",
+        "fixed": "0.45.0"
+      },
+      {
+        "id": "CVE-2026-39827",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39828",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39829",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39830",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39831",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39832",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39833",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39834",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-39835",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-42508",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-46595",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-46597",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      },
+      {
+        "id": "CVE-2026-46598",
+        "published": "2026-05-22",
+        "quarter": "2026-Q2",
+        "fixed": "0.52.0"
+      }
+    ]
+  }
+}
