@@ -286,3 +286,7 @@ func (denyInjector) Owns(interfaces.SandboxHandle, interfaces.Subject, interface
 func (denyInjector) DeliverIfOwned(interfaces.SandboxHandle, interfaces.Subject, interfaces.SessionID, []byte) bool {
 	return false
 }
+
+func (denyInjector) DeliverInferenceIfOwned(interfaces.SandboxHandle, interfaces.Subject, interfaces.SessionID, []byte) bool {
+	return false
+}

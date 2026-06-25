@@ -487,8 +487,10 @@ func (p *Provider) InjectInferenceCredential(ctx context.Context, in interfaces.
 	if !expiry.After(now) || expiry.After(now.Add(lifetime+time.Minute)) {
 		return errors.New("secretsgcp: minted inference token has an implausible expiry — missing, past, or longer-lived than requested (fail closed)")
 	}
-	// Deliver only into the verified owning sandbox, re-checking ownership ATOMICALLY with delivery.
-	if !inj.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
+	// Deliver only into the verified owning session's AUTH-PROXY (NOT the sandbox), re-checking ownership
+	// ATOMICALLY with delivery. The inference credential goes to the auth-proxy gateway the engine reaches
+	// Vertex through, so the sandbox stays credential-free.
+	if !inj.DeliverInferenceIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
 		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
 	}
 	return nil

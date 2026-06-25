@@ -240,12 +240,16 @@ func TestBroker_InjectInferenceCredential(t *testing.T) {
 	box := reg.Provision("alice", "s1")
 	deadline := time.Now().Add(15 * time.Minute)
 
-	// The broker forwards the facts; the seam mints + delivers a (fake) inference credential into the owner.
+	// The broker forwards the facts; the seam mints + delivers a (fake) inference credential to the
+	// owner's AUTH-PROXY gateway (the sandbox stays credential-free on the inference lane).
 	if err := b.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: box, SessionDeadline: deadline}); err != nil {
 		t.Fatalf("InjectInferenceCredential: %v", err)
 	}
-	if _, ok := reg.Injected(box); !ok {
-		t.Error("inference credential not injected into the owning sandbox")
+	if _, ok := reg.InferenceInjected(box); !ok {
+		t.Error("inference credential not injected into the owning session's auth-proxy")
+	}
+	if _, ok := reg.Injected(box); ok {
+		t.Error("inference credential wrongly delivered into the sandbox credential slot")
 	}
 
 	// A broker missing the secrets seam fails closed (an error, never a panic).

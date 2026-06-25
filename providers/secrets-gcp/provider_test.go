@@ -292,9 +292,14 @@ func TestInjectInferenceCredential(t *testing.T) {
 	if err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline}); err != nil {
 		t.Fatalf("InjectInferenceCredential into owner: %v", err)
 	}
-	got, ok := reg.Injected(owned)
+	// The inference credential is delivered to the session's AUTH-PROXY gateway, NOT the sandbox.
+	got, ok := reg.InferenceInjected(owned)
 	if !ok || !bytes.Equal(got, []byte("fake-gcp-access-token")) {
-		t.Errorf("minted token not delivered to owner: ok=%v got=%q", ok, got)
+		t.Errorf("minted token not delivered to the owner's auth-proxy: ok=%v got=%q", ok, got)
+	}
+	// And it must NOT land in the sandbox's own credential slot (sandbox stays credential-free).
+	if got, ok := reg.Injected(owned); ok {
+		t.Errorf("inference credential wrongly delivered into the sandbox: got=%q", got)
 	}
 	if want := 30 * time.Minute; minter.LastLifetime() != want {
 		t.Errorf("lifetime not capped to the deadline: got %v want %v", minter.LastLifetime(), want)

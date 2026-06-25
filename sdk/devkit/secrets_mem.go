@@ -191,7 +191,9 @@ func (m *MemSecrets) InjectInferenceCredential(ctx context.Context, in interface
 	// adopter's identity platform; the control plane never sees it either way.
 	token := []byte("devkit-fake-inference-token")
 	defer zero(token)
-	if !m.sandboxes.DeliverIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
+	// Deliver to the session's AUTH-PROXY gateway, NOT the sandbox: the inference credential reaches the
+	// auth-proxy the engine talks to Vertex through, so the sandbox stays credential-free.
+	if !m.sandboxes.DeliverInferenceIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
 		return errors.New("devkit: sandbox no longer belongs to the subject's session")
 	}
 	return nil

@@ -784,6 +784,30 @@ func credentialWipeArgv(h interfaces.SandboxHandle) []string {
 	return []string{"exec", "-n", h.ID, h.ID, "-c", "sandbox", "--", "/bin/sh", "-c", "rm -f " + credentialPath}
 }
 
+// authProxyTokenDeliverArgv is the EXACT kubectl argv for delivering the minted short-lived Vertex
+// bearer to THIS session's per-session auth-proxy pod (deployment/vertex-auth-proxy in
+// proxyNS(<id>)), NOT the sandbox. The auth-proxy image is distroless-static (no shell, no tar), so
+// the sandbox's `/bin/sh -c 'cat > …'` deliver and `kubectl cp` both fail against it; instead we exec
+// the auth-proxy BINARY directly in its `-deliver-token` mode and pipe the bearer over STDIN (`-i`).
+// The binary reads stdin, requires it non-empty, and writes it to authProxyBearerPath at 0600. Pure
+// (the material is NEVER among these args — it is the exec's STDIN), so a unit test can assert the
+// shape without a cluster. The target is the deterministic per-session proxyNS(h.ID) pod.
+func authProxyTokenDeliverArgv(h interfaces.SandboxHandle) []string {
+	return []string{
+		"exec", "-n", proxyNS(h.ID), "deployment/" + authProxyServiceName,
+		"-c", authProxyServiceName, "-i", "--", authProxyBinaryPath, "-deliver-token",
+	}
+}
+
+// DeliverInference writes material (the minted short-lived Vertex bearer) to the auth-proxy pod's
+// bearer file by exec'ing the auth-proxy binary's -deliver-token mode and feeding material over STDIN
+// (never argv). It is the inference-lane counterpart of Deliver: the inference credential goes to the
+// session's auth-proxy gateway, NOT into the credential-free sandbox.
+func (d *kubeCredentialDeliverer) DeliverInference(ctx context.Context, h interfaces.SandboxHandle, material []byte) error {
+	_, err := d.run.run(ctx, "kubectl", material, authProxyTokenDeliverArgv(h)...)
+	return err
+}
+
 // Deliver writes material to credentialPath in the sandbox container. `umask 077` makes the file
 // 0600 (owner-only); the engine runs as that same non-root uid and reads its own credential. The
 // material is the exec's STDIN, so it is never an argument. cat truncates+rewrites, so a re-deliver
@@ -1095,6 +1119,14 @@ const authProxyServiceName = "vertex-auth-proxy"
 // credential is delivered yet). The value is a filesystem PATH, not a credential, so gosec G101
 // is a false positive (the same class as credentialPath / RISKS R-5).
 const authProxyBearerPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
+
+// authProxyBinaryPath is the absolute in-image path of the auth-proxy binary (its Dockerfile
+// ENTRYPOINT — sandbox/vertex-auth-proxy/Dockerfile). The inference-credential deliverer execs THIS
+// binary DIRECTLY in `-deliver-token` mode (authProxyTokenDeliverArgv) rather than `/bin/sh -c 'cat
+// > …'`: the auth-proxy image is distroless-static (no shell, no tar), so the sandbox's shell-based
+// deliver (credentialDeliverArgv) and `kubectl cp` both fail against it. The binary reads the bearer
+// from stdin and writes it to authProxyBearerPath at 0600 (sandbox/vertex-auth-proxy deliverToken).
+const authProxyBinaryPath = "/usr/local/bin/console7-vertex-auth-proxy"
 
 // squidImage is the digest-pinned forward-proxy image (Squid 6.x on Ubuntu 24.04, Canonical-
 // maintained, content-addressed — the bytes can't change under us). It is the same hardened image

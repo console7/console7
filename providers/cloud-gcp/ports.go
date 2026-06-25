@@ -93,6 +93,14 @@ type CredentialDeliverer interface {
 	// Deliver writes material into handle's in-pod credential file (memory-backed). It returns an
 	// error if the write could not be confirmed; the provider then reports non-delivery (fail closed).
 	Deliver(ctx context.Context, handle interfaces.SandboxHandle, material []byte) error
+	// DeliverInference writes the minted short-lived INFERENCE credential (the Vertex bearer) into the
+	// session's per-session AUTH-PROXY pod's memory-backed bearer file — NOT into the sandbox. The
+	// auth-proxy is the credential-attaching gateway the engine reaches Vertex through, so the sandbox
+	// stays credential-free (it never holds the cloud bearer). Same SECURITY obligations as Deliver:
+	// material is a secret, written only to a memory-backed file, passed over stdin (never argv), never
+	// logged. The provider only calls it after DeliverInferenceIfOwned re-verifies ownership under the
+	// lock. It returns an error if the write could not be confirmed (the provider then fails closed).
+	DeliverInference(ctx context.Context, handle interfaces.SandboxHandle, material []byte) error
 	// Wipe best-effort shreds the in-pod credential file at teardown. The authoritative wipe is the
 	// pod's deletion (the volume is medium: Memory, so it dies with the pod); Wipe is defence in
 	// depth, so it tolerates an already-absent file/pod as success.

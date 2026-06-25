@@ -139,8 +139,9 @@ flowchart TB
   `onAllowlist()` confirms it — a resolved URL that is not allowlisted aborts the session.
 - **Credential injection branches on the resolved backend kind, fail-closed.** Vertex →
   `InjectInferenceCredential` mints a short-lived GCP token *inside* the SecretsProvider and
-  delivers it into the owning sandbox by file (never via metadata, never returned to the
-  control plane); otherwise → `InjectSubscriptionToken` when `UseSubscription && Attended`,
+  delivers it by file into the session's **auth-proxy gateway** — NOT the sandbox, which stays
+  credential-free (never via metadata, never returned to the control plane); otherwise →
+  `InjectSubscriptionToken` when `UseSubscription && Attended`,
   else the adopter's shared `InjectOrgCredential`. Every inject seam re-checks attended +
   single-beneficiary + sandbox ownership.
 - **The push→PR bridge is control-plane-mediated; the sandbox stays SCM-free.** `propose()`

@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -31,6 +32,22 @@ const (
 const envBearerFile = "C7_AUTHPROXY_BEARER_FILE" //nolint:gosec // G101: env-var name, not a credential (RISKS R-13)
 
 func main() {
+	// -deliver-token is the CREDENTIAL-DELIVERY mode (F2c-2b): the control plane execs THIS binary
+	// directly (no shell — the image is distrolless-static, so exec-cat/kubectl-cp are impossible),
+	// piping the minted short-lived Vertex bearer over stdin. The binary writes it to the bearer file
+	// (tmpfs; C7_AUTHPROXY_BEARER_FILE) at mode 0600, then exits — it does NOT start the server. The
+	// server (no flag) is unchanged. The token reaches the proxy pod's tmpfs over stdin only: never in
+	// argv, never in the pod spec / etcd.
+	deliver := flag.Bool("deliver-token", false, "read a bearer token from stdin and write it to C7_AUTHPROXY_BEARER_FILE (0600), then exit; does not start the server")
+	flag.Parse()
+
+	if *deliver {
+		if err := deliverToken(os.Getenv(envBearerFile), os.Stdin); err != nil {
+			log.Fatalf("vertex-auth-proxy: deliver-token: %v", err)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		log.Fatalf("vertex-auth-proxy: %v", err)
 	}

@@ -445,8 +445,9 @@ func checkSecretsInjectOrgCredential(ctx context.Context, p ProviderUnderTest) e
 }
 
 // checkSecretsInjectInferenceCredential upholds InjectInferenceCredential's SECURITY clause: the
-// MINTED inference credential is delivered ONLY into the session's own sandbox, capped to the session
-// deadline, and never returned to the caller. It exercises the universal fail-closed cases (a
+// MINTED inference credential is delivered ONLY for the session's own sandbox (to its auth-proxy
+// gateway — the sandbox stays credential-free), capped to the session deadline, and never returned to
+// the caller. It exercises the universal fail-closed cases (a
 // past/zero deadline; a non-owner / cross-session sandbox) that hold regardless of how the minter is
 // wired; the owned-success path is asserted white-box per impl (it needs the impl's minter — the real
 // secrets-gcp provider is fail-closed until SetAccessTokenMinter, whereas the dev double mints inline).

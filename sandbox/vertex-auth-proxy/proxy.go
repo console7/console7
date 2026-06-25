@@ -39,6 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -94,6 +95,49 @@ func (f fileTokenSource) Token() (*oauth2.Token, error) {
 		return nil, errors.New("delivered token file is empty")
 	}
 	return &oauth2.Token{AccessToken: tok}, nil
+}
+
+// deliverToken is the credential-DELIVERY half of the delivered-file mode (the -deliver-token CLI
+// mode, F2c-2b). The control plane execs THIS binary directly (the proxy image is distroless-static,
+// so there is no shell to `cat >` a file and no tar for `kubectl cp`), piping the minted short-lived
+// Vertex bearer over r (stdin). deliverToken reads ALL of r, trims surrounding whitespace, and — only
+// if the result is NON-empty — writes it to bearerFile at mode 0600 (owner-only; the file the running
+// server's fileTokenSource re-reads per request). It is the WRITE counterpart of fileTokenSource's READ.
+//
+// FAIL CLOSED: an empty/whitespace-only stdin, an unconfigured bearerFile, or any read/write/chmod
+// error returns an error (the caller exits non-zero) and NEVER writes an empty or partial bearer — a
+// blank bearer file would make the server attach an empty Authorization or (after TrimSpace) fail its
+// own empty-token check, but we refuse here so a delivery is atomic-success-or-loud-failure, never a
+// silent clobber of a previously-good token with nothing.
+//
+// 0600 mirrors the sandbox deliverer's `umask 077` discipline: WriteFile's mode is masked by the
+// process umask, so we Chmod afterwards to guarantee the file ends up exactly 0600 regardless of the
+// inherited umask. The token bytes are only ever in this process's memory + the tmpfs file (the bearer
+// file lives on a medium: Memory emptyDir): never in argv, never in the pod spec / etcd, never logged.
+func deliverToken(bearerFile string, r io.Reader) error {
+	if strings.TrimSpace(bearerFile) == "" {
+		return fmt.Errorf("%s is not set (no destination for the delivered bearer)", envBearerFile)
+	}
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("read bearer from stdin: %w", err)
+	}
+	tok := strings.TrimSpace(string(raw))
+	if tok == "" {
+		return errors.New("refusing to write an empty bearer (fail closed)")
+	}
+	// G703/G304: bearerFile is operator-supplied PROCESS CONFIG (the delivered-bearer file path from
+	// C7_AUTHPROXY_BEARER_FILE), not request-derived taint — the same configured path fileTokenSource
+	// reads. The mode is 0600 (owner-only). Same class as fileTokenSource's read (RISKS R-13).
+	if err := os.WriteFile(bearerFile, []byte(tok), 0o600); err != nil { //nolint:gosec // G703/G304: operator-config path, not request taint (RISKS R-13)
+		return fmt.Errorf("write bearer file: %w", err)
+	}
+	// Belt-and-braces against an inherited umask that could relax (it can only tighten) — and to
+	// re-tighten if the file pre-existed with looser bits — force the mode to exactly 0600.
+	if err := os.Chmod(bearerFile, 0o600); err != nil { //nolint:gosec // G703/G304: operator-config path, not request taint (RISKS R-13)
+		return fmt.Errorf("chmod bearer file to 0600: %w", err)
+	}
+	return nil
 }
 
 // selectTokenSource picks where the Google bearer comes from, by deployment mode:

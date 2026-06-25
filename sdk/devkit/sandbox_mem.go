@@ -26,9 +26,10 @@ import (
 // (signed) session binding so a forged or stale handle cannot be presented to the
 // SecretsProvider. Flagged in docs/THREAT-MODEL.md §1; do not rely on this model.
 type SandboxRegistry struct {
-	mu       sync.Mutex
-	bound    map[string]binding // handle ID -> owning subject/session
-	injected map[string][]byte  // handle ID -> material delivered to that sandbox
+	mu                sync.Mutex
+	bound             map[string]binding // handle ID -> owning subject/session
+	injected          map[string][]byte  // handle ID -> material delivered to that sandbox
+	inferenceInjected map[string][]byte  // handle ID -> inference material delivered to the session's auth-proxy gateway
 }
 
 type binding struct {
@@ -48,8 +49,9 @@ func (b binding) live() bool {
 // NewSandboxRegistry returns an empty registry.
 func NewSandboxRegistry() *SandboxRegistry {
 	return &SandboxRegistry{
-		bound:    make(map[string]binding),
-		injected: make(map[string][]byte),
+		bound:             make(map[string]binding),
+		injected:          make(map[string][]byte),
+		inferenceInjected: make(map[string][]byte),
 	}
 }
 
@@ -90,6 +92,7 @@ func (r *SandboxRegistry) Destroy(h interfaces.SandboxHandle) {
 	defer r.mu.Unlock()
 	delete(r.bound, h.ID)
 	delete(r.injected, h.ID)
+	delete(r.inferenceInjected, h.ID)
 }
 
 // DeliverIfOwned atomically re-checks ownership and, only if it still holds, places a copy
@@ -100,6 +103,23 @@ func (r *SandboxRegistry) Destroy(h interfaces.SandboxHandle) {
 // single-beneficiary checks pass. A copy is stored so the caller's transient plaintext can
 // be zeroed independently.
 func (r *SandboxRegistry) DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
+	return r.deliverIfOwnedTo(r.injected, h, subject, session, material)
+}
+
+// DeliverInferenceIfOwned is DeliverIfOwned for the INFERENCE lane: same atomic ownership re-check
+// under the single lock, but it records the material in a SEPARATE slot modelling delivery to the
+// session's per-session AUTH-PROXY gateway, NOT the sandbox — so a bench can prove the Vertex bearer
+// reached the auth-proxy (InferenceInjected) and NOT the sandbox's credential slot (Injected). A copy
+// is stored so the caller's transient plaintext can be zeroed independently.
+func (r *SandboxRegistry) DeliverInferenceIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
+	return r.deliverIfOwnedTo(r.inferenceInjected, h, subject, session, material)
+}
+
+// deliverIfOwnedTo is the lock-held atomic check-and-deliver shared by DeliverIfOwned (the sandbox
+// slot) and DeliverInferenceIfOwned (the auth-proxy slot). It re-checks ownership and, only if it
+// still holds, stores a copy of material in dst[h.ID]. The single lock closes the Destroy-vs-deliver
+// race; the dst argument selects which slot the delivery models.
+func (r *SandboxRegistry) deliverIfOwnedTo(dst map[string][]byte, h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	b, ok := r.bound[h.ID]
@@ -108,8 +128,16 @@ func (r *SandboxRegistry) DeliverIfOwned(h interfaces.SandboxHandle, subject int
 	}
 	cp := make([]byte, len(material))
 	copy(cp, material)
-	r.injected[h.ID] = cp
+	dst[h.ID] = cp
 	return true
+}
+
+// InferenceInjected returns the inference material delivered to a session's auth-proxy gateway, if
+// any. Test-only inspection hook (the auth-proxy-delivery counterpart of Injected); it lets a bench
+// assert the inference credential reached the OWNER's auth-proxy and the sandbox's own credential slot
+// stayed empty. Enforces expiry on the read path like Injected.
+func (r *SandboxRegistry) InferenceInjected(h interfaces.SandboxHandle) ([]byte, bool) {
+	return r.injectedFrom(r.inferenceInjected, h)
 }
 
 // Injected returns the material delivered to a sandbox, if any. It is a test-only
@@ -122,14 +150,21 @@ func (r *SandboxRegistry) DeliverIfOwned(h interfaces.SandboxHandle, subject int
 // token cannot be read past the sandbox's MaxTTL even without an explicit teardown — the
 // registry's Owns / DeliverIfOwned / Injected paths are all fail-closed past expiry.
 func (r *SandboxRegistry) Injected(h interfaces.SandboxHandle) ([]byte, bool) {
+	return r.injectedFrom(r.injected, h)
+}
+
+// injectedFrom is the lock-held, expiry-enforcing read shared by Injected (the sandbox slot) and
+// InferenceInjected (the auth-proxy slot). An unknown or expired binding wipes the slot's lingering
+// material and reports nothing (fail closed past MaxTTL); otherwise it returns a copy.
+func (r *SandboxRegistry) injectedFrom(src map[string][]byte, h interfaces.SandboxHandle) ([]byte, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if b, bound := r.bound[h.ID]; !bound || !b.live() {
 		// Unknown or expired binding: wipe any lingering material and report nothing.
-		delete(r.injected, h.ID)
+		delete(src, h.ID)
 		return nil, false
 	}
-	m, ok := r.injected[h.ID]
+	m, ok := src[h.ID]
 	if !ok {
 		return nil, false
 	}
