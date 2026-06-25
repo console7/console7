@@ -157,12 +157,14 @@ intensity × trend — predictive). The hazard quantity is the leading edge. The
 composite is **expected imminence ≈ PE × hazard**, and the danger quadrant is **high PE ×
 rising hazard × KE‑still‑0**: the place you migrate *before* anything is wrong.
 
-> **Measurement honesty.** A first‑order hazard is computable today from what we capture —
-> trailing‑12‑month intensity, trend, and recurrence (disclosure dates + fix versions). A
-> *proper* hazard wants adversary‑attention and exploitability signals — EPSS percentile,
+> **Measurement honesty.** The first‑order hazard is **now computed** by the model
+> (`hazard 0..3` from trailing‑12‑month intensity × trend; see `hazard_of` in
+> `dep-lifecycle-model.py`) and surfaced on the ladder + cost table. A *proper* hazard
+> additionally wants adversary‑attention and exploitability signals — EPSS percentile,
 > CISA KEV membership, CWE/bug‑class, deployment/criticality beyond in‑degree — which are
-> fetchable feeds but not yet wired. A disclosure‑count trend is the **leading proxy** for
-> exploitation, not exploitation itself; it must not be reported as a probability.
+> fetchable feeds **not yet wired** (the planned enrichment pass). A disclosure‑count trend
+> is the **leading proxy** for exploitation, not exploitation itself; it must not be
+> reported as a probability.
 
 ### 3.5 The model is not conservative — you cannot drain PE
 
@@ -352,7 +354,7 @@ plane"* from *"vulnerable in a boxed, throwaway sandbox."* The two recurring mov
 
 | Artefact | Role |
 |---|---|
-| [`scripts/dep-lifecycle-model.py`](../../scripts/dep-lifecycle-model.py) | scores the live build closure → carry ledger + disposition (`--json` for evidence) |
+| [`scripts/dep-lifecycle-model.py`](../../scripts/dep-lifecycle-model.py) | scores the live build closure → carry ledger + disposition, **hazard** (grey‑swan leading indicator), **drift‑cost** + recommended **cadence**, and the **containment** discount (`--json` for evidence) |
 | [`scripts/dep-capture.py`](../../scripts/dep-capture.py) | captures noise (OSV), signal (`govulncheck`), and health (Scorecard + libyear) into the track record |
 | [`docs/strategy/dep-track-record.json`](./dep-track-record.json) | the temporal ledger — per‑quarter noise/signal + per‑advisory provenance + health |
 | [`scripts/dep-viz.py`](../../scripts/dep-viz.py) | renders the self‑contained, zero‑egress PE/KE energy report (ladder → coupling → kinetic detail → PE‑structure drill‑down) |

@@ -324,7 +324,7 @@ def svg_energy(bundle):
           f'(mass × height) →</text>',
           '<text x="535" y="22" font-size="11" fill="#888">h·m</text>',
           '<text x="660" y="22" font-size="11" fill="#888">kinetic (reach toll)</text>',
-          '<text x="862" y="22" font-size="11" fill="#888">canary</text>',
+          '<text x="858" y="22" font-size="11" fill="#888">hazard ↟·ttm</text>',
           f'<line x1="{BX}" y1="34" x2="{BX}" y2="{y0+len(rows)*rh:.0f}" stroke="#eee"/>']
     for i, r in enumerate(rows):
         yc = y0 + i * rh + rh / 2
@@ -340,9 +340,19 @@ def svg_energy(bundle):
                   f'{html.escape(sub)}; deep S={r.get("S")}, broad C={r.get("C")} '
                   f'(indeg {r.get("indeg")}), reach {r.get("reach_loc",0):,} LoC'
                   f'</title></rect>')
+        # containment ghost: dashed extension to the un-discounted (raw) PE position
+        craw = r.get("carry_raw", r.get("carry", 0))
+        if r.get("contained") and craw > r.get("carry", 0):
+            rlen = craw / maxc * BMAX
+            px.append(f'<rect x="{BX+blen:.1f}" y="{yc-9:.0f}" width="{rlen-blen:.1f}" '
+                      f'height="18" rx="2.5" fill="none" stroke="{colour}" '
+                      f'stroke-dasharray="2 2" opacity="0.55"><title>un-contained PE '
+                      f'{craw} → ×0.5 (sandbox-isolated, consequence-capped)</title></rect>')
+        cont = '<tspan fill="#00897b"> ·contained</tspan>' if r.get("contained") else ''
         px.append(f'<text x="{BX+max(blen,1.5)+6:.1f}" y="{yc+4:.0f}" font-size="11.5" '
                   f'fill="#444" font-weight="600">{r.get("carry",0):.1f}'
-                  f'<tspan fill="#999" font-weight="400"> {html.escape(sub)}</tspan></text>')
+                  f'<tspan fill="#999" font-weight="400"> {html.escape(sub)}</tspan>'
+                  f'{cont}</text>')
         # decomposition: which factor builds the PE — height (deep) vs mass (broad)
         px.append(f'<text x="525" y="{yc+4:.0f}" font-size="9.5" fill="#888">h</text>'
                   + _pips(535, yc - 4, r.get("S", 0), "#5c6bc0"))
@@ -358,14 +368,20 @@ def svg_energy(bundle):
         px.append(f'<text x="{rx1+8}" y="{yc+4:.0f}" font-size="11" '
                   f'fill="{"#c62828" if moving else "#999"}">'
                   f'{"moving" if moving else "at rest"}</text>')
-        # canary (noise pressure): amber dot sized by cumulative disclosures, grey if quiet
-        cc = "#ef6c00" if cumN else "#d7dde0"
-        cr = 3 + math.sqrt(cumN)
-        px.append(f'<circle cx="866" cy="{yc:.0f}" r="{cr:.1f}" fill="{cc}" '
-                  f'fill-opacity="0.85"><title>cumulative CVE disclosures (noise): '
-                  f'{cumN}</title></circle>')
-        px.append(f'<text x="884" y="{yc+4:.0f}" font-size="11" '
-                  f'fill="{"#444" if cumN else "#aaa"}">{cumN}</text>')
+        # hazard (the grey-swan leading indicator): trend arrow + trailing-12mo intensity,
+        # coloured by hazard level; a flag if it's a high-PE module with rising hazard.
+        hz, ttm = r.get("hazard", 0), r.get("ttm_noise", 0)
+        arrow = {"rising": "↑", "falling": "↓"}.get(r.get("hazard_trend"), "→")
+        hc = ("#c62828" if hz >= 3 else "#ef6c00" if hz >= 2
+              else "#e8a06a" if hz >= 1 else "#cfd8dc")
+        px.append(f'<text x="860" y="{yc+5:.0f}" font-size="14" fill="{hc}" '
+                  f'font-weight="700"><title>hazard {hz}/3 · trailing-12mo disclosures '
+                  f'{ttm} · trend {r.get("hazard_trend","flat")}</title>{arrow}</text>')
+        px.append(f'<text x="878" y="{yc+4:.0f}" font-size="11" '
+                  f'fill="{"#444" if hz else "#aaa"}">{hz}<tspan fill="#aaa">·{ttm}</tspan></text>')
+        if r.get("grey_swan"):
+            px.append(f'<text x="916" y="{yc+4:.0f}" font-size="9.5" fill="#c62828" '
+                      f'font-weight="700">GREY‑SWAN</text>')
     # decoupled band — the filter made visible (no PE pointed at us)
     fy = y0 + len(rows) * rh + 16
     decoupled = summ.get("graph_only", 0) + (summ.get("build_reachable", 0)
@@ -376,18 +392,49 @@ def svg_energy(bundle):
               f'{summ.get("build_reachable",0)-summ.get("directly_imported",0)} reachable '
               f'but below the direct-import scoring line: no potential energy pointed at '
               f'Console7.</text>')
-    px.append(f'<text x="14" y="{fy+33:.0f}" font-size="11.5" fill="#777">The loudest '
-              f'canary, <tspan font-style="italic">x/crypto</tspan> (cumN 19), sits here — '
-              f'pressure without coupling (present, never reached): noise ≠ risk until the '
-              f'latch (reachability) trips.</text>')
+    px.append(f'<text x="14" y="{fy+33:.0f}" font-size="11.5" fill="#777">The highest-'
+              f'hazard module, <tspan font-style="italic">x/crypto</tspan> (hazard 3/3, '
+              f'rising — ttm 16), sits here — pressure without coupling (present, never '
+              f'reached): a loud canary is not a grey swan until the latch trips.</text>')
     return f'<svg width="{FW}" height="{Hs}" viewBox="0 0 {FW} {Hs}" font-family="inherit" ' \
            f'role="img" aria-label="Energy state ladder of dependencies">' \
            + "\n".join(px) + '</svg>'
 
 
+def cost_cadence_table(ledger):
+    """The PRICE side, as an HTML table: drift-cost (separate axis from risk) + the
+    cadence the (PE, hazard) quadrant implies. Risk says what to protect; this says
+    how often to touch it and what that costs."""
+    rows = sorted(ledger, key=lambda r: -r.get("carry", 0))
+    if not rows:
+        return ""
+    trs = []
+    for r in rows:
+        tag = ('<b style="color:#c62828"> ⚠ grey-swan</b>' if r.get("grey_swan")
+               else ' <span style="color:#00897b">contained</span>' if r.get("contained")
+               else '')
+        arrow = {"rising": "↑", "falling": "↓"}.get(r.get("hazard_trend"), "→")
+        comp = (f"s{r.get('drift_surface',0)}·f{r.get('drift_fanout',0)}·"
+                f"b{r.get('drift_breakage',0)}·d{r.get('drift_debt',0)}")
+        trs.append(
+            f"<tr><td><code>{html.escape(_short(r['module']))}</code>{tag}</td>"
+            f"<td class='n'>{r.get('carry',0):.1f}</td>"
+            f"<td class='n'>{arrow} {r.get('hazard',0)} "
+            f"<span class='muted'>(ttm {r.get('ttm_noise',0)})</span></td>"
+            f"<td class='n'>{r.get('drift_cost',0)} "
+            f"<span class='muted'>{html.escape(r.get('drift_tier',''))}</span> "
+            f"<span class='muted'>{comp}</span></td>"
+            f"<td>{html.escape(r.get('cadence',''))}</td></tr>")
+    return (
+        "<table class='cost'><thead><tr><th>module</th><th>PE (carry)</th>"
+        "<th>hazard ↟·ttm</th><th>drift-cost</th><th>recommended cadence</th></tr></thead>"
+        "<tbody>" + "".join(trs) + "</tbody></table>")
+
+
 def render(data):
     body, summ = svg(data)
     energy = svg_energy(data)
+    cost = cost_cadence_table(data.get("ledger", []))
     funnel, _ = svg_funnel(summ)
     sparks = svg_sparklines(data)
     sub = (f'closure {summ.get("modules_in_closure","?")} · '
@@ -418,6 +465,10 @@ def render(data):
  .spine{{color:#222;font-size:13px;margin:2px 0 14px;font-weight:600}}
  .note{{color:#777;font-size:12px;margin-top:6px;max-width:900px}}
  rect,circle,polyline{{cursor:default}} g:hover circle{{fill-opacity:0.95}}
+ table.cost{{border-collapse:collapse;font-size:12.5px;margin:6px 0;width:100%;max-width:940px}}
+ table.cost th{{text-align:left;color:#888;font-weight:600;border-bottom:1px solid #ddd;padding:4px 10px 4px 0}}
+ table.cost td{{padding:5px 10px 5px 0;border-bottom:1px solid #f0f0f0;vertical-align:top}}
+ table.cost td.n{{white-space:nowrap}} .muted{{color:#999;font-size:11px}}
 </style></head><body>
 <h1>Dependency risk — potential vs kinetic energy</h1>
 <p class="spine">Risk is <em>stored</em> as potential energy (concentration, coupled by
@@ -428,13 +479,24 @@ canary (noise) is the pressure gauge; the latch is reachability.</p>
 {energy}
 <p class="note"><b>Potential energy</b> = <code>carry</code>, ranked: mass (broad =
 fan-out, teal) × height (deep = lock-in, indigo), coupled to us by reachability — this is
-what you <em>pre-position</em> against. <b>Kinetic energy</b> = reachable-CVE toll: every
-module is <em>at rest</em> (0 reachable) today. <b>Canary</b> = cumulative disclosures
-(pressure). The frame isn't conservative — a CVE firing doesn't drain a module's PE (the
-reservoir refills), so you can't lower PE; you can only strengthen the latch (fork-
-readiness, the seam) and the damping (MTTR). Spend tracks PE: the deep spine
-(<code>grpc/protobuf/api/oauth2</code>) first; the swappable services stay low while the
-seam holds (assert <code>core direct imports == 0</code>).</p>
+what you <em>pre-position</em> against; a dashed extension + <span style="color:#00897b">
+·contained</span> marks a sandbox-only dep whose PE is ×0.5 because isolation caps the
+consequence. <b>Kinetic energy</b> = reachable-CVE toll: every module is <em>at rest</em>
+(0 reachable) today. <b>Hazard</b> (↑·ttm) = the grey-swan leading indicator: trailing-12mo
+disclosure intensity × trend — <code>grpc</code> ticks 1, the rest are quiet, and the
+loudest (<code>x/crypto</code>, hazard 3 rising) is decoupled, so <b>0 grey-swans</b>. The
+frame isn't conservative — a CVE firing doesn't drain a module's PE (the reservoir refills),
+so you can't lower PE; you can only strengthen the latch (fork-readiness, the seam) and the
+damping (MTTR).</p>
+<h2>Cost &amp; cadence — the price of staying safe, and how often to touch each</h2>
+{cost}
+<p class="note">Drift-cost is a <em>separate axis from risk</em> (it does not enter
+<code>carry</code>): <b>s</b>urface + <b>f</b>an-out + <b>b</b>reakage (major-version gap, the
+SemVer proxy) + <b>d</b>ebt (libyear). Note the <em>cruel correlation</em> — <code>grpc</code>
+is the most expensive to keep current (surface + max fan-out) precisely because it is the
+highest PE. Cadence follows the (PE, hazard) quadrant: continuous + capex for grey-swans
+(none today), event-driven + catch-up for the stable spine, automate for the low-PE tail,
+inline-and-delete the leaf. Decision metric = risk-reduction ÷ drift-cost.</p>
 <h2>Coupling — how much stored energy is even pointed at us</h2>
 {funnel}
 {spark_section}

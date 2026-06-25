@@ -248,15 +248,24 @@ def score(mod, d, health=None):
     # Substitutability-weighted carry cost (Part III: reachable-vuln × blast × effort / benefit).
     # H (health/drift) is now wired to LIVE data (Scorecard + libyear); 1 (neutral) only
     # when no health row exists (offline fallback). See doc §6 + dep-track-record.json.
-    H = health_H((health or {}).get(mod))
-    carry = round((R * max(C, 1) * (S + H)) / benefit, 1) if reachable else 0.0
+    h_row = (health or {}).get(mod)
+    H = health_H(h_row)
+    carry_raw = round((R * max(C, 1) * (S + H)) / benefit, 1) if reachable else 0.0
+    # Containment discount (energy paper §5): a dep that runs ONLY in the ephemeral,
+    # gVisor-isolated, egress-denied sandbox has its consequence capped by the boundary,
+    # so its effective potential energy is discounted. Control-plane-side deps (behind
+    # the seam, but in the hardened Tier-1 image) are NOT contained — no discount.
+    contained = bool(areas) and all(a == "sandbox" for a in areas)
+    carry = round(carry_raw * CONTAINMENT_FACTOR, 1) if contained else carry_raw
 
     disposition = decide(reachable, sub, C)
     return dict(module=mod, areas=areas, reachable=reachable, indeg=indeg,
                 api_depth=api_depth, reach_loc=d["reach_loc"].get(mod, 0),
-                R=R, C=C, S=S, F=F, H=H, benefit=benefit, carry=carry,
+                R=R, C=C, S=S, F=F, H=H, benefit=benefit,
+                carry=carry, carry_raw=carry_raw, contained=contained,
                 sub=sub["sub"], leverA=sub["leverA"], leverB=sub["leverB"],
-                cap=info["cap"], disposition=disposition, note=info["note"])
+                cap=info["cap"], disposition=disposition, note=info["note"],
+                **drift_of(d["reach_loc"].get(mod, 0), C, h_row))
 
 
 def decide(reachable, sub, C):
@@ -278,6 +287,70 @@ def decide(reachable, sub, C):
     if C >= 2:
         return "TCO scrutiny + quarantine — spine: keep behind the seam; " + base
     return base
+
+
+# --- The three quantities the energy paper adds on top of the carry score ----------
+# (docs/strategy/dependency-risk-energy-model.md). Carry is POTENTIAL energy; these are
+# HAZARD (the leading "grey-swan" indicator), DRIFT-COST (the price of staying current —
+# a SEPARATE axis from risk), and the per-module CADENCE the (PE, hazard) pair implies.
+
+PE_HIGH = 2.5            # carry at/above which a module counts as "high potential energy"
+CONTAINMENT_FACTOR = 0.5  # PE discount for deps running ONLY in the isolated, ephemeral
+#                          gVisor sandbox (default-deny egress, no standing creds): the
+#                          boundary caps the consequence of any release (tenet 2).
+
+
+def _major(v):
+    """Leading major version as an int (v1.7.0 -> 1, v88.0.0 -> 88, pseudo -> 0)."""
+    if not v:
+        return None
+    try:
+        return int(v.lstrip("v").split(".")[0])
+    except ValueError:
+        return None
+
+
+def hazard_of(series, window=4):
+    """Leading indicator (the grey swan): is the disclosure canary intensifying? Built
+    from trailing-window NEW-CVE flow + its trend — a property of the PACKAGE, distinct
+    from reachable signal (KE). First-order; enrich later with EPSS/CISA-KEV/bug-class."""
+    noise = [s.get("noise", 0) for s in series]
+    ttm = sum(noise[-window:])
+    trend = _trend(noise)
+    base = 0 if ttm == 0 else 1 if ttm <= 2 else 2 if ttm <= 6 else 3
+    if trend == "rising" and ttm > 0:
+        base = min(base + 1, 3)
+    return dict(ttm_noise=ttm, hazard_trend=trend, hazard=base)
+
+
+def drift_of(reach_loc, C, h):
+    """Hygiene cost of rolling updates — the PRICE axis, separate from carry/risk.
+    drift-cost ≈ surface(blast radius of a break) + fan-out(coordination cost)
+                 + breakage(major-version gap = the SemVer proxy) + debt(libyear stock).
+    Breakage is the weakest term (true SemVer-violation rate needs API-diff); proxied
+    by pinned→latest major jumps. libyear plays two roles: hazard/MTTR in the risk
+    score AND debt-to-pay-down here, kept distinct."""
+    surface = 0 if reach_loc < 500 else 1 if reach_loc < 5000 else 2 if reach_loc < 50000 else 3
+    h = h or {}
+    pj, lt = _major(h.get("pinned")), _major(h.get("latest"))
+    breakage = min(lt - pj, 3) if (pj is not None and lt is not None and lt >= pj) else 0
+    ly = h.get("libyear_days")
+    debt = 0 if ly is None else (0 if ly < 90 else 1 if ly < 365 else 2 if ly < 730 else 3)
+    cost = surface + C + breakage + debt
+    tier = "low" if cost <= 2 else "moderate" if cost <= 5 else "high" if cost <= 8 else "severe"
+    return dict(drift_surface=surface, drift_fanout=C, drift_breakage=breakage,
+                drift_debt=debt, drift_cost=cost, drift_tier=tier)
+
+
+def cadence_of(carry, hazard, sub):
+    """The action the (potential energy, hazard) quadrant implies (paper §4.3)."""
+    if sub == "inline":
+        return "inline & delete — shed the inheritance"
+    if carry < 1.0:
+        return "automate — auto-merge, near-zero human touch"
+    if hazard >= 2:
+        return "continuous + capex — grey-swan: tighten cadence, fund seam/fork-readiness"
+    return "event-driven + periodic catch-up — hold the seam, cap libyear debt"
 
 
 # --------------------------------------------------------------------------
@@ -389,24 +462,26 @@ def report_track(path, d, as_json):
         t = track_measures(series)
         indeg = d["indeg"].get(m, 0)
         tag, why = track_verdict(m, t, indeg, health)
-        rows.append(dict(module=m, indeg=indeg, **t, verdict=tag, why=why))
+        rows.append(dict(module=m, indeg=indeg, **t, **hazard_of(series),
+                         verdict=tag, why=why))
     if as_json:
         print(json.dumps({"track_record": rows}, indent=2))
         return
     print()
     print("TRACK RECORDS — noise (canary) vs signal (toil owed)")
     print("=" * 78)
-    print(f"{'cumN':>4}{'cumS':>5}{'rho':>6}  {'noiseTr':<8}{'sigTr':<8}{'MTTR':>5} "
+    print(f"{'cumN':>4}{'TTM':>4}{'hz':>3}{'cumS':>5}{'rho':>6}  {'noiseTr':<8}{'MTTR':>5} "
           f" {'module':<34} verdict")
     for r in rows:
         rho = "-" if r["rho"] is None else f"{r['rho']:.2f}"
         mttr = "-" if r["mttr_days"] is None else f"{r['mttr_days']:.0f}d"
-        print(f"{r['cum_noise']:>4}{r['cum_signal']:>5}{rho:>6}  "
-              f"{r['noise_trend']:<8}{r['signal_trend']:<8}{mttr:>5}  "
+        print(f"{r['cum_noise']:>4}{r['ttm_noise']:>4}{r['hazard']:>3}{r['cum_signal']:>5}{rho:>6}  "
+              f"{r['noise_trend']:<8}{mttr:>5}  "
               f"{r['module'][:34]:<34} {r['verdict']}")
         print(f"      -> {r['why']}")
     print("-" * 78)
     print("rho = cum_signal / cum_noise (reachable ratio = empirical depth/insulation).")
+    print("TTM = trailing-12mo noise; hz = hazard 0..3 (intensity×trend) = grey-swan leading indicator.")
     print("noise=0 is AMBIGUOUS (Part III): quiet can mean unscanned — cross H/Scorecard.")
 
 
@@ -424,6 +499,22 @@ def main():
     directs = sorted(d["areas"], key=lambda m: (-score(m, d, health)["carry"], m))
     rows = [score(m, d, health) for m in directs]
 
+    # Attach the leading indicator (hazard) + the grey-swan flag + the implied cadence
+    # to each row, from the temporal track record (best-effort; absent => hazard 0).
+    try:
+        track = load_track(HEALTH_LEDGER)
+    except (OSError, ValueError):
+        track = {}
+    for r in rows:
+        series = track.get(r["module"], [])
+        hz = hazard_of(series)
+        cum_signal = sum(s.get("signal", 0) for s in series)
+        r.update(hz)
+        # grey swan = high PE × rising hazard × not yet kinetic (KE still 0). If signal
+        # is already non-zero it is realised (kinetic/danger), not a leading indicator.
+        r["grey_swan"] = (r["carry"] >= PE_HIGH and hz["hazard"] >= 2 and cum_signal == 0)
+        r["cadence"] = cadence_of(r["carry"], hz["hazard"], r["sub"])
+
     summary = dict(
         modules_in_closure=len(d["closure"]),
         build_reachable=len(d["reachable"]),
@@ -431,6 +522,8 @@ def main():
         directly_imported=len(directs),
         core_direct_imports=sum(1 for r in rows if any(
             a in ("keybroker", "control-plane", "sdk") for a in r["areas"])),
+        grey_swans=sum(1 for r in rows if r["grey_swan"]),
+        contained=sum(1 for r in rows if r["contained"]),
     )
     if as_json:
         print(json.dumps(dict(summary=summary, ledger=rows), indent=2))
@@ -445,13 +538,22 @@ def main():
           f"{summary['core_direct_imports']}  (tenet: must be 0)")
     print("-" * 78)
     h_live = "live (Scorecard+libyear)" if health else "offline (H=1 neutral)"
-    print(f"{'carry':>5} {'R':>1}{'C':>2}{'S':>2}{'F':>2}{'H':>2}  {'sub':<11}{'reachLoC':>9}  module")
+    print(f"grey-swans={summary['grey_swans']} (high PE × rising hazard, KE still 0)  "
+          f"contained={summary['contained']} (sandbox-only, consequence-capped)")
+    print("-" * 78)
+    print(f"{'carry':>5}{'hz':>3}{'drift':>9}  {'R':>1}{'C':>2}{'S':>2}{'F':>2}{'H':>2}  "
+          f"{'sub':<11}{'reachLoC':>9}  module")
     for r in rows:
-        print(f"{r['carry']:>5} {r['R']:>1}{r['C']:>2}{r['S']:>2}{r['F']:>2}{r['H']:>2}  "
-              f"{r['sub']:<11}{r['reach_loc']:>9}  {r['module']}  [{','.join(r['areas'])}]")
+        flag = "  <-- GREY-SWAN" if r["grey_swan"] else ("  [contained]" if r["contained"] else "")
+        print(f"{r['carry']:>5}{r['hazard']:>3}{r['drift_tier']:>9}  "
+              f"{r['R']:>1}{r['C']:>2}{r['S']:>2}{r['F']:>2}{r['H']:>2}  "
+              f"{r['sub']:<11}{r['reach_loc']:>9}  {r['module']}  [{','.join(r['areas'])}]{flag}")
         print(f"       -> {r['disposition']}")
+        print(f"       cadence: {r['cadence']}")
     print("-" * 78)
     print("R=reachability C=concentration/fan-out S=substitutability-effort F=function-tier H=health/drift")
+    print("hz=hazard (trailing-12mo disclosure intensity×trend; the grey-swan leading indicator)")
+    print("drift=hygiene cost of rolling updates (surface+fan-out+breakage+libyear debt); PRICE, not risk")
     print("sub via two levers: A=opacity (code/service/proprietary x vendors) B=reachLoC (rebuild cost)")
     print(f"carry = R x max(C,1) x (S + H) / benefit ; H feed: {h_live}")
 
