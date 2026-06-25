@@ -199,7 +199,8 @@ func buildInference(p *prodEnv) (interfaces.InferenceBackend, cloudgcp.Config, e
 		// Config.Global (which normalize() maps to GlobalHost + CLOUD_ML_REGION="global") rather
 		// than threading "global" through Config.Region. Any other value stays the regional lane.
 		vertexRegion := envOr("C7_VERTEX_REGION", p.region)
-		vertexCfg := inferencevertex.Config{ProjectID: envOr("C7_VERTEX_PROJECT", p.project)}
+		vertexProject := envOr("C7_VERTEX_PROJECT", p.project)
+		vertexCfg := inferencevertex.Config{ProjectID: vertexProject}
 		if vertexRegion == "global" {
 			vertexCfg.Global = true
 		} else {
@@ -207,6 +208,13 @@ func buildInference(p *prodEnv) (interfaces.InferenceBackend, cloudgcp.Config, e
 		}
 		inf, err := inferencevertex.New(vertexCfg)
 		cfg.VertexModel = os.Getenv("C7_VERTEX_MODEL")
+		// The per-session auth-proxy (the credential-attaching Vertex gateway) is rendered from these
+		// config-derived facts at Set time (the resolved lane isn't available then). VertexRegion is
+		// the SAME value inference-vertex routes to, so the proxy's upstream host matches the engine's
+		// intended region; AuthProxyImage is the adopter-mirrored, digest-pinned signed gateway image.
+		cfg.VertexRegion = vertexRegion
+		cfg.VertexProject = vertexProject
+		cfg.AuthProxyImage = os.Getenv("C7_AUTHPROXY_IMAGE")
 		return inf, cfg, err
 	case "anthropic":
 		inf, err := inferenceanthropic.New(inferenceanthropic.Config{OrgAPIBaseURL: os.Getenv("C7_ANTHROPIC_BASE_URL")})

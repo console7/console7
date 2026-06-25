@@ -1,6 +1,10 @@
 package cloudgcp
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -47,8 +51,8 @@ func TestConfigNormalize(t *testing.T) {
 		}
 	}
 
-	// A valid "@"-form Vertex model id is accepted and trimmed.
-	if got, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, VertexModel: "  claude-haiku-4-5@20251001 "}).normalize(); err != nil {
+	// A valid "@"-form Vertex model id is accepted and trimmed (with the required AuthProxyImage + region).
+	if got, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, AuthProxyImage: testAuthProxyImage, VertexRegion: "us-east5", VertexModel: "  claude-haiku-4-5@20251001 "}).normalize(); err != nil {
 		t.Errorf("valid VertexModel rejected: %v", err)
 	} else if got.VertexModel != "claude-haiku-4-5@20251001" {
 		t.Errorf("VertexModel not trimmed: %q", got.VertexModel)
@@ -279,7 +283,7 @@ func TestRenderSandboxPod_ResourceCaps(t *testing.T) {
 }
 
 func TestRenderNamespaceAndEgress(t *testing.T) {
-	m := string(renderNamespaceAndEgress("sb", []string{"https://a.internal", "https://b.internal"}))
+	m := string(renderNamespaceAndEgress("sb", []string{"https://a.internal", "https://b.internal"}, false))
 	for _, want := range []string{
 		"kind: Namespace",
 		"kind: ConfigMap",
@@ -317,7 +321,7 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 	// MUST be the canonical "[]" — never JSON "null" — so a PR-3 proxy parser can't read deny-all
 	// as "no policy → allow-all". Both nil and an empty slice render "[]".
 	for _, empty := range [][]string{nil, {}} {
-		e := string(renderNamespaceAndEgress("sb", empty))
+		e := string(renderNamespaceAndEgress("sb", empty, false))
 		if !strings.Contains(e, "kind: NetworkPolicy") {
 			t.Fatalf("empty allowlist did not render a NetworkPolicy:\n%s", e)
 		}
@@ -327,6 +331,208 @@ func TestRenderNamespaceAndEgress(t *testing.T) {
 		if strings.Contains(e, "null") {
 			t.Errorf("empty allowlist rendered JSON null (fail-open contract trap)\n%s", e)
 		}
+	}
+}
+
+// testAuthProxyImage is a syntactically valid digest-pinned auth-proxy image (fake digest, 64 hex).
+var testAuthProxyImage = "ghcr.io/console7/vertex-auth-proxy@sha256:" + strings.Repeat("b", 64)
+
+func TestRenderVertexAuthProxy(t *testing.T) {
+	cfg, err := (Config{
+		ProjectID: "p", Location: "us-east4", Cluster: "c",
+		SandboxImage: testImage, AuthProxyImage: testAuthProxyImage,
+		VertexRegion: "us-east5", VertexModel: "claude-haiku-4-5@20251001",
+	}).normalize()
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	lane := vertexLane{project: "vproj-123", region: "us-east5", model: cfg.VertexModel}
+	m := string(renderVertexAuthProxy("sb", cfg, lane))
+
+	// The three objects, in the session's proxy namespace, alongside Squid.
+	for _, want := range []string{
+		"kind: Deployment",
+		"name: vertex-auth-proxy",
+		"namespace: sb-proxy", // INTO the existing per-session proxy namespace
+		"app: vertex-auth-proxy",
+		"kind: Service",
+		"kind: NetworkPolicy",
+		"name: console7-authproxy-ingress",
+		"image: " + jsonScalar(testAuthProxyImage), // digest-pinned auth-proxy image
+		"containerPort: 8080",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("auth-proxy manifest missing %q\n---\n%s", want, m)
+		}
+	}
+
+	// Mirror ALL the Squid hardening: non-root 65532, read-only root FS, dropped caps, RuntimeDefault
+	// seccomp, no automounted SA token, readiness-gated on the listen port.
+	for _, want := range []string{
+		"runAsNonRoot: true",
+		"runAsUser: 65532",
+		"runAsGroup: 65532",
+		"fsGroup: 65532",
+		"readOnlyRootFilesystem: true",
+		`drop: ["ALL"]`,
+		"seccompProfile:",
+		"type: RuntimeDefault",
+		"automountServiceAccountToken: false",
+		"tcpSocket:",
+		"port: 8080", // readinessProbe + Service + ingress NetworkPolicy all on 8080
+		"resources:",
+		"requests:",
+		"limits:",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("auth-proxy manifest missing hardening bit %q\n---\n%s", want, m)
+		}
+	}
+
+	// The env contract the proxy binary consumes (sandbox/vertex-auth-proxy/README.md).
+	for _, want := range []string{
+		"name: C7_AUTHPROXY_LISTEN",
+		`value: ":8080"`,
+		"name: CLOUD_ML_REGION",
+		`value: "us-east5"`,
+		"name: C7_AUTHPROXY_PROJECT",
+		`value: "vproj-123"`,
+		"name: C7_AUTHPROXY_MODEL",
+		`value: "claude-haiku-4-5@20251001"`,
+		"name: C7_AUTHPROXY_BEARER_FILE",
+		`value: "/run/console7/credential"`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("auth-proxy manifest missing env %q\n---\n%s", want, m)
+		}
+	}
+
+	// The bearer-file volume is a `medium: Memory` emptyDir (tmpfs, dies with the pod) — never on disk.
+	for _, want := range []string{"name: bearer", "emptyDir:", "medium: Memory"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("auth-proxy manifest missing memory bearer volume bit %q\n---\n%s", want, m)
+		}
+	}
+
+	// INERTNESS / no engine-env change: the auth-proxy egresses DIRECT to Vertex (NAT), so it must NOT
+	// carry an HTTPS_PROXY of its own (that would route it through Squid). And no credential value is
+	// rendered into the pod spec (the bearer is DELIVERED into the bearer file, never baked into etcd).
+	for _, forbidden := range []string{"HTTPS_PROXY", "HTTP_PROXY", "Authorization", "Bearer "} {
+		if strings.Contains(m, forbidden) {
+			t.Errorf("auth-proxy manifest unexpectedly contains %q (must not proxy itself / carry a credential)\n%s", forbidden, m)
+		}
+	}
+
+	// The ingress NetworkPolicy admits ONLY this session's sandbox namespace on 8080 (mirrors Squid's
+	// console7-proxy-ingress), and is Ingress-only (the proxy needs its own egress/NAT to Vertex).
+	for _, want := range []string{
+		"policyTypes: [Ingress]",
+		"console7.dev/session: sb",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("auth-proxy ingress policy missing %q\n---\n%s", want, m)
+		}
+	}
+	if strings.Contains(m, "Egress") {
+		t.Errorf("auth-proxy must not restrict its own egress (it needs NAT+DNS to reach Vertex):\n%s", m)
+	}
+}
+
+func TestRenderNamespaceAndEgress_VertexLanePermits8080(t *testing.T) {
+	// Vertex lane: the sandbox egress permits BOTH the Squid port (3128) AND the auth-proxy port (8080).
+	vtx := string(renderNamespaceAndEgress("sb", []string{"https://a.internal"}, true))
+	for _, want := range []string{"port: 3128", "port: 8080"} {
+		if !strings.Contains(vtx, want) {
+			t.Errorf("Vertex-lane egress missing %q (must permit Squid AND auth-proxy ports)\n%s", want, vtx)
+		}
+	}
+	// Both ports are on the SAME proxy namespace: still exactly one egress `to:` rule (no new
+	// destination), and one `ports:` block per `to:` peer (no open-egress regression).
+	if n := strings.Count(vtx, "- to:"); n != 1 {
+		t.Errorf("expected exactly one egress allow rule (the proxy ns), got %d\n%s", n, vtx)
+	}
+	if strings.Count(vtx, "ports:") != strings.Count(vtx, "- to:") {
+		t.Errorf("a ports rule is missing its `to:` peer (open-egress risk)\n%s", vtx)
+	}
+
+	// Non-Vertex lane: the sandbox egress permits ONLY 3128 — the auth-proxy port is NOT opened.
+	non := string(renderNamespaceAndEgress("sb", []string{"https://a.internal"}, false))
+	if !strings.Contains(non, "port: 3128") {
+		t.Errorf("non-Vertex egress must still permit the Squid port 3128\n%s", non)
+	}
+	if strings.Contains(non, "port: 8080") {
+		t.Errorf("non-Vertex egress must NOT permit the auth-proxy port 8080 (lane-gated)\n%s", non)
+	}
+}
+
+func TestConfigNormalize_AuthProxyImage(t *testing.T) {
+	// VertexModel set but no AuthProxyImage fails closed (a Vertex session needs the gateway).
+	if _, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, VertexModel: "claude-haiku-4-5@20251001"}).normalize(); err == nil {
+		t.Error("VertexModel without AuthProxyImage must fail closed")
+	}
+	// A non-empty tag-only AuthProxyImage is rejected (must be digest-pinned).
+	if _, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, AuthProxyImage: "ghcr.io/console7/vertex-auth-proxy:v1"}).normalize(); err == nil {
+		t.Error("tag-only AuthProxyImage must be rejected (digest-pinned required)")
+	}
+	// AuthProxyImage is OPTIONAL on the Anthropic-API lane (no VertexModel): empty is fine.
+	if got, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage}).normalize(); err != nil {
+		t.Errorf("AuthProxyImage must be optional without VertexModel: %v", err)
+	} else if got.vertexConfigured() {
+		t.Error("a provider with no VertexModel must not be vertexConfigured")
+	}
+	// VertexModel + AuthProxyImage but NO VertexRegion fails closed (the auth-proxy would crash-loop
+	// on an empty CLOUD_ML_REGION — it cannot derive its Vertex upstream host).
+	if _, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, AuthProxyImage: testAuthProxyImage, VertexModel: "claude-haiku-4-5@20251001"}).normalize(); err == nil {
+		t.Error("VertexModel without VertexRegion must fail closed")
+	}
+	// A valid Vertex provider: digest-pinned AuthProxyImage + VertexModel + VertexRegion ⇒
+	// vertexConfigured, all trimmed.
+	got, err := (Config{ProjectID: "p", Location: "us-east4", Cluster: "c", SandboxImage: testImage, AuthProxyImage: "  " + testAuthProxyImage + " ", VertexRegion: "  us-east5 ", VertexModel: "claude-haiku-4-5@20251001"}).normalize()
+	if err != nil {
+		t.Fatalf("valid Vertex config rejected: %v", err)
+	}
+	if !got.vertexConfigured() {
+		t.Error("a provider with VertexModel + AuthProxyImage must be vertexConfigured")
+	}
+	if got.AuthProxyImage != testAuthProxyImage {
+		t.Errorf("AuthProxyImage not trimmed: %q", got.AuthProxyImage)
+	}
+	if got.VertexRegion != "us-east5" {
+		t.Errorf("VertexRegion not trimmed: %q", got.VertexRegion)
+	}
+}
+
+// TestAuthProxyEndpoint_FailClosed exercises the authProxyEndpoint resolver via a fake kubectl on
+// PATH (mirroring the readiness-gate test's interception). It both proves the fail-closed behaviour
+// (a non-IP ClusterIP errors rather than yielding a broken base URL) AND keeps the resolver
+// non-dead until F2c-2c wires it into the engine env (ANTHROPIC_VERTEX_BASE_URL).
+func TestAuthProxyEndpoint_FailClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-binary-on-PATH interception assumes a POSIX shell")
+	}
+	dir := t.TempDir()
+	// A fake kubectl that prints a usable ClusterIP for the auth-proxy Service.
+	okFake := "#!/bin/sh\nprintf '10.0.0.9'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "kubectl"), []byte(okFake), 0o755); err != nil { //nolint:gosec // G306 — fake kubectl needs the exec bit; lives in t.TempDir()
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	r := &kubeRunner{kubeconfig: filepath.Join(dir, "kubeconfig"), project: "proj"}
+	got, err := r.authProxyEndpoint(context.Background(), proxyNS("sb"))
+	if err != nil {
+		t.Fatalf("authProxyEndpoint with a usable ClusterIP: %v", err)
+	}
+	if got != "http://10.0.0.9:8080" {
+		t.Errorf("authProxyEndpoint = %q, want http://10.0.0.9:8080", got)
+	}
+
+	// A fake kubectl that returns no ClusterIP (headless/unallocated) ⇒ fail closed.
+	badFake := "#!/bin/sh\nprintf ''\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "kubectl"), []byte(badFake), 0o755); err != nil { //nolint:gosec // G306 — see above
+		t.Fatalf("rewrite fake kubectl: %v", err)
+	}
+	if _, err := r.authProxyEndpoint(context.Background(), proxyNS("sb")); err == nil {
+		t.Error("authProxyEndpoint must fail closed on a missing/unparseable ClusterIP")
 	}
 }
 
