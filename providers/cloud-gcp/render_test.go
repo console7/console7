@@ -624,7 +624,7 @@ func TestRenderPerSessionProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderSquidConf: %v", err)
 	}
-	m := string(renderPerSessionProxy("sb", conf, squidConfigHash(conf)))
+	m := string(renderPerSessionProxy("sb", conf, squidConfigHash(conf), false))
 	for _, want := range []string{
 		"kind: Namespace",
 		"name: sb-proxy",             // the per-session proxy lives in its OWN namespace
@@ -658,7 +658,7 @@ func TestRenderPerSessionProxy(t *testing.T) {
 	}
 	// A narrowed config yields a different annotation value (the roll trigger).
 	confNarrow, _ := renderSquidConf(nil)
-	mNarrow := string(renderPerSessionProxy("sb", confNarrow, squidConfigHash(confNarrow)))
+	mNarrow := string(renderPerSessionProxy("sb", confNarrow, squidConfigHash(confNarrow), false))
 	if extractHash(t, m) == extractHash(t, mNarrow) {
 		t.Error("a different squid.conf must render a different config-hash annotation")
 	}
