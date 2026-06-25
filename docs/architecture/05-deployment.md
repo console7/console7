@@ -23,6 +23,7 @@ flowchart TB
       direction TB
       FW{{"VPC firewall + Cloud NAT<br/>default-deny egress; IMDS 169.254.169.254 blocked"}}
       PROXY["per-session egress proxy — Squid (#57)<br/>out-of-band FQDN allowlist: inference (+ approved registries/MCP)"]
+      AUTHPRX["per-session Vertex auth-proxy<br/>holds the control-plane-delivered bearer<br/>(sandbox stays credential-free + metadata-free)"]
 
       subgraph GKE["GKE cluster"]
         direction TB
@@ -73,8 +74,13 @@ flowchart TB
 
   %% sandbox egress path (the only way out)
   SBP --> PROXY --> FW
-  FW ==>|"allowlisted only"| VTX
   FW ==>|"allowlisted only"| ANT
+  %% Vertex lane: engine reaches the per-session auth-proxy directly (NO_PROXY bypasses Squid);
+  %% the auth-proxy attaches the delivered bearer and egresses via NAT to Vertex.
+  SBP -->|"Vertex (skip-auth; direct hop)"| AUTHPRX
+  KBP -->|"deliver Vertex bearer (to the auth-proxy, NOT the sandbox)"| AUTHPRX
+  AUTHPRX --> FW
+  FW ==>|"allowlisted only"| VTX
 
   classDef tier1 fill:#cfe3f7,stroke:#1168bd,color:#11304a;
   classDef broker fill:#e7d6f5,stroke:#7b3fab,color:#3a1d52;
@@ -87,7 +93,7 @@ flowchart TB
   class KBP broker;
   class SBP dp;
   class KMS,KMSS,SM,GCSE,VTX,AR,TFS store;
-  class FW,WIF,PROXY net;
+  class FW,WIF,PROXY,AUTHPRX net;
 ```
 
 ## Nodes & hosting topology

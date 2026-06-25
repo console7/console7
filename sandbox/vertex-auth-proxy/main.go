@@ -28,7 +28,7 @@ const (
 
 // envBearerFile names the env var holding the PATH to the control-plane-delivered bearer file (delivered
 // -file mode; if unset, ambient ADC is used). Its value is an env-var NAME, not a secret — gosec G101
-// false-positives on the "bearer" substring (same class as RISKS R-9 / R-13).
+// false-positives on the "bearer" substring (same class as RISKS R-5 / R-13).
 const envBearerFile = "C7_AUTHPROXY_BEARER_FILE" //nolint:gosec // G101: env-var name, not a credential (RISKS R-13)
 
 func main() {

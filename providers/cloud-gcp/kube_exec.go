@@ -489,22 +489,38 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 		return interfaces.EngineResult{}, err
 	}
 
-	// 3. Run the genuine engine headless UNDER THE DELIVERED CREDENTIAL (the B9 file→env bridge). The
-	// CredentialDeliverer (B5) wrote the short-lived credential to credentialPath; engineRunScript
-	// reads it FROM THAT IN-POD FILE and exports it for the claude process only — as ANTHROPIC_API_KEY
-	// on the Anthropic-API lane, or as the Vertex GCP bearer on the Vertex lane (task.InferenceBackend
-	// selects). Either way the secret value is never in the kubectl argv (control side), the pod spec
-	// (etcd), claude's own argv, or this adapter's logs. It fails CLOSED if the credential is
-	// absent/empty (the engine must not run unauthenticated) and on a half-specified Vertex lane. The
-	// untrusted prompt is still passed over STDIN (claude inherits fd 0), so a shell can never re-split
-	// it into extra argv; the engine reads the locked managed-settings itself (the verified file is the
-	// authority; default permission mode belt-and-braces).
-	script, err := engineRunScript(credentialPath, engineLane{
+	// 3. Run the genuine engine headless. On the Anthropic-API lane the engine runs UNDER THE DELIVERED
+	// CREDENTIAL (the B9 file→env bridge): the CredentialDeliverer (B5) wrote the short-lived key to
+	// credentialPath and engineRunScript reads it FROM THAT IN-POD FILE and exports it as
+	// ANTHROPIC_API_KEY for the claude process only. On the VERTEX lane the SANDBOX holds NO credential:
+	// the engine is pointed at THIS session's auth-proxy (ANTHROPIC_VERTEX_BASE_URL, resolved below) with
+	// CLAUDE_CODE_SKIP_VERTEX_AUTH=1, and the auth-proxy attaches the (control-plane-delivered) bearer on
+	// forward — so the Vertex branch reads NO in-pod credential file. Either way no secret value is in the
+	// kubectl argv (control side), the pod spec (etcd), claude's own argv, or this adapter's logs. It
+	// fails CLOSED if the org-API credential is absent/empty (the engine must not run unauthenticated), on
+	// a half-specified Vertex lane, and on an unresolvable auth-proxy. The untrusted prompt is still
+	// passed over STDIN (claude inherits fd 0), so a shell can never re-split it into extra argv; the
+	// engine reads the locked managed-settings itself (the verified file is the authority; default
+	// permission mode belt-and-braces).
+	lane := engineLane{
 		kind:          task.InferenceBackend,
 		vertexProject: task.VertexProjectID,
 		vertexRegion:  task.VertexRegion,
 		vertexModel:   k.cfg.VertexModel,
-	})
+	}
+	if task.InferenceBackend == interfaces.BackendVertex {
+		// Resolve THIS session's per-session auth-proxy base URL (http://<clusterIP>:8080) — the engine
+		// reaches Vertex THROUGH it, the bearer never enters the sandbox. waitRunReady (above) already
+		// gated the auth-proxy Deployment Available on the Vertex lane, so the Service ClusterIP is
+		// allocated now. FAIL CLOSED if it cannot resolve: do NOT run the engine pointed at a broken/empty
+		// base URL (it would silently fall back to the default Vertex host via the denied metadata server).
+		baseURL, err := k.run.authProxyEndpoint(ctx, proxyNS(h.ID))
+		if err != nil {
+			return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: resolve per-session Vertex auth-proxy endpoint before run: %w", err)
+		}
+		lane.authProxyBaseURL = baseURL
+	}
+	script, err := engineRunScript(credentialPath, lane)
 	if err != nil {
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: build engine run script: %w", err)
 	}
@@ -675,14 +691,18 @@ func nonEmptyLines(s string) []string {
 const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
 
 // engineRunScript builds the in-pod `/bin/sh -c` program kubeEngineRunner.Run executes to run the
-// genuine engine under the delivered credential (the B9 file→env bridge). It:
-//  1. fails CLOSED unless the credential the CredentialDeliverer wrote (credPath) is present AND
-//     non-empty — the engine must never run unauthenticated; and
-//  2. runs `claude -p` with the credential exported as ANTHROPIC_API_KEY for THAT PROCESS ONLY, read
-//     from the in-pod file by the in-pod shell. A prefix assignment (VAR="$ref" cmd) puts the value in
-//     claude's ENVIRONMENT, not its argv, so the secret is never in /proc/<pid>/cmdline, the kubectl
-//     argv (control side), the pod spec, or this adapter's logs — only the prompt (STDIN) and this fixed
-//     command shape cross the wire.
+// genuine engine. Its credential handling is LANE-SPECIFIC:
+//  1. Anthropic-API lane (the B9 file→env bridge): it fails CLOSED unless the credential the
+//     CredentialDeliverer wrote (credPath) is present AND non-empty — the engine must never run
+//     unauthenticated — and runs `claude -p` with that credential exported as ANTHROPIC_API_KEY for THAT
+//     PROCESS ONLY, read from the in-pod file by the in-pod shell. A prefix assignment (VAR="$ref" cmd)
+//     puts the value in claude's ENVIRONMENT, not its argv, so the secret is never in /proc/<pid>/cmdline,
+//     the kubectl argv (control side), the pod spec, or this adapter's logs — only the prompt (STDIN) and
+//     this fixed command shape cross the wire.
+//  2. Vertex lane: the SANDBOX holds NO Vertex credential. The engine is pointed at this session's
+//     auth-proxy (ANTHROPIC_VERTEX_BASE_URL = lane.authProxyBaseURL) with CLAUDE_CODE_SKIP_VERTEX_AUTH=1
+//     and NO_PROXY pinning the auth-proxy host (so the in-cluster hop bypasses Squid); the auth-proxy
+//     attaches the (control-plane-delivered) bearer on forward. No in-pod credential file is read.
 //
 // The credential is read ONCE into a shell variable as a STANDALONE assignment (not a prefix
 // command-substitution): under `set -e` a standalone failed `$(cat …)` aborts the script, whereas a
@@ -696,6 +716,10 @@ const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false p
 // cluster (the runner is integration-only). The prompt arrives on STDIN, which claude inherits (the
 // cat/test read the file, not STDIN). credPath is a trusted no-space constant (credentialPath).
 func engineRunScript(credPath string, lane engineLane) (string, error) {
+	// read is the org-API/subscription credential preamble: fail closed unless the in-pod credential
+	// file is present + non-empty, then read it ONCE into _c7cred. The VERTEX lane does NOT use it — the
+	// sandbox holds no Vertex credential (the bearer lives in the auth-proxy), so reading a credential
+	// file there would fail closed on the (correctly) absent file.
 	read := `set -eu
 test -s ` + credPath + ` || { echo "cloudgcp: engine credential absent/empty at ` + credPath + ` (fail closed)" >&2; exit 1; }
 _c7cred="$(cat ` + credPath + `)"
@@ -703,11 +727,13 @@ _c7cred="$(cat ` + credPath + `)"
 `
 	switch lane.kind {
 	case interfaces.BackendVertex:
-		// Vertex lane: the delivered credential is a short-lived GCP bearer token (NOT an
-		// ANTHROPIC_API_KEY), and the engine reaches Vertex with it WITHOUT ever touching the node
-		// metadata server (denied to the sandbox). Validate the non-secret routing facts before
-		// interpolating them into the program — fail closed on a half-specified Vertex lane (the
-		// EngineTask SECURITY contract) and keep the script shell-safe (the values are untrusted input).
+		// Vertex lane: the engine reaches Vertex THROUGH this session's per-session auth-proxy, which
+		// holds the (control-plane-delivered) bearer and attaches it on forward — the SANDBOX holds NO
+		// Vertex credential at all. The engine therefore reads NO credential file on this lane (the
+		// read/_c7cred preamble is for the org-API/subscription lanes only; the bearer was delivered to
+		// the auth-proxy, not here). Validate the non-secret routing facts before interpolating them into
+		// the program — fail closed on a half-specified Vertex lane (the EngineTask SECURITY contract) and
+		// keep the script shell-safe (the values are untrusted input).
 		if !gcpProjectRe.MatchString(lane.vertexProject) {
 			return "", fmt.Errorf("cloudgcp: Vertex lane requires a valid ANTHROPIC_VERTEX_PROJECT_ID, got %q (fail closed)", lane.vertexProject)
 		}
@@ -717,19 +743,37 @@ _c7cred="$(cat ` + credPath + `)"
 		if !vertexModelRe.MatchString(lane.vertexModel) {
 			return "", fmt.Errorf("cloudgcp: Vertex lane requires Config.VertexModel (the @-form Vertex model id), got %q (fail closed)", lane.vertexModel)
 		}
-		// R-V1: the engine authenticates to Vertex via Google ADC by default, which would hit the
-		// (denied) metadata server. The binary exposes CLAUDE_CODE_SKIP_VERTEX_AUTH (skip the ADC
-		// dance) and CLOUDSDK_AUTH_ACCESS_TOKEN (the gcloud-standard pre-minted bearer) — the
-		// best-evidence pairing for feeding our minted token. The EXACT lever for the PINNED engine
-		// version MUST be confirmed in the live spike; it is isolated in the named constants below so
-		// that is a one-line change. The token is read from the in-pod file (never argv/pod-spec/logs).
-		return read +
+		// The auth-proxy base URL is the per-session, RUNTIME-RESOLVED endpoint (http://<clusterIP>:8080,
+		// from authProxyEndpoint after the auth-proxy is Available). Fail closed if it is empty or not the
+		// expected http://<ip>:<authProxyPort> shape — the engine must never be pointed at a broken/empty
+		// base URL (it would silently fall back to the default Vertex host via Google ADC → the denied
+		// metadata server). The host is derived for NO_PROXY below.
+		baseURL := strings.TrimSpace(lane.authProxyBaseURL)
+		host, ok := authProxyHostFromBaseURL(baseURL)
+		if !ok {
+			return "", fmt.Errorf("cloudgcp: Vertex lane requires a resolved auth-proxy base URL of the form http://<ip>:%d, got %q (fail closed)", authProxyPort, baseURL)
+		}
+		// R-V1 RESOLVED (the auth-proxy delivers the bearer; F2c-2c flip): the engine sends its Vertex
+		// predict calls to ANTHROPIC_VERTEX_BASE_URL with CLAUDE_CODE_SKIP_VERTEX_AUTH=1 (no Google
+		// credential of its own), and the auth-proxy attaches the bearer and forwards to Vertex. There is
+		// NO CLOUDSDK_AUTH_ACCESS_TOKEN here (engine 1.0.44's google-auth-library-nodejs never read it)
+		// and NO in-sandbox bearer at all.
+		//
+		// NO_PROXY/no_proxy pin the auth-proxy HOST so the engine reaches it DIRECTLY: the sandbox's
+		// HTTP_PROXY/HTTPS_PROXY point at Squid (renderSandboxPod), and without NO_PROXY the engine would
+		// CONNECT to the in-cluster auth-proxy THROUGH Squid — which can only reach the FQDN allowlist,
+		// not a bare in-cluster ClusterIP, so the hop would fail. The sandbox→auth-proxy egress itself is
+		// permitted by renderNamespaceAndEgress (the auth-proxy port to the proxy namespace). The values
+		// are the resolved endpoint (an http://<ip>:<port> we built), so single-quoting is shell-safe.
+		return "set -eu\n" +
 			vertexUseEnv + "=1 \\\n" +
 			vertexSkipAuthEnv + "=1 \\\n" +
 			vertexProjectEnv + "='" + lane.vertexProject + "' \\\n" +
 			vertexRegionEnv + "='" + lane.vertexRegion + "' \\\n" +
 			modelEnv + "='" + lane.vertexModel + "' \\\n" +
-			vertexAccessTokenEnv + `="$_c7cred" \` + "\n" +
+			vertexBaseURLEnv + "='" + baseURL + "' \\\n" +
+			noProxyEnv + "='" + host + "' \\\n" +
+			noProxyEnvLower + "='" + host + "' \\\n" +
 			`claude -p --permission-mode default`, nil
 	case interfaces.BackendAnthropicAPI, interfaces.BackendUnspecified:
 		// Default Anthropic-API lane: the delivered credential is the ANTHROPIC_API_KEY; the model is
@@ -740,27 +784,62 @@ _c7cred="$(cat ` + credPath + `)"
 	}
 }
 
+// authProxyHostFromBaseURL parses a resolved auth-proxy base URL (the http://<ip>:<authProxyPort>
+// authProxyEndpoint produced) and returns the HOST (the ClusterIP) for the engine's NO_PROXY pin. It
+// fails closed (ok=false) on anything that is not http, that has no host, or whose port is not the
+// auth-proxy port — so engineRunScript never points the engine at, nor exempts from the proxy, an
+// endpoint other than the one this provider rendered. The host (no port) is what NO_PROXY matches.
+func authProxyHostFromBaseURL(baseURL string) (string, bool) {
+	if baseURL == "" {
+		return "", false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "http" {
+		return "", false
+	}
+	host := u.Hostname()
+	if host == "" || net.ParseIP(host) == nil {
+		return "", false
+	}
+	if u.Port() != fmt.Sprintf("%d", authProxyPort) {
+		return "", false
+	}
+	return host, true
+}
+
 // engineLane carries the per-session inference-lane facts engineRunScript needs to build the engine's
 // auth + env. The Anthropic-API lane needs nothing beyond the credential file; the Vertex lane needs
-// the (non-secret) project/region/model facts to set the engine's Vertex env. kind comes from the
-// resolved BackendEndpoint (threaded onto EngineTask); the model comes from cloud-gcp Config.
+// the (non-secret) project/region/model facts AND the per-session auth-proxy base URL to point the
+// engine through (the bearer lives in the auth-proxy, NOT the sandbox). kind comes from the resolved
+// BackendEndpoint (threaded onto EngineTask); the model comes from cloud-gcp Config; authProxyBaseURL
+// is resolved at RunTask time (authProxyEndpoint) AFTER the auth-proxy is Available.
 type engineLane struct {
 	kind          interfaces.BackendKind
 	vertexProject string
 	vertexRegion  string
 	vertexModel   string
+	// authProxyBaseURL is the runtime-resolved http://<clusterIP>:8080 the engine sends Vertex calls
+	// to (ANTHROPIC_VERTEX_BASE_URL). Used ONLY on the Vertex lane; the auth-proxy attaches the bearer.
+	authProxyBaseURL string
 }
 
-// Engine env levers. Names are isolated as constants so the R-V1 bearer-token mechanism (confirmed
-// against the pinned engine in the live spike) is a one-line change, and so the render/exec tests
-// pin the exact shape.
+// Engine env levers. Names are isolated as constants so the render/exec tests pin the exact shape.
 const (
-	vertexUseEnv         = "CLAUDE_CODE_USE_VERTEX"
-	vertexSkipAuthEnv    = "CLAUDE_CODE_SKIP_VERTEX_AUTH"
-	vertexProjectEnv     = "ANTHROPIC_VERTEX_PROJECT_ID"
-	vertexRegionEnv      = "CLOUD_ML_REGION"
-	vertexAccessTokenEnv = "CLOUDSDK_AUTH_ACCESS_TOKEN" //nolint:gosec // G101 false positive: an env var NAME, not a secret value; RISKS R-9
-	modelEnv             = "ANTHROPIC_MODEL"
+	vertexUseEnv      = "CLAUDE_CODE_USE_VERTEX"
+	vertexSkipAuthEnv = "CLAUDE_CODE_SKIP_VERTEX_AUTH"
+	vertexProjectEnv  = "ANTHROPIC_VERTEX_PROJECT_ID"
+	vertexRegionEnv   = "CLOUD_ML_REGION"
+	// vertexBaseURLEnv points the engine at THIS session's auth-proxy (the credential-attaching gateway)
+	// instead of the default Vertex host — paired with CLAUDE_CODE_SKIP_VERTEX_AUTH=1 so the engine sends
+	// no Google credential of its own. This REPLACES the retired CLOUDSDK_AUTH_ACCESS_TOKEN lever (RISKS
+	// R-9 retired; R-V1 resolved): engine 1.0.44's google-auth-library-nodejs never read that env, so the
+	// bearer is delivered to the auth-proxy out-of-band, not the sandbox.
+	vertexBaseURLEnv = "ANTHROPIC_VERTEX_BASE_URL"
+	// noProxyEnv/noProxyEnvLower exempt the auth-proxy host from the sandbox's HTTP(S)_PROXY (Squid), so
+	// the in-cluster engine→auth-proxy hop is DIRECT (Squid cannot reach a bare in-cluster ClusterIP).
+	noProxyEnv      = "NO_PROXY"
+	noProxyEnvLower = "no_proxy"
+	modelEnv        = "ANTHROPIC_MODEL"
 )
 
 // kubeCredentialDeliverer realises CredentialDeliverer: it writes credential material into a live

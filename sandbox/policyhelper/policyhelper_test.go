@@ -44,6 +44,7 @@ type parsed struct {
 	Env                             map[string]string `json:"env"`
 	AllowManagedHooksOnly           bool              `json:"allowManagedHooksOnly"`
 	AllowManagedPermissionRulesOnly bool              `json:"allowManagedPermissionRulesOnly"`
+	GCPAuthRefresh                  *string           `json:"gcpAuthRefresh"`
 }
 
 func mustParse(t *testing.T, r Rendered) parsed {
@@ -93,6 +94,34 @@ func TestRender_LockdownFieldsOnEveryPersona(t *testing.T) {
 		// mount). The rule is anchored at the filesystem root ("//" prefix on the absolute path).
 		if !slices.Contains(p.Permissions.Deny, "Write(/"+ManagedSettingsPath+")") {
 			t.Errorf("%s: deny set does not protect the managed-settings path", prof.Persona)
+		}
+	}
+}
+
+// TestRender_LocksOutGCPAuthRefresh proves the managed-settings pin gcpAuthRefresh to an EMPTY value
+// at the highest-precedence (managed) tier on EVERY persona. gcpAuthRefresh is a SHELL COMMAND the
+// engine runs on GCP/Vertex token expiry; the Vertex-lane sandbox is credential-free (the auth-proxy
+// holds the bearer, the engine runs with CLAUDE_CODE_SKIP_VERTEX_AUTH=1), so a refresh command is
+// pure command-execution surface a target repo's .claude/settings.json must not be able to define.
+// The key must be PRESENT (so the managed tier overrides any lower-tier value) and EMPTY (no command).
+func TestRender_LocksOutGCPAuthRefresh(t *testing.T) {
+	for _, prof := range []interfaces.SessionProfile{authorProfile(), operateProfile()} {
+		r, err := Render(prof)
+		if err != nil {
+			t.Fatalf("render %s: %v", prof.Persona, err)
+		}
+		// Assert against the RAW JSON too: the key must literally appear (a managed-tier override only
+		// binds if the key is emitted), and it must be empty.
+		if !bytes.Contains(r.ManagedSettings, []byte(`"gcpAuthRefresh"`)) {
+			t.Errorf("%s: managed-settings does not emit gcpAuthRefresh — a repo refresh command would not be overridden:\n%s", prof.Persona, r.ManagedSettings)
+		}
+		p := mustParse(t, r)
+		if p.GCPAuthRefresh == nil {
+			t.Errorf("%s: gcpAuthRefresh absent from managed-settings (must be present-and-empty to lock out a repo value)", prof.Persona)
+			continue
+		}
+		if *p.GCPAuthRefresh != "" {
+			t.Errorf("%s: gcpAuthRefresh must be locked EMPTY (no command), got %q", prof.Persona, *p.GCPAuthRefresh)
 		}
 	}
 }
