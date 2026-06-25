@@ -49,6 +49,16 @@ type managedSettings struct {
 	// cleanupPeriodDays 0: keep no local transcript retention inside the ephemeral sandbox (the
 	// durable, signed record is the WORM evidence sink, not the engine's local history).
 	CleanupPeriodDays int `json:"cleanupPeriodDays"`
+	// gcpAuthRefresh is a Claude Code setting whose value is a SHELL COMMAND the engine runs to refresh
+	// Google credentials when it detects Vertex/GCP token expiry (the gcloud-auth-refresh hook). On the
+	// Console7 Vertex lane the sandbox holds NO GCP credential and never authenticates to Vertex itself
+	// (the per-session auth-proxy attaches the bearer; cloud-gcp engineRunScript sets
+	// CLAUDE_CODE_SKIP_VERTEX_AUTH=1), so there is nothing to refresh — and a refresh command is
+	// arbitrary command execution. We pin it EMPTY in the managed (highest-precedence) tier so a target
+	// repo's .claude/settings.json cannot define one (defence-in-depth, tenet 2; the boundary — the
+	// credential-free sandbox + the auth-proxy — is the authoritative control). Always rendered (no
+	// omitempty), so the locked-empty value is present at the highest tier even when the lane is Vertex.
+	GCPAuthRefresh string `json:"gcpAuthRefresh"`
 }
 
 type permissions struct {
@@ -141,6 +151,10 @@ func Render(profile interfaces.SessionProfile) (Rendered, error) {
 		AllowManagedHooksOnly:           true,
 		AllowManagedPermissionRulesOnly: true,
 		CleanupPeriodDays:               0,
+		// Pin the GCP-auth-refresh COMMAND empty in the managed tier (highest precedence) so a target
+		// repo cannot inject one — see the field doc. Explicit (not relying on the zero value) so the
+		// intent is unmistakable and a future reorder cannot silently drop it.
+		GCPAuthRefresh: "",
 	}
 	b, err := json.MarshalIndent(ms, "", "  ")
 	if err != nil {

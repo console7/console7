@@ -120,3 +120,98 @@ func TestRun_ReadinessGateBeforeFirstExec(t *testing.T) {
 		t.Errorf("proxy-Available wait not scoped to the proxy namespace %q: %q", proxyNS(h.ID), calls[idxProxyAvail])
 	}
 }
+
+// TestRun_VertexResolvesAndThreadsAuthProxyEndpoint proves the F2c-2c flip end to end at the Run level:
+// on the Vertex lane, AFTER the readiness waits (incl. the auth-proxy Deployment Available), Run
+// resolves THIS session's auth-proxy ClusterIP (authProxyEndpoint) and threads the resolved base URL
+// into the engine's exec script — `kubectl exec … claude` carries ANTHROPIC_VERTEX_BASE_URL +
+// NO_PROXY pointed at the resolved IP, and NO CLOUDSDK_AUTH_ACCESS_TOKEN / no in-pod credential read.
+// It mirrors TestRun_ReadinessGateBeforeFirstExec: a fake kubectl on PATH records argv and, for the
+// auth-proxy `get svc … clusterIP` read, prints a fixed IP so the resolve succeeds without a cluster.
+func TestRun_VertexResolvesAndThreadsAuthProxyEndpoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-binary-on-PATH interception assumes a POSIX shell")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "kubectl.log")
+	const proxyIP = "10.9.8.7"
+
+	// The fake records argv, and when asked for a Service ClusterIP (the auth-proxy resolve) prints a
+	// fixed IP so authProxyEndpoint parses a valid http://<ip>:8080. Everything else exits 0 so Run
+	// flows through; the engine exec emits no diff (clean tree ⇒ Changed:false, no error).
+	fake := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + shquote(logPath) + "\n" +
+		"case \"$*\" in *clusterIP*) printf '" + proxyIP + "' ;; esac\n" +
+		"exit 0\n"
+	for _, name := range []string{"kubectl", "gcloud"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(fake), 0o755); err != nil { //nolint:gosec // G306 — a fake kubectl/gcloud must carry the exec bit; it lives in t.TempDir()
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// A Vertex-configured provider: VertexModel + AuthProxyImage + VertexRegion make vertexConfigured()
+	// true, so waitRunReady gates the auth-proxy and Run resolves + threads its endpoint.
+	k := &kubeEngineRunner{
+		run: &kubeRunner{kubeconfig: filepath.Join(dir, "kubeconfig"), project: "proj"},
+		cfg: Config{Workdir: "/workspace", VertexModel: "claude-haiku-4-5@20251001", VertexRegion: "us-east5"},
+	}
+	h := interfaces.SandboxHandle{ID: "c7-sb-cafebabecafebabecafebabecafebabe"}
+	if _, err := k.Run(context.Background(), h, interfaces.EngineTask{
+		SessionID:        "s1",
+		Repo:             interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:           "feature/x",
+		Prompt:           "do the thing",
+		Timeout:          time.Minute,
+		InferenceBackend: interfaces.BackendVertex,
+		VertexProjectID:  "acme-prod-123",
+		VertexRegion:     "us-east5",
+	}); err != nil {
+		t.Fatalf("Run (Vertex lane): %v", err)
+	}
+
+	data, err := os.ReadFile(logPath) //nolint:gosec // G304 — logPath is a test-controlled path under t.TempDir()
+	if err != nil {
+		t.Fatalf("read kubectl log: %v", err)
+	}
+	// The engine exec script is multi-line (the env-prefixed `claude -p`), so assert over the whole log
+	// blob rather than per-call. Line-prefix checks (the wait/resolve) still work per-line.
+	blob := string(data)
+	lines := strings.Split(blob, "\n")
+
+	var sawAuthProxyWait, sawAuthProxyResolve bool
+	for _, c := range lines {
+		if strings.HasPrefix(c, "wait ") && strings.Contains(c, "deployment/"+authProxyServiceName) && strings.Contains(c, "-n "+proxyNS(h.ID)) {
+			sawAuthProxyWait = true
+		}
+		if strings.HasPrefix(c, "get svc "+authProxyServiceName) && strings.Contains(c, "-n "+proxyNS(h.ID)) && strings.Contains(c, "clusterIP") {
+			sawAuthProxyResolve = true
+		}
+	}
+	if !sawAuthProxyWait {
+		t.Errorf("Run did not wait for the Vertex auth-proxy condition=Available; log:\n%s", blob)
+	}
+	if !sawAuthProxyResolve {
+		t.Errorf("Run did not resolve the Vertex auth-proxy ClusterIP; log:\n%s", blob)
+	}
+	// The resolved auth-proxy endpoint must be threaded into the engine exec, and the retired R-9 lever /
+	// the in-sandbox credential read must be absent (the sandbox is credential-free on the Vertex lane).
+	if !strings.Contains(blob, "claude -p") {
+		t.Fatalf("Run did not exec the engine; log:\n%s", blob)
+	}
+	for _, want := range []string{
+		"ANTHROPIC_VERTEX_BASE_URL='http://" + proxyIP + ":8080'",
+		"NO_PROXY='" + proxyIP + "'",
+		"no_proxy='" + proxyIP + "'",
+		"CLAUDE_CODE_SKIP_VERTEX_AUTH=1",
+	} {
+		if !strings.Contains(blob, want) {
+			t.Errorf("engine exec missing threaded auth-proxy env %q; log:\n%s", want, blob)
+		}
+	}
+	for _, forbidden := range []string{"CLOUDSDK_AUTH_ACCESS_TOKEN", "ANTHROPIC_API_KEY", "_c7cred"} {
+		if strings.Contains(blob, forbidden) {
+			t.Errorf("Vertex-lane Run must NOT contain %q (sandbox credential-free on this lane); log:\n%s", forbidden, blob)
+		}
+	}
+}

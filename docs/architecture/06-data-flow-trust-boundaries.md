@@ -49,6 +49,7 @@ flowchart TB
     subgraph DPZ["TB3 — Sandbox (untrusted, default-deny egress)"]
       ENGp[["Claude Code engine<br/>(invocation seam ✅ #47; live in-pod Tier-2)"]]
       PRX[["egress proxy — per-session Squid"]]
+      AUTHPRX[["Vertex auth-proxy — per-session<br/>(holds delivered bearer; sandbox credential-free)"]]
     end
     SMs[("Secret Manager")]
     KMSs[("Cloud KMS<br/>KEK envelope + keybroker signing key (EC-P256)")]
@@ -72,11 +73,14 @@ flowchart TB
   BRKp -->|"C-IDENT sign — AsymmetricSign EC-P256 (KMS-rooted CA)"| KMSs
   BRKp -->|"C-CRED branch-scoped token"| GH
   ORC -->|"provision + narrow egress"| ENGp
-  BRKp -->|"C-CRED inject (Vertex GCP token / sub-token / org cred)"| ENGp
+  BRKp -->|"C-CRED inject (sub-token / org cred — Anthropic-API lane)"| ENGp
+  BRKp -->|"C-CRED deliver Vertex bearer (to the auth-proxy, NOT the sandbox)"| AUTHPRX
   UNTRUST -->|"C-CODE untrusted"| ENGp
   GH -->|"C-CODE FetchRepoBundle (base, control-plane)"| ORC
   ORC -->|"C-CODE seed base bundle"| ENGp
   ENGp --> PRX
+  ENGp -->|"C-MODEL Vertex (skip-auth; via NO_PROXY direct hop)"| AUTHPRX
+  AUTHPRX ==>|"C-MODEL — THE crossing (attaches bearer)"| MODEL
   PRX ==>|"C-MODEL — THE crossing"| MODEL
   ENGp -->|"C-CODE CommitBundle + CommitDigest &rarr; orchestrator signs"| ORC
   ORC -->|"C-CODE push branch + open PR (control-plane)"| GH
@@ -97,7 +101,7 @@ flowchart TB
   classDef ext fill:#dfe6e9,stroke:#636e72,color:#2d3436;
   classDef danger fill:#ffd6a5,stroke:#c0392b,color:#5b1b14;
   %% faded + dashed = target state (not yet coded & landed); solid = implemented & landed
-  class UI,ORC,PDPp,EVp,PRX proc;
+  class UI,ORC,PDPp,EVp,PRX,AUTHPRX proc;
   class DLPp,OGp procPlan;
   class BRKp broker;
   class ENGp dpPlan;
@@ -114,7 +118,7 @@ flowchart TB
 | Cloud & SCM credentials | `C-CRED` | Broker + Secret Manager | No |
 | Subscription OAuth token | `C-CRED` | Per-user vault (KMS-sealed) | No — authenticates the user's own session only |
 | Org API credential | `C-CRED` | Shared org vault (KMS-sealed) | No — backs org-API/headless sessions; injected by reference into the owning sandbox, never returned |
-| Vertex inference access token | `C-CRED` | Minted per-session by the SecretsProvider (IAM Credentials) | No — minted in-tenancy, delivered into the owning sandbox by file (never via metadata), never returned to the control plane |
+| Vertex inference access token | `C-CRED` | Minted per-session by the SecretsProvider (IAM Credentials) | No — minted in-tenancy, delivered into the session's **auth-proxy** pod (NOT the sandbox; the sandbox stays credential-free and metadata-free), never returned to the control plane |
 | Production telemetry | `C-TELEM` | Observe Gateway | No |
 | Evidence, transcripts, audit | `C-EVID` | WORM + SIEM | No |
 | **Model prompts & responses** | `C-MODEL` | — | **Yes — to the chosen backend** |

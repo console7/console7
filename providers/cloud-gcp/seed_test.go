@@ -129,11 +129,17 @@ func TestEngineRunScript_Shape(t *testing.T) {
 }
 
 func TestEngineRunScript_VertexLane(t *testing.T) {
+	// The F2c-2c flip: the Vertex lane points the engine at THIS session's auth-proxy (resolved base
+	// URL) and exempts the auth-proxy host from Squid via NO_PROXY/no_proxy — the SANDBOX holds NO
+	// Vertex credential (the bearer lives in the auth-proxy), so there is NO CLOUDSDK_AUTH_ACCESS_TOKEN
+	// and NO in-pod credential read on this lane.
+	const baseURL = "http://10.4.5.6:8080"
 	s, err := engineRunScript(credentialPath, engineLane{
-		kind:          interfaces.BackendVertex,
-		vertexProject: "acme-prod-123",
-		vertexRegion:  "us-east5",
-		vertexModel:   "claude-haiku-4-5@20251001",
+		kind:             interfaces.BackendVertex,
+		vertexProject:    "acme-prod-123",
+		vertexRegion:     "us-east5",
+		vertexModel:      "claude-haiku-4-5@20251001",
+		authProxyBaseURL: baseURL,
 	})
 	if err != nil {
 		t.Fatalf("Vertex lane: %v", err)
@@ -144,34 +150,63 @@ func TestEngineRunScript_VertexLane(t *testing.T) {
 		`ANTHROPIC_VERTEX_PROJECT_ID='acme-prod-123'`,
 		`CLOUD_ML_REGION='us-east5'`,
 		`ANTHROPIC_MODEL='claude-haiku-4-5@20251001'`,
-		`CLOUDSDK_AUTH_ACCESS_TOKEN="$_c7cred"`, // the minted GCP bearer, read from the in-pod file
+		`ANTHROPIC_VERTEX_BASE_URL='` + baseURL + `'`, // engine → auth-proxy (the bearer-attaching gateway)
+		`NO_PROXY='10.4.5.6'`,                         // ...reached DIRECTLY, not tunnelled through Squid
+		`no_proxy='10.4.5.6'`,                         // both cases (some clients read only the lowercase)
 		"claude -p --permission-mode default",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("Vertex lane missing %q\n---\n%s", want, s)
 		}
 	}
-	// The Vertex lane authenticates with a GCP bearer, NEVER an ANTHROPIC_API_KEY, and the token still
-	// comes from the in-pod file (never argv), with the same fail-closed read order as the Anthropic lane.
-	if strings.Contains(s, "ANTHROPIC_API_KEY") {
-		t.Errorf("Vertex lane must NOT set ANTHROPIC_API_KEY:\n%s", s)
+	// The retired R-9 lever and the in-sandbox credential read are GONE on the Vertex lane: no bearer
+	// ever enters the sandbox, and the credential-file plumbing is for the org-API/subscription lanes only.
+	for _, forbidden := range []string{
+		"CLOUDSDK_AUTH_ACCESS_TOKEN", // the retired R-9 lever (engine 1.0.44 never read it)
+		"ANTHROPIC_API_KEY",          // the Vertex lane carries no Anthropic key
+		"_c7cred",                    // no in-pod credential read on the Vertex lane
+		credentialPath,               // ...so the credential file is never touched
+	} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("Vertex lane must NOT contain %q (sandbox is credential-free on this lane):\n%s", forbidden, s)
+		}
 	}
-	if claudeAt := strings.Index(s, "claude -p"); claudeAt < 0 || strings.Contains(s[claudeAt:], "$(cat") {
-		t.Errorf("Vertex token must reach claude via the prefix env, never re-read after claude:\n%s", s)
+}
+
+// TestEngineRunScript_AnthropicStillReadsCredential proves the org-API/subscription lanes STILL read
+// the in-pod credential file — the F2c-2c flip dropped that read on the VERTEX lane ONLY.
+func TestEngineRunScript_AnthropicStillReadsCredential(t *testing.T) {
+	for _, kind := range []interfaces.BackendKind{interfaces.BackendAnthropicAPI, interfaces.BackendUnspecified} {
+		s, err := engineRunScript(credentialPath, engineLane{kind: kind})
+		if err != nil {
+			t.Fatalf("engineRunScript(kind=%d): %v", kind, err)
+		}
+		if !strings.Contains(s, `_c7cred="$(cat `+credentialPath+`)"`) {
+			t.Errorf("Anthropic-lane (kind=%d) must STILL read the in-pod credential file:\n%s", kind, s)
+		}
+		if strings.Contains(s, "ANTHROPIC_VERTEX_BASE_URL") || strings.Contains(s, "NO_PROXY") {
+			t.Errorf("Anthropic-lane (kind=%d) must not carry Vertex/auth-proxy env:\n%s", kind, s)
+		}
 	}
-	assertCredFailClosedOrder(t, s)
 }
 
 func TestEngineRunScript_VertexFailClosed(t *testing.T) {
+	const baseURL = "http://10.4.5.6:8080"
 	cases := []struct {
 		name string
 		lane engineLane
 	}{
-		{"missing project", engineLane{kind: interfaces.BackendVertex, vertexRegion: "us-east5", vertexModel: "m@20251001"}},
-		{"missing region", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexModel: "m@20251001"}},
-		{"missing model", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5"}},
-		{"injection in project", engineLane{kind: interfaces.BackendVertex, vertexProject: "a'; rm -rf /; '", vertexRegion: "us-east5", vertexModel: "m@20251001"}},
-		{"api-format model", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "claude-haiku-4-5-20251001"}},
+		{"missing project", engineLane{kind: interfaces.BackendVertex, vertexRegion: "us-east5", vertexModel: "m@20251001", authProxyBaseURL: baseURL}},
+		{"missing region", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexModel: "m@20251001", authProxyBaseURL: baseURL}},
+		{"missing model", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", authProxyBaseURL: baseURL}},
+		{"injection in project", engineLane{kind: interfaces.BackendVertex, vertexProject: "a'; rm -rf /; '", vertexRegion: "us-east5", vertexModel: "m@20251001", authProxyBaseURL: baseURL}},
+		{"api-format model", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "claude-haiku-4-5-20251001", authProxyBaseURL: baseURL}},
+		// F2c-2c: an unresolvable/missing/wrong-shape auth-proxy base URL fails closed — the engine
+		// must never be pointed at a broken endpoint (it would silently hit the denied metadata server).
+		{"missing base url", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "m@20251001"}},
+		{"non-http base url", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "m@20251001", authProxyBaseURL: "https://10.4.5.6:8080"}},
+		{"wrong-port base url", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "m@20251001", authProxyBaseURL: "http://10.4.5.6:3128"}},
+		{"non-ip base url", engineLane{kind: interfaces.BackendVertex, vertexProject: "acme-prod-123", vertexRegion: "us-east5", vertexModel: "m@20251001", authProxyBaseURL: "http://evil.example.com:8080"}},
 		{"unknown lane", engineLane{kind: interfaces.BackendKind(99)}},
 	}
 	for _, tc := range cases {
