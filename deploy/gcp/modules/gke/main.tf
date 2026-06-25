@@ -76,6 +76,13 @@ resource "google_container_cluster" "sandbox" {
   name     = "${var.name_prefix}-sandbox"
   location = var.region
 
+  # Restrict the regional cluster to specific zones when set; empty (default) lets GKE use all zones
+  # in the region. A regional cluster places one node PER zone for the bootstrap default pool AND each
+  # node pool, so a single zone's transient GCE_STOCKOUT (e.g. us-east4-a) fails the WHOLE create even
+  # when other zones have capacity. Pinning healthy zones (e.g. ["us-east4-b","us-east4-c"]) keeps
+  # regional HA while sidestepping a constrained zone. null ⇒ GKE default (all zones).
+  node_locations = length(var.node_locations) > 0 ? var.node_locations : null
+
   network    = var.network_self_link
   subnetwork = var.subnetwork_self_link
 
