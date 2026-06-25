@@ -33,6 +33,16 @@ resource "google_kms_crypto_key" "nhi_ca" {
 
   lifecycle {
     prevent_destroy = true
+
+    # Machine-enforced production gate: when the operator declares this a production deploy
+    # (require_hsm = true, set alongside evidence_retention_locked / destroy_protection), the lineage
+    # signing root MUST be HSM-backed (FIPS 140-2 L3, no software key export) — fail the plan rather
+    # than silently anchor every human->NHI->action signature in a SOFTWARE key. Dogfood/PoC leaves
+    # require_hsm = false and keeps the lower-cost SOFTWARE default.
+    precondition {
+      condition     = !var.require_hsm || var.kms_protection_level == "HSM"
+      error_message = "require_hsm is true (production) but kms_protection_level is ${var.kms_protection_level}; the lineage signing root MUST be HSM. Set keybroker_kms_protection_level = \"HSM\"."
+    }
   }
 }
 

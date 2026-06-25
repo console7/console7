@@ -105,7 +105,9 @@ func (m *InMemoryObjectIO) Count(ctx context.Context, prefix string) (uint64, er
 	defer m.mu.Unlock()
 	var n uint64
 	for name := range m.objects {
-		if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+		// Mirror gcsObjectIO.Count: count only record-shaped keys so a stray object cannot inflate
+		// the count (and thus the inferred tail sequence).
+		if isRecordKey(name, prefix) {
 			n++
 		}
 	}

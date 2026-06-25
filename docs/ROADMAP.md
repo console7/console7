@@ -173,6 +173,50 @@ maintainer involvement**.
   - The local **CI/CD adoption-loop** dogfood unlocks with **signed release images
     (#11)** — landing #11 should trigger it.
 
+### SAST carry-forward — VVAH scan 2026-06-25
+
+An external agentic SAST (Visa VVAH) over the tree surfaced 32 verified findings. The
+self-contained defence-in-depth fixes landed immediately (guard-bash interpreter/segment/
+quoted-ref gaps, the tripwire parser bugs, the scm-github HTTPS parity, the git-bundle `--`
+terminator, the evidence-gcs read/count bounds, the hook stdin caps, the managed-settings
+Read-deny, the inference-credential revocation TOCTOU, the KMS-HSM production gate, the testkit
+rig-skip, the DCO bot-exemption/log-injection). The remainder are **design-level** items whose
+correct fix is owned by a later phase — tracked here so they are not silently dropped:
+
+| Finding | Item | Closes in / by |
+|---|---|---|
+| #1 | SCM `MintWorkingCredential` does no subject→repo authorization (any SSO user can scope a token to any App-installed repo) | **Phase 3** — the tier×stratum→session-profile resolver is the authorization enforcement point; add a fail-closed `AuthorizationChecker` port consulted before any token mint. Today's `FixedPolicySoR` is the dev stand-in. |
+| #9, #10 | `--user` / `--attended` are self-attested (circular dev-IdP authn; subscription routing self-declared) | **Phase 3 / real OIDC IdP** — the SSO→NHI binding is currently dev/fixed (banner-flagged). Derive subject + attendance from a verified OIDC token, not a CLI flag. Interim: stop the orchestrator hard-coding `Attended:true`, which makes the seam's attended-gate a no-op. |
+| #16, #31 | Evidence chain is tamper-EVIDENT but not tamper-RESISTANT: chainHash has no secret, and `payloadTBS` omits the sequence/prior-hash so a workload-SA holder could fork the chain or replay a same-event record at another position | **Phase 2** — evidence hardening (full WORM hash-chaining + signing). Bind the record sequence into the signed `payloadTBS`; run a tail chain-integrity check in preflight; production retention-LOCK is the boundary control. (Partial mitigation already landed: `Count()` ignores stray non-record objects.) |
+| #26 | Sandbox and control-plane GKE node pools share one GCP service account (future IAM grants silently widen the sandbox blast radius) | **Phase 2/3 deploy hardening** — split into a dedicated, minimal sandbox-node SA. |
+| #13 | Reaper CronJob image pinned by mutable tag, not digest | **Deploy hardening** — pin `@sha256:…` and add an admission/digest check (bundle with the next deploy PR). |
+
+## Roadmap decisions (log)
+
+Dated, durable decisions so we don't re-litigate or trip over them later. Newest first.
+
+### 2026-06-26 — Vertex × Anthropic-model testing is parked; test on org-API first, subscription ASAP
+
+- **Vertex lane committed UNTESTED.** The Vertex path for Anthropic models (engine → per-session
+  auth-proxy → bearer → Vertex → Anthropic model) is being merged and carried forward **without a
+  validation pass**. Functional testing of *this specific feature* is **parked** to a later phase —
+  it is a known-unverified surface, not a proven one. A green build is NOT evidence the Vertex lane
+  works end-to-end; it has not been exercised against live models since the quota block.
+- **Model-usage testing sequence (deliberate):** validation of the model-usage/inference path
+  begins on **org API keys, Anthropic direct** (the simplest, most available lane), and **migrates
+  to the subscription lane ASAP**. This also sits naturally with GOAL.md tenet 2 (one human, one
+  credential, one beneficiary) — automated/headless test runs use org API keys, while the
+  subscription lane backs only attended single-user sessions — so org-API-first is both the pragmatic
+  and the policy-correct start, with the subscription lane as the
+  priority follow-on (it is the novel, higher-blast-radius surface Phase 0 exists to de-risk).
+- **Why parked:** the live Vertex exit was blocked on Google denying the Claude quota on the fresh
+  project (see the live-deploy notes), not on a Console7 defect — so end-to-end Vertex validation is
+  gated on quota/account work outside this codebase. Proceeding on org-API-direct unblocks the
+  model-usage track without waiting on that.
+- **Unpark trigger:** resume Vertex-lane validation once (a) the org-API-direct model path is green
+  end-to-end, and (b) Vertex Claude quota is granted on a usable project. Until then, anything that
+  depends on "Vertex works" must state that assumption explicitly.
+
 ## Control-objective onramp (summary)
 
 | Phase | Newly online |

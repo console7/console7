@@ -16,6 +16,11 @@ import (
 	"github.com/console7/console7/sandbox/policyhelper"
 )
 
+// maxHookInput bounds the PreToolUse payload the tripwire will read. A real payload is a few KB; the
+// cap stops a compromised/MITM'd inference backend from steering the engine to emit a giant tool-call
+// that an unbounded read would let OOM the sandbox.
+const maxHookInput = 1 << 20 // 1 MiB
+
 // hookInput is the subset of the Claude Code PreToolUse hook payload the tripwire needs.
 type hookInput struct {
 	ToolName  string `json:"tool_name"`
@@ -30,9 +35,15 @@ func main() { os.Exit(run(os.Stdin, os.Stderr)) }
 // blocks the tool call and feeds stderr back to the model). Fail-closed: an unreadable/unparseable
 // payload or an empty command is denied (operate is read-only, so denying on uncertainty is safe).
 func run(stdin io.Reader, stderr io.Writer) int {
-	data, err := io.ReadAll(stdin)
+	// Bound the read (LimitReader): an unbounded io.ReadAll on attacker-influenced stdin is an OOM
+	// vector. Read one byte past the cap so we can tell "exactly at cap" from "over".
+	data, err := io.ReadAll(io.LimitReader(stdin, maxHookInput+1))
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "console7-tripwire: cannot read hook input; denying (fail closed)")
+		return 2
+	}
+	if int64(len(data)) > maxHookInput {
+		_, _ = fmt.Fprintln(stderr, "console7-tripwire: hook input exceeds 1 MiB; denying (fail closed)")
 		return 2
 	}
 	var in hookInput

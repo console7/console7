@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read # read the PR commit list to identify bot authors by verified account type
 
 jobs:
   dco:
@@ -26,23 +27,40 @@ jobs:
 
       - name: Verify Signed-off-by on every human commit
         env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          set -o pipefail
+          # Identify bot-authored commits from the GitHub API, where author/committer .type == "Bot"
+          # is SERVER-VERIFIED from the linked account — it cannot be forged via git author metadata.
+          # The previous substring match on attacker-controlled %an/%ae let a PR author self-exempt by
+          # setting user.name="x [bot]" or user.email="x+noreply@github.com". Fail closed: if the API
+          # call fails, bot_shas is empty, so nothing is exempted and a genuine bot PR surfaces loudly
+          # rather than a forged human commit slipping through.
+          if ! bot_shas="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits" \
+              --jq '.[] | select((.author.type=="Bot") or (.committer.type=="Bot")) | .sha')"; then
+            echo "::warning::could not read PR commit authors from the API; exempting no commits (fail closed)"
+            bot_shas=""
+          fi
+          is_bot() { printf '%s\n' "$bot_shas" | grep -qxF "$1"; }
           missing=0
           while IFS= read -r sha; do
             [ -z "$sha" ] && continue
-            name="$(git show -s --format='%an' "$sha")"
-            email="$(git show -s --format='%ae' "$sha")"
-            # Exempt bot / web-flow authors — they cannot DCO sign-off.
-            if printf '%s' "$name $email" | grep -Eq '\[bot\]|dependabot|web-flow|noreply@github\.com'; then
-              echo "- $sha exempt (automated author: $name)"
+            if is_bot "$sha"; then
+              echo "- $sha exempt (bot author per GitHub API)"
               continue
             fi
             if git show -s --format='%(trailers:key=Signed-off-by)' "$sha" | grep -q 'Signed-off-by:'; then
               echo "ok $sha — signed off"
             else
-              echo "::error::commit $sha is missing a Signed-off-by (DCO). Author: $name <$email>"
+              # Strip CR/LF from author metadata before echoing: an author name/email containing a
+              # newline could otherwise inject GitHub Actions workflow commands (::stop-commands::,
+              # ::add-mask::) into the runner log/annotation stream.
+              name="$(git show -s --format='%an' "$sha" | tr -d '\r\n')"
+              email="$(git show -s --format='%ae' "$sha" | tr -d '\r\n')"
+              echo "::error::commit $sha is missing a Signed-off-by (DCO). Author: ${name} <${email}>"
               missing=1
             fi
           done < <(git rev-list "$BASE".."$HEAD")
