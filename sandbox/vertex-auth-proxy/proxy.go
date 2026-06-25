@@ -265,6 +265,14 @@ func newAuthProxy(upstream *url.URL, tokens tokenSource, pin requestPin) (*authP
 // the engine omits under a base-URL override, attaches the bearer, and streams the
 // request to the real Vertex host.
 func (ap *authProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 0. Request-arrival trace (observability; UPSTREAM HOST ONLY — never the request-derived path
+	// or any token/body material, preserving this package's no-taint logging invariant). This pairs
+	// with the existing reject/503/upstream-error lines to give a complete request-outcome trace
+	// without logging taint: a session that times out with NO "received" line means the request
+	// never reached this proxy (a sandbox→proxy network-path fault), distinguishing that class of
+	// failure from a stall in the proxy→upstream forward (which the step-5 trace + ErrorHandler bound).
+	log.Printf("vertex-auth-proxy: received a request; pinning, then forwarding permitted predict calls to %s", ap.upstream.Host)
+
 	// 1. PIN check FIRST — before minting or attaching anything. Only an Anthropic-publisher Vertex
 	// predict call for the pinned project/region/model may be forwarded; anything else is rejected with
 	// the bearer NEVER attached, so the proxy is not an open relay for the credential-free sandbox.
@@ -300,7 +308,10 @@ func (ap *authProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tok.SetAuthHeader(r)
 
 	// 5. Forward (streaming). The reverse proxy preserves method, body, and the
-	// anthropic-* / content-type headers as-is.
+	// anthropic-* / content-type headers as-is. The forwarding trace (UPSTREAM HOST ONLY) pairs with
+	// the arrival trace: a "forwarding" line with NO following "upstream error" means we reached the
+	// upstream and any stall is in the response/stream — not the connect — isolating the failing stage.
+	log.Printf("vertex-auth-proxy: forwarding a permitted predict call to %s", ap.upstream.Host)
 	ap.rp.ServeHTTP(w, r)
 }
 
