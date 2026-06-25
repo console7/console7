@@ -394,16 +394,37 @@ func (p *Provider) owns(h interfaces.SandboxHandle, subject interfaces.Subject, 
 // released mid-flight, so a stuck delivery head-of-line-blocks other sessions for up to that bound.
 // Atomicity over throughput; per-handle lock sharding is the production fix (docs/RISKS.md R-7).
 func (p *Provider) DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
+	return p.deliverIfOwned(h, subject, session, material, p.deliverer.Deliver, "deny", "deliver")
+}
+
+// DeliverInferenceIfOwned is DeliverIfOwned for the INFERENCE lane: it atomically RE-CHECKS ownership
+// under the lock and, only if it still holds, delivers material (the minted short-lived Vertex bearer)
+// to THIS session's per-session AUTH-PROXY pod — NOT the sandbox. The auth-proxy is the deterministic
+// proxyNS(h.ID) gateway the engine reaches Vertex through, so the sandbox stays credential-free (it
+// never holds the cloud bearer; the egress/metadata boundary denies it the metadata server). It mirrors
+// DeliverIfOwned's exact ownership/atomicity discipline (the shared deliverIfOwned helper) — only the
+// delivery sink (DeliverInference → the auth-proxy) and the audit labels differ. Any delivery error
+// reports non-delivery (fail closed).
+func (p *Provider) DeliverInferenceIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool {
+	return p.deliverIfOwned(h, subject, session, material, p.deliverer.DeliverInference, "deny-inference", "deliver-inference")
+}
+
+// deliverIfOwned is the lock-held atomic check-and-deliver shared by DeliverIfOwned (the sandbox sink)
+// and DeliverInferenceIfOwned (the auth-proxy sink). It re-checks ownership under p.mu and, only if it
+// still holds, runs deliver within a bounded context, auditing under the supplied labels. Holding p.mu
+// across the bounded delivery I/O is the atomicity guarantee — the lock MUST NOT be released mid-flight
+// (docs/RISKS.md R-7). Any delivery error reports non-delivery (fail closed).
+func (p *Provider) deliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte, deliver func(context.Context, interfaces.SandboxHandle, []byte) error, denyLabel, deliverLabel string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.owns(h, subject, session) {
-		p.audit("deny", h.ID, false)
+		p.audit(denyLabel, h.ID, false)
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
 	defer cancel()
-	ok := p.deliverer.Deliver(ctx, h, material) == nil
-	p.audit("deliver", h.ID, ok)
+	ok := deliver(ctx, h, material) == nil
+	p.audit(deliverLabel, h.ID, ok)
 	return ok
 }
 

@@ -206,6 +206,9 @@ type denyDeliverer struct{}
 func (denyDeliverer) Deliver(context.Context, interfaces.SandboxHandle, []byte) error {
 	return errors.New("cloudgcp: no credential deliverer wired (fail closed)")
 }
+func (denyDeliverer) DeliverInference(context.Context, interfaces.SandboxHandle, []byte) error {
+	return errors.New("cloudgcp: no credential deliverer wired (fail closed)")
+}
 func (denyDeliverer) Wipe(context.Context, interfaces.SandboxHandle) error { return nil }
 
 // InMemoryCredentialDeliverer records the material delivered per handle (and which handles were
@@ -213,15 +216,20 @@ func (denyDeliverer) Wipe(context.Context, interfaces.SandboxHandle) error { ret
 // thin effect recorder like the other fakes; it can be told to fail Deliver to drive the
 // provider's fail-closed delivery path.
 type InMemoryCredentialDeliverer struct {
-	mu          sync.Mutex
-	delivered   map[string][]byte
-	wiped       map[string]bool
-	failDeliver bool
+	mu                 sync.Mutex
+	delivered          map[string][]byte
+	deliveredInference map[string][]byte
+	wiped              map[string]bool
+	failDeliver        bool
 }
 
 // NewInMemoryCredentialDeliverer returns a ready InMemoryCredentialDeliverer.
 func NewInMemoryCredentialDeliverer() *InMemoryCredentialDeliverer {
-	return &InMemoryCredentialDeliverer{delivered: make(map[string][]byte), wiped: make(map[string]bool)}
+	return &InMemoryCredentialDeliverer{
+		delivered:          make(map[string][]byte),
+		deliveredInference: make(map[string][]byte),
+		wiped:              make(map[string]bool),
+	}
 }
 
 // Deliver records a copy of material for handle (or fails if SetFailDeliver(true)).
@@ -233,6 +241,20 @@ func (d *InMemoryCredentialDeliverer) Deliver(_ context.Context, h interfaces.Sa
 	}
 	d.delivered[h.ID] = append([]byte(nil), material...)
 	delete(d.wiped, h.ID)
+	return nil
+}
+
+// DeliverInference records a copy of the INFERENCE material for handle in a SEPARATE slot from
+// Deliver (the auth-proxy path, not the sandbox path), so a test can prove the Vertex bearer reached
+// the auth-proxy and NOT the sandbox credential file. Honours SetFailDeliver to drive the provider's
+// fail-closed inference path.
+func (d *InMemoryCredentialDeliverer) DeliverInference(_ context.Context, h interfaces.SandboxHandle, material []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.failDeliver {
+		return errors.New("cloudgcp/fake: forced DeliverInference failure")
+	}
+	d.deliveredInference[h.ID] = append([]byte(nil), material...)
 	return nil
 }
 
@@ -250,6 +272,15 @@ func (d *InMemoryCredentialDeliverer) Delivered(h interfaces.SandboxHandle) ([]b
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	m, ok := d.delivered[h.ID]
+	return append([]byte(nil), m...), ok
+}
+
+// DeliveredInference returns a copy of the inference material recorded for handle (the auth-proxy
+// delivery slot). Test-only.
+func (d *InMemoryCredentialDeliverer) DeliveredInference(h interfaces.SandboxHandle) ([]byte, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	m, ok := d.deliveredInference[h.ID]
 	return append([]byte(nil), m...), ok
 }
 

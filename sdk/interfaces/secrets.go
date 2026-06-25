@@ -158,15 +158,18 @@ type SecretsProvider interface {
 	InjectOrgCredential(ctx context.Context, in OrgCredentialInjection) error
 
 	// InjectInferenceCredential MINTS a short-lived cloud inference credential (e.g. a GCP bearer
-	// token for the in-tenancy Vertex backend) and injects it directly into the session's own
-	// sandbox. Unlike InjectOrgCredential it does NOT deliver a stored secret — it mints on demand
-	// from the adopter's identity platform (workload-identity token mint), so no long-lived inference
-	// credential is ever stored and a delivered token — not the node metadata server — is the
-	// sandbox's credential source. (Denying the sandbox the metadata server is the egress boundary /
-	// GKE metadata config's job, not this seam's.)
+	// token for the in-tenancy Vertex backend) and injects it ONLY for the session's own sandbox —
+	// delivered to that session's AUTH-PROXY gateway (the credential-attaching reverse proxy the engine
+	// reaches the backend through), NOT into the sandbox itself, so the sandbox stays credential-free
+	// (it never holds the cloud bearer). Unlike InjectOrgCredential it does NOT deliver a stored secret —
+	// it mints on demand from the adopter's identity platform (workload-identity token mint), so no
+	// long-lived inference credential is ever stored and a delivered token — not the node metadata
+	// server — is the inference credential source. (Denying the sandbox the metadata server is the egress
+	// boundary / GKE metadata config's job, not this seam's.)
 	//
 	// SECURITY: the implementation MUST verify in.Sandbox belongs to in.Subject's in.SessionID and
-	// inject the minted credential ONLY into that owning sandbox; it MUST cap the credential's expiry
+	// inject the minted credential ONLY for that owning session (delivered to its auth-proxy gateway,
+	// keeping the sandbox credential-free); it MUST cap the credential's expiry
 	// to no later than min(now+providerMax, in.SessionDeadline) and MUST NOT mint material that
 	// outlives the session; it MUST scope the credential to the least privilege the backend needs;
 	// it MUST NOT return the plaintext credential to the caller (the mint AND the delivery both happen

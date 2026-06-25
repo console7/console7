@@ -15,6 +15,7 @@ import (
 type injectorShape interface {
 	Owns(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID) bool
 	DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool
+	DeliverInferenceIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool
 }
 
 var _ injectorShape = (*Provider)(nil)
@@ -77,6 +78,74 @@ func TestProvider_OwnsAndDeliverIfOwned(t *testing.T) {
 	got, ok := dl.Delivered(h)
 	if !ok || string(got) != "sk-ant-secret" {
 		t.Fatalf("delivered material = %q, ok=%v; want the owner's material", got, ok)
+	}
+}
+
+func TestProvider_DeliverInferenceIfOwned(t *testing.T) {
+	p, dl := newProviderWithDeliverer(t)
+	h := provisionFor(t, p, "alice@example.test", "sess-1")
+
+	// A non-owner is refused (fail closed), and nothing reaches the auth-proxy.
+	for _, tc := range []struct {
+		name    string
+		subject interfaces.Subject
+		session interfaces.SessionID
+		h       interfaces.SandboxHandle
+	}{
+		{"wrong subject", "mallory@example.test", "sess-1", h},
+		{"wrong session", "alice@example.test", "sess-2", h},
+		{"unknown handle", "alice@example.test", "sess-1", interfaces.SandboxHandle{ID: "console7-sb-deadbeef"}},
+	} {
+		if p.DeliverInferenceIfOwned(tc.h, tc.subject, tc.session, []byte("bearer")) {
+			t.Errorf("%s: DeliverInferenceIfOwned should refuse a non-owner", tc.name)
+		}
+	}
+	if _, delivered := dl.DeliveredInference(h); delivered {
+		t.Fatal("no inference material should have been delivered for a non-owner")
+	}
+
+	// The owner's inference delivery lands in the AUTH-PROXY slot — NOT the sandbox credential slot.
+	if !p.DeliverInferenceIfOwned(h, "alice@example.test", "sess-1", []byte("fake-vertex-bearer")) {
+		t.Fatal("DeliverInferenceIfOwned should deliver to the owner's auth-proxy")
+	}
+	got, ok := dl.DeliveredInference(h)
+	if !ok || string(got) != "fake-vertex-bearer" {
+		t.Fatalf("delivered inference material = %q, ok=%v; want the owner's bearer", got, ok)
+	}
+	if _, sandboxGot := dl.Delivered(h); sandboxGot {
+		t.Fatal("the inference bearer must NOT be delivered into the sandbox credential slot")
+	}
+
+	// A delivery error fails closed.
+	dl.SetFailDeliver(true)
+	if p.DeliverInferenceIfOwned(h, "alice@example.test", "sess-1", []byte("bearer")) {
+		t.Error("DeliverInferenceIfOwned must fail closed on a delivery error")
+	}
+}
+
+func TestAuthProxyTokenDeliverArgv_Shape(t *testing.T) {
+	h := interfaces.SandboxHandle{ID: "console7-sb-abc"}
+	argv := strings.Join(authProxyTokenDeliverArgv(h), " ")
+	// Targets the auth-proxy Deployment in THIS session's proxy namespace, execs the BINARY directly
+	// (no shell — distroless), in -deliver-token mode, with -i so the bearer is piped over stdin.
+	for _, want := range []string{
+		"-n " + proxyNS(h.ID),
+		"deployment/" + authProxyServiceName,
+		"-c " + authProxyServiceName,
+		"-i",
+		authProxyBinaryPath + " -deliver-token",
+	} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("auth-proxy deliver argv missing %q: %s", want, argv)
+		}
+	}
+	// It must NOT target the sandbox (the sandbox is its own namespace == handle ID, container "sandbox"),
+	// and must NOT use a shell — the bearer goes over STDIN, never in argv.
+	// (the -deliver-token flag legitimately contains "token"; the guard is against SECRET material).
+	for _, unwanted := range []string{"-c sandbox", "/bin/sh", "cat >", "ya29", "bearer"} {
+		if strings.Contains(argv, unwanted) {
+			t.Errorf("auth-proxy deliver argv unexpectedly contains %q: %s", unwanted, argv)
+		}
 	}
 }
 

@@ -80,6 +80,14 @@ type Injector interface {
 	// check-and-deliver closes the race where a teardown between a separate Owns and a deliver
 	// would let material land in a sandbox that is already gone.
 	DeliverIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool
+	// DeliverInferenceIfOwned is DeliverIfOwned for the INFERENCE lane: same atomic ownership re-check,
+	// but it delivers the minted short-lived inference credential (the Vertex bearer) to the session's
+	// per-session AUTH-PROXY gateway, NOT into the sandbox. The auth-proxy is the credential-attaching
+	// reverse proxy the engine reaches Vertex through, so the SANDBOX STAYS CREDENTIAL-FREE — it never
+	// holds the cloud bearer (the egress/metadata boundary denies it the metadata server). The
+	// providers/cloud-gcp Provider satisfies this by exec'ing the auth-proxy binary's -deliver-token
+	// mode. Returns whether it delivered; any error is non-delivery (fail closed).
+	DeliverInferenceIfOwned(h interfaces.SandboxHandle, subject interfaces.Subject, session interfaces.SessionID, material []byte) bool
 }
 
 // payload is the cleartext-free envelope stored as one Secret Manager secret version. It

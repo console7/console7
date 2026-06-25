@@ -326,6 +326,73 @@ func TestFileTokenSource(t *testing.T) {
 	}
 }
 
+// TestDeliverToken covers the -deliver-token CLI mode (F2c-2b): it reads the bearer from stdin and
+// writes it to the bearer file at exactly 0600, trimming surrounding whitespace; and fails closed
+// (writing nothing) on empty/whitespace-only stdin or an unconfigured destination.
+func TestDeliverToken(t *testing.T) {
+	dir := t.TempDir()
+
+	// Happy path: trimmed bytes land in the file at 0600, and fileTokenSource reads them back.
+	p := filepath.Join(dir, "credential")
+	if err := deliverToken(p, strings.NewReader("  fake-delivered-bearer\n")); err != nil {
+		t.Fatalf("deliverToken: %v", err)
+	}
+	got, err := os.ReadFile(p) //nolint:gosec // G304: p is a test-local path under t.TempDir(), not request taint
+	if err != nil {
+		t.Fatalf("read delivered file: %v", err)
+	}
+	if string(got) != "fake-delivered-bearer" {
+		t.Errorf("delivered bytes = %q, want %q (trimmed)", got, "fake-delivered-bearer")
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode = %o, want 0600", perm)
+	}
+	// The running server's source must read the same value back.
+	tok, err := (fileTokenSource{path: p}).Token()
+	if err != nil || tok.AccessToken != "fake-delivered-bearer" {
+		t.Errorf("fileTokenSource after deliver: tok=%v err=%v", tok, err)
+	}
+
+	// Empty stdin: fail closed, write NOTHING (no file created at a fresh path).
+	empty := filepath.Join(dir, "empty-dest")
+	if err := deliverToken(empty, strings.NewReader("   \n\t")); err == nil {
+		t.Error("empty stdin: want error (fail closed), got nil")
+	}
+	if _, err := os.Stat(empty); !os.IsNotExist(err) {
+		t.Errorf("empty stdin must not create the bearer file: stat err = %v", err)
+	}
+
+	// Zero-length stdin: same fail-closed behaviour.
+	if err := deliverToken(filepath.Join(dir, "zero-dest"), strings.NewReader("")); err == nil {
+		t.Error("zero-length stdin: want error, got nil")
+	}
+
+	// Unconfigured destination: fail closed.
+	if err := deliverToken("", strings.NewReader("tok")); err == nil {
+		t.Error("empty bearerFile: want error, got nil")
+	}
+
+	// Re-tightens a pre-existing loose-mode file to 0600.
+	loose := filepath.Join(dir, "loose")
+	if err := os.WriteFile(loose, []byte("old"), 0o644); err != nil { //nolint:gosec // G306: deliberately loose to prove deliverToken re-tightens to 0600; t.TempDir()
+		t.Fatalf("seed loose file: %v", err)
+	}
+	if err := deliverToken(loose, strings.NewReader("new-tok")); err != nil {
+		t.Fatalf("deliverToken over loose file: %v", err)
+	}
+	info, err = os.Stat(loose)
+	if err != nil {
+		t.Fatalf("stat loose: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("after re-deliver mode = %o, want 0600", perm)
+	}
+}
+
 // TestSelectTokenSource_FileMode covers the deterministic, no-network branch: a non-empty bearer-file
 // path selects the delivered-file source and reports the file mode. (The ambient-ADC branch needs a
 // real metadata server, so it is exercised in deployment, not here.)

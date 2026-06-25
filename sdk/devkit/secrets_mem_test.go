@@ -30,12 +30,17 @@ func TestMemSecrets_InjectInferenceCredential(t *testing.T) {
 	if err := m.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: other, SessionDeadline: future}); err == nil {
 		t.Error("injected into a non-owned sandbox")
 	}
-	// Owned + future deadline: minted token delivered.
+	// Owned + future deadline: minted token delivered to the AUTH-PROXY, not the sandbox.
 	if err := m.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: future}); err != nil {
 		t.Fatalf("InjectInferenceCredential into owner: %v", err)
 	}
-	if got, ok := reg.Injected(owned); !ok || len(got) == 0 {
-		t.Errorf("minted inference token not delivered to owner: ok=%v got=%q", ok, got)
+	if got, ok := reg.InferenceInjected(owned); !ok || len(got) == 0 {
+		t.Errorf("minted inference token not delivered to the owner's auth-proxy: ok=%v got=%q", ok, got)
+	}
+	// The inference credential must NOT land in the sandbox's own credential slot (sandbox stays
+	// credential-free on the inference lane).
+	if got, ok := reg.Injected(owned); ok {
+		t.Errorf("inference credential wrongly delivered into the sandbox: got=%q", got)
 	}
 	// Revoked subject refused.
 	if err := m.RevokeSubject(ctx, "alice"); err != nil {
