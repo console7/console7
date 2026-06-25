@@ -42,19 +42,49 @@ dimensions. Each is scored `0–3` (higher ⇒ more carry cost / more attention 
 | **C — Concentration (fan‑out)** | How load‑bearing is it across the estate? How many things break if it does? | module in‑degree; dependent count; internal fan‑out | ✅ established |
 | **H — Health / drift** | Maintenance posture and currency. | OpenSSF Scorecard + Criticality Score; **libyear** drift; abandonment / bus‑factor | ✅ established (SCA/OSSF) |
 | **F — Function criticality** | Trivial utility or core capability? On a security‑critical path? | consuming trust **tier × stratum** (the standard's Axis 1) | ✅ via tiering |
-| **S — Substitutability** | Inline it, swap it, or are you wedded to it? | **the gap** — capability class × API‑surface depth | ⚠️ judgment + proxy |
+| **S — Substitutability** | Inline it, swap the vendor, or are you wedded to it? | **the gap** — two levers: (A) opacity/IP × vendor‑count, (B) reachable‑KLoC × licence | ⚠️ judgment (A) + computed (B) |
 
-**S is the axis the industry under‑measures**, so the model makes its inputs explicit
-rather than hand‑waving "it's complicated":
+**S is the axis the industry under‑measures**, and "effort to replace" is not one
+number — it is **two orthogonal levers**, because the two ways a dependency traps you
+have different exits:
 
-- *Capability class* (`inline` / `swap` / `wedded`) — human judgment, **reviewed as
-  code** in the tool's `CAPABILITY_REGISTRY`. A cloud HSM (`kms`) is `wedded`: you
-  cannot reimplement it. A UUID library is `inline`: `crypto/rand` replaces it. A
-  GitHub REST client is `swap`: fungible, healthy alternatives exist.
-- *API‑surface depth* (computed) — how many distinct sub‑packages of the dependency
-  you actually bind. Reaching 1 package is a thin seam you could swap; reaching 30 is
-  a marriage. This is the **proxy** that makes "depth" computable today, while the
-  capability class supplies the judgment the proxy can't.
+- **Lever A — opacity / IP barrier (can we rebuild it at all?).** Some dependencies
+  front a capability we *cannot reproduce*: a licensed/trade‑secret artifact, or an
+  OSS client to a remote managed service (a cloud HSM, a secret store, an SCM API).
+  The source we'd need isn't ours to write. The exit is **not a rebuild — it's a
+  vendor swap**, and substitutability then turns on whether a *competitor exists*:
+  `multi`‑vendor (KMS → AWS KMS / Vault; GitHub → GitLab) is swap‑able, `single`‑vendor
+  (a sole‑source trade‑secret moat) is genuine lock‑in. Inputs: `fronts ∈
+  {code, service, proprietary}`, `vendors ∈ {multi, single}` — judgment, reviewed as
+  code in `CAPABILITY_REGISTRY`.
+- **Lever B — reproduction cost (how many K‑lines to rebuild the slice we use?).** For
+  transparent OSS logic we *could* rewrite, substitutability is governed by **KLoC of
+  the reachable slice** — *computed* from reachable LoC, not guessed. This is the
+  OpenSSL test made arithmetic: do I source OpenSSL for secure‑random (inherit ~500
+  KLoC) or write ~30 lines over the OS CSPRNG? `secure‑rand` is `code` + tiny KLoC ⇒
+  **inline**; a transport stack is `code` + spine‑scale KLoC ⇒ **fork‑readiness, not
+  rewrite**. Modified by licence: **copyleft** raises the effort (legal encumbrance on
+  vendoring/forking) even when the code is small; permissive ("not left") is a clean
+  rebuild/fork.
+
+The two levers resolve to a class and an effort score `S`:
+
+| class | lever pattern | exit |
+|---|---|---|
+| `inline` | code · tiny KLoC | rewrite the slice in‑house |
+| `rewrite` | code · small KLoC | abstract behind a port, migrate if it drifts |
+| `fork` / `fork-hard` | code · large/spine KLoC | can't rewrite — **fund fork‑readiness / buy support** |
+| `vendor-swap` | service · multi‑vendor | keep behind the seam; replacement is another impl |
+| `lock-in` | service/proprietary · single‑vendor | **strategic** — support contract / escrow / multi‑source |
+
+The decisive subtlety the two levers expose: **LoC alone misleads.** A 100‑KLoC
+generated client (`go-github`) is *not* hard to substitute — Lever A routes it to
+`vendor-swap` (you change provider, you don't rebuild it), so its effort is *low*.
+Conversely a thin API over a deep engine (we call 523 lines of `grpc`, but lean on 79
+KLoC of transport) is `fork-hard`. One number could never separate those; two levers
+do. *(Caveat: KLoC still overstates rebuild cost for spec‑backed or generated `code`
+— a standard like OAuth2, or protobuf stubs — where a generator or spec does the work;
+treat the KLoC band as an upper bound there.)*
 
 ## 3. From axes to a decision
 
@@ -108,18 +138,18 @@ closure = 203 modules   build-reachable = 53   graph-only = 150   directly-impor
 Tier-1 core (keybroker / control-plane / sdk) direct external imports: 0   (tenet: must be 0)
 ```
 
-| carry | R | C | S | F | sub | module | area | disposition |
-|------:|:-:|:-:|:-:|:-:|-----|--------|------|-------------|
-| 8.0 | 3 | 2 | 3 | 2 | wedded | `google.golang.org/api` | providers | TCO + quarantine (spine) |
-| 8.0 | 2 | 3 | 3 | 2 | wedded | `google.golang.org/grpc` | providers | TCO + quarantine (spine) |
-| 8.0 | 2 | 3 | 3 | 2 | wedded | `google.golang.org/protobuf` | providers | TCO + quarantine (spine) |
-| 5.3 | 2 | 2 | 3 | 2 | wedded | `cloud.google.com/go/iam` | providers | TCO + quarantine (spine) |
-| 4.0 | 2 | 0 | 1 | 2 | swap | `…/ghinstallation/v2` | providers | tolerate / migrate‑if‑drifting |
-| 4.0 | 2 | 1 | 1 | 2 | swap | `github.com/google/go-github/v88` | providers | tolerate / migrate‑if‑drifting |
-| 2.7 | 2 | 1 | 3 | 2 | wedded | `cloud.google.com/go/kms` | providers | TCO scrutiny |
-| 2.7 | 2 | 1 | 3 | 2 | wedded | `cloud.google.com/go/secretmanager` | providers | TCO scrutiny |
-| 2.7 | 2 | 1 | 3 | 2 | wedded | `cloud.google.com/go/storage` | providers | TCO scrutiny |
-| 2.7 | 2 | 2 | 1 | 2 | swap | `golang.org/x/oauth2` | sandbox | blast‑radius gate (RULE 2) |
+| carry | R | C | S | F | sub (2‑lever) | reachLoC | module | disposition |
+|------:|:-:|:-:|:-:|:-:|-----|--------:|--------|-------------|
+| 8.0 | 2 | 3 | 3 | 2 | `fork-hard` | 79 039 | `google.golang.org/grpc` | TCO + quarantine (spine); fork‑readiness |
+| 6.0 | 3 | 2 | 2 | 2 | `fork` | 22 092 | `google.golang.org/api` | TCO + quarantine (spine); fork‑readiness |
+| 6.0 | 2 | 3 | 2 | 2 | `fork` | 46 581 | `google.golang.org/protobuf` | TCO + quarantine (spine); fork‑readiness |
+| 4.0 | 2 | 1 | 1 | 2 | `vendor-swap` | 99 982 | `github.com/google/go-github/v88` | swap behind SCMProvider — not a rebuild |
+| 4.0 | 2 | 2 | 2 | 2 | `fork` | 5 131 | `golang.org/x/oauth2` | fork (KLoC overstates — OAuth2 is spec‑backed) |
+| 2.7 | 2 | 2 | 1 | 2 | `vendor-swap` | 4 326 | `cloud.google.com/go/iam` | swap behind the seam (high fan‑out: MTTR bar) |
+| 2.0 | 2 | 0 | 0 | 2 | `inline` | 432 | `…/ghinstallation/v2` | inline the slice — shed the inheritance |
+| 1.3 | 2 | 1 | 1 | 2 | `vendor-swap` | 30 114 | `cloud.google.com/go/kms` | swap behind SecretsProvider — not a rebuild |
+| 1.3 | 2 | 1 | 1 | 2 | `vendor-swap` | 6 236 | `cloud.google.com/go/secretmanager` | swap behind SecretsProvider |
+| 1.3 | 2 | 1 | 1 | 2 | `vendor-swap` | 32 466 | `cloud.google.com/go/storage` | swap behind EvidenceSink |
 
 ### What the readout says — strategically
 
@@ -132,7 +162,8 @@ Tier-1 core (keybroker / control-plane / sdk) direct external imports: 0   (tene
 
 2. **The concentration is a genuine spine — and it is correctly quarantined.** The
    high‑fan‑out modules (`protobuf` in‑degree 25, `grpc` 21, `x/sys` 31, `otel` 23)
-   are the GCP/gRPC transport base: `wedded`, non‑substitutable, load‑bearing. The
+   are the GCP/gRPC transport base: `fork`/`fork-hard` (transparent OSS, but spine‑scale
+   KLoC — too large to rewrite), load‑bearing. The
    model flags them **TCO + quarantine**. Console7 already satisfies that disposition
    *by construction*: every one of the 10 directs lives in `providers/` (9) or
    `sandbox/` (1), behind the `sdk/interfaces` provider seam — the paved‑road wrapper
@@ -145,12 +176,18 @@ Tier-1 core (keybroker / control-plane / sdk) direct external imports: 0   (tene
    *measurable* — and it gives the model a regression check: **if `core_direct_imports`
    ever exceeds 0, the spine has breached the seam.**
 
-4. **Substitutability changes the verdict on identical health.** `go-github` and the
-   GCP secret clients are both healthy, both reachable — but the model dispositions
-   them oppositely. `go-github` is `swap` (regenerable from OpenAPI), so it is
-   *tolerated*; `kms`/`secretmanager` are `wedded`, so they get *TCO scrutiny / fork‑
-   readiness*. That divergence — invisible to a vuln‑count or a Scorecard alone — is
-   exactly the depth axis the brief asks for, and exactly what no SCA score captures.
+4. **The two‑lever substitutability splits look‑alikes that one number would merge.**
+   `go-github` is **99 982 reachable LoC** — by raw size the heaviest dependency in the
+   estate — yet it scores *low* effort (`vendor-swap`, S=1): Lever A sees it fronts the
+   GitHub service behind `SCMProvider`, so the exit is *swap a provider impl*, not
+   rebuild 100 KLoC. Meanwhile `grpc` is a **523‑line API we call** over a **79 KLoC**
+   transport engine we can neither swap nor rewrite → `fork-hard`, S=3. A single
+   "size" or "depth" number ranks those backwards; the levers — opacity (can we rebuild
+   at all?) and reproduction KLoC (how much if we could?) — separate them correctly.
+   The GCP service clients (`kms`/`secretmanager`/`storage`/`iam`) all land
+   `vendor-swap` **because Console7 already abstracts them behind the provider seam** —
+   the seam is what converts opaque‑service lock‑in into a swap. That is the depth axis
+   the brief asks for, and exactly what no vuln‑count or Scorecard captures.
 
 ### What this would direct, as strategy
 

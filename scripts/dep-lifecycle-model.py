@@ -22,37 +22,94 @@
 # (API-surface depth, consuming trust tier). Everything else is computed from data.
 
 import json
+import os
 import subprocess
 import sys
 import collections
 
 CONSOLE = "github.com/console7/console7"
 
-# --- The judgment axis (Part III "THE GAP"): capability class per module prefix. ---
-# substitutability ∈ {inline, swap, wedded}
-#   inline  — trivial logic we could rewrite in-house cheaply (utilities, encoders)
-#   swap    — a real capability, but fungible: healthy alternatives exist, low lock-in
-#   wedded  — non-substitutable capability (a cloud HSM, an SCM's own API): you cannot
-#             reimplement it; the most you can do is fund fork-readiness / buy support
-# capability — what it does, for the Benefit term ('core' load-bearing vs 'utility')
+# --- Substitutability: a TWO-LEVER index (the "unfilled gap", Part III). ---
+# "Effort to replace" is not one number; it is two orthogonal barriers:
+#
+#  Lever A — OPACITY / IP barrier: can we rebuild it ourselves AT ALL?
+#    'code'        pure in-process OSS logic — transparent; rebuild = write KLoC (Lever B)
+#    'service'     a client fronting a remote/managed capability we cannot run ourselves
+#                  (cloud HSM, secret store, SCM API). Rebuild is impossible — you SWAP
+#                  vendors instead; substitutable iff a competitor exists ('vendors').
+#    'proprietary' licensed / trade-secret artifact: opaque, often sole-source.
+#  vendors: 'multi' (a competitor could replace it) | 'single' (trade-secret moat).
+#
+#  Lever B — REPRODUCTION cost (for 'code' only): how many KLoC of the slice we use
+#    would we rewrite? COMPUTED from reachable LoC, modified by licence (permissive =
+#    clean fork; copyleft = legal encumbrance; proprietary = cannot).
+#
+# The OpenSSL test, made precise: secure-rand is 'code' + tiny KLoC => inline; a cloud
+# HSM is 'service' + multi-vendor => vendor-swap behind a seam, NOT a rewrite. The
+# registry supplies the two LEVERS (judgment, reviewed as code); the tool computes the
+# KLoC and licence that turn them into a score.
 CAPABILITY_REGISTRY = [
     # prefix-matched, first match wins; order most-specific first
-    ("cloud.google.com/go/kms",            dict(sub="wedded", cap="core",    note="cloud HSM / envelope crypto — irreplaceable capability")),
-    ("cloud.google.com/go/secretmanager",  dict(sub="wedded", cap="core",    note="managed secret store — provider-native, not reimplementable")),
-    ("cloud.google.com/go/iam",            dict(sub="wedded", cap="core",    note="workload-identity token minting — provider-native")),
-    ("cloud.google.com/go/storage",        dict(sub="wedded", cap="core",    note="WORM evidence object store — provider-native")),
-    ("google.golang.org/grpc",             dict(sub="wedded", cap="core",    note="transport for every GCP client; spine, not optional")),
-    ("google.golang.org/protobuf",         dict(sub="wedded", cap="core",    note="wire format for every GCP client; spine")),
-    ("google.golang.org/api",              dict(sub="wedded", cap="core",    note="GCP client option/iterator base")),
-    ("golang.org/x/oauth2",                dict(sub="swap",   cap="core",    note="OAuth2/Google ADC token source; standardisable")),
-    ("github.com/google/go-github",        dict(sub="swap",   cap="utility", note="GitHub REST client; thin, regenerable from OpenAPI")),
-    ("github.com/bradleyfalzon/ghinstallation", dict(sub="swap", cap="utility", note="GitHub App JWT minting; ~200 LoC if inlined")),
-    ("github.com/google/uuid",             dict(sub="inline", cap="utility", note="RFC-4122 UUID; stdlib crypto/rand can replace")),
-    ("github.com/google/go-querystring",   dict(sub="inline", cap="utility", note="struct->querystring; trivial reflection")),
-    ("github.com/golang-jwt/jwt",          dict(sub="swap",   cap="utility", note="JWT encode/verify; several healthy alternatives")),
-    ("go.opentelemetry.io",                dict(sub="swap",   cap="utility", note="telemetry; pluggable behind an interface")),
+    ("cloud.google.com/go/kms",            dict(fronts="service", vendors="multi",  cap="core",    note="cloud HSM — swap to AWS KMS/Vault behind SecretsProvider, not rebuild")),
+    ("cloud.google.com/go/secretmanager",  dict(fronts="service", vendors="multi",  cap="core",    note="managed secret store — multi-cloud; abstracted by SecretsProvider")),
+    ("cloud.google.com/go/iam",            dict(fronts="service", vendors="multi",  cap="core",    note="workload-identity minting — every cloud has one; behind the seam")),
+    ("cloud.google.com/go/storage",        dict(fronts="service", vendors="multi",  cap="core",    note="WORM object store — multi-cloud; abstracted by EvidenceSink")),
+    ("github.com/google/go-github",        dict(fronts="service", vendors="multi",  cap="utility", note="GitHub API client — behind SCMProvider; swap to a GitLab/Gitea impl")),
+    ("github.com/bradleyfalzon/ghinstallation", dict(fronts="code", vendors="multi", cap="utility", note="GitHub App JWT minting; ~400 LoC if inlined")),
+    ("google.golang.org/grpc",             dict(fronts="code",    vendors="single", cap="core",    note="in-process transport; OSS but spine-scale — fork-readiness, not rewrite")),
+    ("google.golang.org/protobuf",         dict(fronts="code",    vendors="single", cap="core",    note="wire codec; OSS but spine-scale — fork, not rewrite")),
+    ("google.golang.org/api",              dict(fronts="code",    vendors="single", cap="core",    note="GCP client base; large transparent surface")),
+    ("golang.org/x/oauth2",                dict(fronts="code",    vendors="multi",  cap="core",    note="OAuth2 is a standard; small + standardisable")),
+    ("github.com/google/uuid",             dict(fronts="code",    vendors="multi",  cap="utility", note="RFC-4122 UUID; stdlib crypto/rand replaces it")),
+    ("github.com/google/go-querystring",   dict(fronts="code",    vendors="multi",  cap="utility", note="struct->querystring; trivial reflection")),
+    ("github.com/golang-jwt/jwt",          dict(fronts="code",    vendors="multi",  cap="utility", note="JWT codec; healthy alternatives exist")),
+    ("go.opentelemetry.io",                dict(fronts="code",    vendors="multi",  cap="utility", note="telemetry; pluggable behind an interface")),
 ]
-SUB_DEFAULT = dict(sub="swap", cap="utility", note="(unclassified — defaults to swap/utility; classify in registry)")
+SUB_DEFAULT = dict(fronts="code", vendors="multi", cap="utility", note="(unclassified — defaults to code/multi/utility; classify in registry)")
+
+# Lever-B KLoC bands -> effort score (reachable LoC of the slice we'd rebuild).
+KLOC_BANDS = [(500, 0), (5000, 1), (50000, 2)]  # else 3
+
+
+def _loc(path):
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def _licence(modcache, mod):
+    import glob
+    for d in sorted(glob.glob(os.path.join(modcache, mod) + "@*")):
+        for name in ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "LICENCE"):
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                t = open(p, encoding="utf-8", errors="ignore").read()[:4000].lower()
+                if "gnu general public" in t or "gnu affero" in t:
+                    return "COPYLEFT"
+                if "mozilla public" in t:
+                    return "weak-copyleft"
+                return "permissive"
+    return None
+
+
+def derive_sub(info, reach_loc, licence):
+    """Resolve the two levers to a substitutability class + effort score S (0..3)."""
+    if info["fronts"] in ("service", "proprietary"):
+        # Lever A dominates: we cannot rebuild it; substitution = vendor swap.
+        if info["vendors"] == "multi":
+            return dict(sub="vendor-swap", S=1, leverA="opaque, multi-vendor",
+                        leverB="n/a (swap, not rebuild)")
+        return dict(sub="lock-in", S=3, leverA="opaque, single-vendor moat",
+                    leverB="n/a")
+    # fronts == 'code': Lever B governs — KLoC of the slice we'd rewrite.
+    b = next((sc for lim, sc in KLOC_BANDS if reach_loc < lim), 3)
+    if licence == "COPYLEFT":
+        b = max(b, 2)  # legal encumbrance raises effort even when code is small
+    cls = {0: "inline", 1: "rewrite", 2: "fork", 3: "fork-hard"}[b]
+    return dict(sub=cls, S=b, leverA="transparent",
+                leverB=f"{reach_loc} LoC{' (copyleft)' if licence=='COPYLEFT' else ''}")
 
 # Trust tier of each top-level code area (Function-criticality input). Higher = more
 # load-bearing consequence if the dependency fails or is compromised (ARCHITECTURE.md).
@@ -94,6 +151,18 @@ def load():
 
     reachable = {m for m in (pkgmod.values()) if m and m != CONSOLE}
 
+    # reachable LoC per module (Lever B input): LoC of every package of the module
+    # that lands in our build closure = "how much of its code we'd have to reproduce".
+    reach_loc = collections.Counter()
+    for p in pkgs:
+        m = pkgmod.get(p["ImportPath"])
+        if not m or m == CONSOLE or p.get("Standard"):
+            continue
+        d_ = p.get("Dir")
+        if d_:
+            reach_loc[m] += sum(_loc(os.path.join(d_, f))
+                                for f in (p.get("GoFiles", []) or []))
+
     # direct imports by console7 code: module -> {areas}, module -> {sub-packages}
     areas = collections.defaultdict(set)
     depth = collections.defaultdict(set)
@@ -106,9 +175,14 @@ def load():
             if em and em != CONSOLE:
                 areas[em].add(top)
                 depth[em].add(imp)
+
+    # licence per scored (directly-imported) module — Lever B modifier, read offline.
+    modcache = sh("go", "env", "GOMODCACHE").strip()
+    licence = {m: _licence(modcache, m) for m in areas}
+
     closure = set(indeg) | reachable
     return dict(indeg=indeg, reachable=reachable, areas=areas, depth=depth,
-                closure=closure)
+                closure=closure, reach_loc=reach_loc, licence=licence)
 
 
 def classify(mod):
@@ -131,8 +205,9 @@ def score(mod, d):
     R = 0 if not reachable else (1 if not areas else 2 if api_depth <= 2 else 3)
     # C Concentration / fan-out: module in-degree across the closure (spine-ness).
     C = 0 if indeg <= 1 else 1 if indeg <= 5 else 2 if indeg <= 15 else 3
-    # S Substitutability -> remediation effort if it goes bad.
-    S = {"inline": 0, "swap": 1, "wedded": 3}[info["sub"]]
+    # S Substitutability -> remediation effort, from the two-lever index (computed).
+    sub = derive_sub(info, d["reach_loc"].get(mod, 0), d["licence"].get(mod))
+    S = sub["S"]
     # F Function-criticality from consuming trust tier (T1 core == highest).
     F = {1: 3, 2: 2, 3: 1, 4: 0}[function_tier]
     # Benefit denominator: core capability earns its carry; utility earns less slack.
@@ -143,26 +218,33 @@ def score(mod, d):
     H = 1
     carry = round((R * max(C, 1) * (S + H)) / benefit, 1) if reachable else 0.0
 
-    disposition = decide(reachable, info, S, C, F)
+    disposition = decide(reachable, sub, C)
     return dict(module=mod, areas=areas, reachable=reachable, indeg=indeg,
-                api_depth=api_depth, R=R, C=C, S=S, F=F, H=H, benefit=benefit,
-                carry=carry, sub=info["sub"], cap=info["cap"],
-                disposition=disposition, note=info["note"])
+                api_depth=api_depth, reach_loc=d["reach_loc"].get(mod, 0),
+                R=R, C=C, S=S, F=F, H=H, benefit=benefit, carry=carry,
+                sub=sub["sub"], leverA=sub["leverA"], leverB=sub["leverB"],
+                cap=info["cap"], disposition=disposition, note=info["note"])
 
 
-def decide(reachable, info, S, C, F):
+def decide(reachable, sub, C):
     if not reachable:
         return "VEX/prune — not on any build path (inherited blast radius, zero reach)"
-    if info["sub"] == "inline":
-        return "Inline / vendor — trivial + substitutable; shed the inheritance"
-    if info["sub"] == "wedded":
-        if C >= 2:
-            return "TCO scrutiny + quarantine — non-substitutable spine: keep behind the paved-road seam, buy support / fund fork-readiness"
-        return "TCO scrutiny — non-substitutable: buy support / fund fork-readiness"
-    # swap
+    cls = sub["sub"]
+    if cls == "inline":
+        return "Inline / vendor — rewrite the slice in-house; shed the inheritance"
+    if cls == "rewrite":
+        return "Substitutable by rewrite — abstract behind a port; migrate if it drifts"
+    if cls == "vendor-swap":
+        base = ("Vendor-swap-able — keep behind the provider seam; replacement is "
+                "another impl, not a rebuild")
+        return base + (" (high fan-out: hold the MTTR bar — RULE 2)" if C >= 2 else "")
+    if cls == "lock-in":
+        return "Strategic lock-in — sole-source moat: support contract / escrow / multi-source plan"
+    # fork / fork-hard
+    base = "Non-substitutable by rewrite — fund fork-readiness / buy support"
     if C >= 2:
-        return "Blast-radius gate (RULE 2) — high fan-out: hold to a higher health/MTTR bar or wrap"
-    return "Tolerate / migrate-if-drifting — substitutable; watch health"
+        return "TCO scrutiny + quarantine — spine: keep behind the seam; " + base
+    return base
 
 
 # --------------------------------------------------------------------------
@@ -311,13 +393,14 @@ def main():
     print(f"Tier-1 core (keybroker/control-plane/sdk) direct external imports: "
           f"{summary['core_direct_imports']}  (tenet: must be 0)")
     print("-" * 78)
-    print(f"{'carry':>5} {'R':>1}{'C':>2}{'S':>2}{'F':>2}  {'sub':<7} {'module':<42} areas")
+    print(f"{'carry':>5} {'R':>1}{'C':>2}{'S':>2}{'F':>2}  {'sub':<11}{'reachLoC':>9}  module")
     for r in rows:
         print(f"{r['carry']:>5} {r['R']:>1}{r['C']:>2}{r['S']:>2}{r['F']:>2}  "
-              f"{r['sub']:<7} {r['module'][:42]:<42} {','.join(r['areas'])}")
+              f"{r['sub']:<11}{r['reach_loc']:>9}  {r['module']}  [{','.join(r['areas'])}]")
         print(f"       -> {r['disposition']}")
     print("-" * 78)
     print("R=reachability C=concentration/fan-out S=substitutability-effort F=function-tier")
+    print("sub via two levers: A=opacity (code/service/proprietary x vendors) B=reachLoC (rebuild cost)")
     print("carry = R x max(C,1) x (S + H) / benefit ; H is the live health/drift slot (=1 offline)")
 
 
