@@ -165,8 +165,128 @@ def decide(reachable, info, S, C, F):
     return "Tolerate / migrate-if-drifting — substitutable; watch health"
 
 
+# --------------------------------------------------------------------------
+# Track records: two time series per dependency (SDLC-of-the-Future Part III —
+# "vuln rate is the lagging canary; reachability is the leading indicator").
+#   noise[t]  = NEW CVEs disclosed in the component per period   (the canary)
+#   signal[t] = of those, how many are REACHABLE on our call path (the toil)
+# Sources: noise <- OSV/GHSA/NVD ; signal <- govulncheck/reachability SCA.
+# Both are egress-gated (vuln.go.dev / api.osv.dev); this tool INGESTS a
+# committed observations ledger so the series is evidence, not a live fetch.
+# --------------------------------------------------------------------------
+
+# MTTR SLA (days) above which a high-fan-out dependency breaches the
+# blast-radius gate (Part III RULE 2). Illustrative; calibrate to policy.
+MTTR_SLA_DAYS = 30
+
+
+def load_track(path):
+    doc = json.load(open(path))
+    by_mod = collections.defaultdict(list)
+    for o in doc.get("observations", []):
+        by_mod[o["module"]].append(o)
+    for m in by_mod:
+        by_mod[m].sort(key=lambda x: x["period"])
+    return by_mod
+
+
+def _trend(xs):
+    if len(xs) < 2:
+        return "flat"
+    h = len(xs) // 2
+    a = sum(xs[:h]) / max(h, 1)
+    b = sum(xs[h:]) / max(len(xs) - h, 1)
+    return "rising" if b > a * 1.15 else "falling" if b < a * 0.85 else "flat"
+
+
+def track_measures(series):
+    noise = [s.get("noise", 0) for s in series]
+    signal = [s.get("signal", 0) for s in series]
+    cn, cs = sum(noise), sum(signal)
+    rem = [s["remediated_days"] for s in series
+           if s.get("signal", 0) > 0 and "remediated_days" in s]
+    return dict(
+        periods=len(series), cum_noise=cn, cum_signal=cs,
+        # reachable ratio = empirical measurement of the depth/substitutability axis:
+        # how much of what breaks upstream actually reaches us. Low = well-insulated.
+        rho=(round(cs / cn, 2) if cn else None),
+        noise_trend=_trend(noise), signal_trend=_trend(signal),
+        mttr_days=(round(sum(rem) / len(rem), 1) if rem else None),
+        open_signals=sum(1 for s in series
+                         if s.get("signal", 0) > 0 and "remediated_days" not in s),
+        recurrence=sum(1 for s in signal if s > 0),
+        latest_signal=(signal[-1] if signal else 0),
+    )
+
+
+def track_verdict(m, t, indeg):
+    high_fanout = indeg > 5
+    n, s = t["cum_noise"], t["cum_signal"]
+    if n == 0 and s == 0:
+        return ("blind-spot?", "zero noise may mean nobody is looking — cross-check "
+                "Scorecard activity / libyear before trusting the quiet")
+    if s == 0:
+        return ("INSULATED", f"canary chirped {n}x, signal stayed flat — "
+                "the seam/usage is doing its job; VEX record validates it")
+    # there is reachable history; is it CURRENTLY elevated, or a handled blip?
+    rising = t["signal_trend"] == "rising" and t["latest_signal"] > 0
+    wedded = t["rho"] is not None and t["rho"] > 0.5
+    if t["open_signals"] > 0 and high_fanout:
+        return ("MTTR-breach", f"{t['open_signals']} reachable CVE(s) unremediated on a "
+                f"fan-out-{indeg} spine — blast-radius gate (RULE 2)")
+    if rising and wedded:
+        return ("DANGER", f"reachable rate climbing AND you reach {int(t['rho']*100)}% of "
+                "what breaks — pre-position the seam migration / fund fork-readiness")
+    if rising:
+        return ("watch", "reachable rate ticking up — confirm it is a trend, not a blip")
+    if wedded:
+        return ("depth-underestimated", f"reach {int(t['rho']*100)}% of what breaks — "
+                "more wedded than the registry assumes; reclassify")
+    if t["mttr_days"] is not None and t["mttr_days"] > MTTR_SLA_DAYS and high_fanout:
+        return ("MTTR-breach", f"MTTR {t['mttr_days']}d > {MTTR_SLA_DAYS}d SLA on a "
+                f"fan-out-{indeg} spine — raise the bar or wrap (RULE 2)")
+    rho = "-" if t["rho"] is None else f"{t['rho']:.2f}"
+    return ("steady", f"reachable CVEs handled within SLA, well insulated (rho={rho}); "
+            "keep watching the trend")
+
+
+def report_track(path, d, as_json):
+    track = load_track(path)
+    rows = []
+    for m, series in sorted(track.items()):
+        t = track_measures(series)
+        indeg = d["indeg"].get(m, 0)
+        tag, why = track_verdict(m, t, indeg)
+        rows.append(dict(module=m, indeg=indeg, **t, verdict=tag, why=why))
+    if as_json:
+        print(json.dumps({"track_record": rows}, indent=2))
+        return
+    print()
+    print("TRACK RECORDS — noise (canary) vs signal (toil owed)")
+    print("=" * 78)
+    print(f"{'cumN':>4}{'cumS':>5}{'rho':>6}  {'noiseTr':<8}{'sigTr':<8}{'MTTR':>5} "
+          f" {'module':<34} verdict")
+    for r in rows:
+        rho = "-" if r["rho"] is None else f"{r['rho']:.2f}"
+        mttr = "-" if r["mttr_days"] is None else f"{r['mttr_days']:.0f}d"
+        print(f"{r['cum_noise']:>4}{r['cum_signal']:>5}{rho:>6}  "
+              f"{r['noise_trend']:<8}{r['signal_trend']:<8}{mttr:>5}  "
+              f"{r['module'][:34]:<34} {r['verdict']}")
+        print(f"      -> {r['why']}")
+    print("-" * 78)
+    print("rho = cum_signal / cum_noise (reachable ratio = empirical depth/insulation).")
+    print("noise=0 is AMBIGUOUS (Part III): quiet can mean unscanned — cross H/Scorecard.")
+
+
 def main():
-    as_json = "--json" in sys.argv
+    argv = sys.argv[1:]
+    as_json = "--json" in argv
+    if "--track" in argv:
+        i = argv.index("--track")
+        path = argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("-") \
+            else "docs/strategy/dep-track-record.example.json"
+        report_track(path, load(), as_json)
+        return
     d = load()
     directs = sorted(d["areas"], key=lambda m: (-score(m, d)["carry"], m))
     rows = [score(m, d) for m in directs]
@@ -202,4 +322,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:  # tolerate `| head`, `| less` closing the pipe early
+        sys.exit(0)

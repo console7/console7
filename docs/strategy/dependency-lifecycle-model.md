@@ -166,7 +166,76 @@ Tier-1 core (keybroker / control-plane / sdk) direct external imports: 0   (tene
   high‑fan‑out + drifting dependency is the low‑fitness/high‑tier *danger quadrant*;
   the disposition there is *migrate or fund fork‑readiness*, not *patch forever*.
 
-## 5. Where live data plugs in (the honest gaps)
+## 5. Track records — the temporal axis: noise vs signal
+
+A point-in-time score says *where a dependency stands*; a **track record** says *which
+way it is moving* — and movement is what decides migrate-vs-keep. The pack names the
+two series exactly: *"vuln rate is the lagging canary, where a low count can just mean
+nobody is looking; reachability is the separate exposure signal that decides whether
+the toil is owed."* So per dependency, per period, record two numbers:
+
+- **Noise (the canary)** — NEW CVEs disclosed in the component this period. Lagging.
+  A property of *the package*, independent of how you use it. Answers *"is this a CVE
+  magnet?"* Source: OSV / GHSA / NVD.
+- **Signal (the toil owed)** — of those, how many are **reachable on our call path**.
+  Leading. A property of *our usage*. Answers *"does it actually cost us?"* Source:
+  `govulncheck` / reachability‑aware SCA.
+
+From the two series the model derives the measures that drive decisions:
+
+| Measure | Definition | What it tells you |
+|---|---|---|
+| **ρ = Σsignal / Σnoise** | reachable ratio over the window | **empirical measurement of the depth/substitutability axis** — how much of what breaks upstream actually reaches you. Low ρ = well‑insulated (you use a sliver); high ρ = wedded. ρ *confirms or refutes* the registry's `inline/swap/wedded` guess with data. |
+| **noise trend** | slope of noise[t] | the package's health trajectory; rising noise feeds the **H (drift)** axis |
+| **signal trend** | slope of signal[t] | *your* exposure trajectory; rising + still‑elevated = the danger quadrant |
+| **MTTR** | disclosure → fix shipped | feeds the blast‑radius **MTTR SLA** (RULE 2) above N dependents |
+| **recurrence / open** | periods with signal>0; unremediated | a dep that throws reachable CVEs every quarter has a bad record regardless of any single score |
+
+**Two faces, as the brief frames it.** *Noise without signal is VEX fodder*: the
+canary chirps, nothing is on your path, and your **track record of correctly ignoring
+it validates the seam**. *Signal is the real backlog*: reachable CVEs per period are
+the actual VM workload, and its trend is whether the estate is getting safer or
+decaying. Crucially, **noise = 0 is ambiguous** — *"a low count can just mean nobody is
+looking"* — so a quiet series must be cross‑checked against Health (Scorecard activity,
+libyear) before it is trusted, or it is a blind spot, not a clean bill.
+
+### Worked archetypes
+
+`python3 scripts/dep-lifecycle-model.py --track` over the illustrative ledger
+([`dep-track-record.example.json`](dep-track-record.example.json) — hand‑authored, not
+measured) shows the three records the model must tell apart:
+
+```
+cumN cumS   rho  noiseTr sigTr   MTTR  module                        verdict
+  12    8  0.67  rising  rising   50d  example.com/legacy-xml-parser  DANGER
+      reachable rate climbing AND you reach 67% of what breaks — pre-position migration / fork-readiness
+   2    0  0.00  flat    flat       -  golang.org/x/oauth2            INSULATED
+      canary chirped 2x, signal stayed flat — the seam is doing its job; VEX record validates it
+  11    1  0.09  rising  rising    6d  google.golang.org/grpc         steady
+      reachable CVEs handled within SLA, well insulated (rho=0.09); keep watching the trend
+```
+
+The discriminations that matter: `grpc` has a *noisier* canary than the legacy parser
+(11 vs 12) yet a healthy record — **one** reachable CVE in a year, fixed in 6 days,
+ρ=0.09 — because depth and the seam insulate it; the legacy parser, with comparable
+noise, reaches 67% of it, is rising, and is behind on MTTR → **migrate**. Noise count
+alone would have ranked them together; the signal track record splits them.
+
+### Console7's record, honestly
+
+Console7's dependency set is **brand new and pinned `govulncheck`‑clean** (`go.mod`
+header), so its true starting record is **signal = 0 at t0** — a clean reachable
+history, with the spine (`grpc`/`protobuf`/`x/net`/`oauth2`) expected to behave like
+the `grpc`/`oauth2` archetypes above: a chirping canary, a flat signal, because §4
+already showed the reach is shallow and quarantined behind the seam. The honest gap:
+the **live feeds that populate the series are egress‑policy‑blocked in this session** —
+`vuln.go.dev` and `api.osv.dev` both return 403 — so the real numbers begin accruing
+once those hosts are allowlisted in the supply‑chain lane (a destination an adopter's
+default‑deny egress must permit anyway). The tool therefore *ingests a committed
+observations ledger* rather than fetching live: the series is evidence, versioned with
+the code, regenerated as `govulncheck` (signal) and OSV (noise) append each period.
+
+## 6. Where live data plugs in (the honest gaps)
 
 This snapshot runs **offline** against the toolchain. Three terms are proxies until
 wired to live data; none change the *shape* of the model, only sharpen scores:
@@ -184,7 +253,7 @@ wired to live data; none change the *shape* of the model, only sharpen scores:
   metric* — the model's contribution is to make its inputs **explicit and auditable**
   rather than implicit.
 
-## 6. Limits
+## 7. Limits
 
 - It scores the **module** graph, not per‑symbol call depth; `wedded`/`swap`/`inline`
   is a coarse human call, deliberately kept as reviewable code.

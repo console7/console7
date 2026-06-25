@@ -1,0 +1,32 @@
+{
+  "_status": "ILLUSTRATIVE — NOT measured data.",
+  "_comment": [
+    "Demonstrates the noise(canary)/signal(toil) track-record schema consumed by",
+    "scripts/dep-lifecycle-model.py --track. The figures are hand-authored to show",
+    "two archetypes, not observed CVE counts. Console7's REAL series starts at its",
+    "t0 (govulncheck-clean by pin => signal=0) and accrues once the OSV/vuln.go.dev",
+    "feeds are allowlisted (both are egress-policy-blocked in the dev sandbox).",
+    "",
+    "Each observation: module, period (sortable), noise = NEW CVEs disclosed in the",
+    "component that period (source: OSV/GHSA), signal = of those, how many are",
+    "REACHABLE on our call path (source: govulncheck). Optional remediated_days =",
+    "time from the reachable disclosure to the fix shipping; omit it while a signal",
+    "is still open (unremediated)."
+  ],
+  "observations": [
+    { "module": "google.golang.org/grpc", "period": "2025-Q3", "noise": 3, "signal": 0 },
+    { "module": "google.golang.org/grpc", "period": "2025-Q4", "noise": 2, "signal": 0 },
+    { "module": "google.golang.org/grpc", "period": "2026-Q1", "noise": 4, "signal": 1, "remediated_days": 6 },
+    { "module": "google.golang.org/grpc", "period": "2026-Q2", "noise": 2, "signal": 0 },
+
+    { "module": "golang.org/x/oauth2", "period": "2025-Q3", "noise": 1, "signal": 0 },
+    { "module": "golang.org/x/oauth2", "period": "2025-Q4", "noise": 0, "signal": 0 },
+    { "module": "golang.org/x/oauth2", "period": "2026-Q1", "noise": 1, "signal": 0 },
+    { "module": "golang.org/x/oauth2", "period": "2026-Q2", "noise": 0, "signal": 0 },
+
+    { "module": "example.com/legacy-xml-parser", "period": "2025-Q3", "noise": 2, "signal": 1, "remediated_days": 41 },
+    { "module": "example.com/legacy-xml-parser", "period": "2025-Q4", "noise": 3, "signal": 2, "remediated_days": 58 },
+    { "module": "example.com/legacy-xml-parser", "period": "2026-Q1", "noise": 3, "signal": 2 },
+    { "module": "example.com/legacy-xml-parser", "period": "2026-Q2", "noise": 4, "signal": 3 }
+  ]
+}
