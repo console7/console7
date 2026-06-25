@@ -129,10 +129,10 @@ func TestEngineRunScript_Shape(t *testing.T) {
 }
 
 func TestEngineRunScript_VertexLane(t *testing.T) {
-	// The F2c-2c flip: the Vertex lane points the engine at THIS session's auth-proxy (resolved base
-	// URL) and exempts the auth-proxy host from Squid via NO_PROXY/no_proxy — the SANDBOX holds NO
-	// Vertex credential (the bearer lives in the auth-proxy), so there is NO CLOUDSDK_AUTH_ACCESS_TOKEN
-	// and NO in-pod credential read on this lane.
+	// The F2c-2c/2d flip: the Vertex lane points the engine at THIS session's auth-proxy (resolved base
+	// URL) and EMPTIES the inherited Squid proxy env so the engine dials the auth-proxy directly (the
+	// engine ignores NO_PROXY) — the SANDBOX holds NO Vertex credential (the bearer lives in the
+	// auth-proxy), so there is NO CLOUDSDK_AUTH_ACCESS_TOKEN and NO in-pod credential read on this lane.
 	const baseURL = "http://10.4.5.6:8080"
 	s, err := engineRunScript(credentialPath, engineLane{
 		kind:             interfaces.BackendVertex,
@@ -150,9 +150,8 @@ func TestEngineRunScript_VertexLane(t *testing.T) {
 		`ANTHROPIC_VERTEX_PROJECT_ID='acme-prod-123'`,
 		`CLOUD_ML_REGION='us-east5'`,
 		`ANTHROPIC_MODEL='claude-haiku-4-5@20251001'`,
-		`ANTHROPIC_VERTEX_BASE_URL='` + baseURL + `'`, // engine → auth-proxy (the bearer-attaching gateway)
-		`NO_PROXY='10.4.5.6'`,                         // ...reached DIRECTLY, not tunnelled through Squid
-		`no_proxy='10.4.5.6'`,                         // both cases (some clients read only the lowercase)
+		`ANTHROPIC_VERTEX_BASE_URL='` + baseURL + `'`,       // engine → auth-proxy (the bearer-attaching gateway)
+		"HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy=", // proxy env cleared → dial the auth-proxy DIRECTLY
 		"claude -p --permission-mode default",
 	} {
 		if !strings.Contains(s, want) {
@@ -184,8 +183,10 @@ func TestEngineRunScript_AnthropicStillReadsCredential(t *testing.T) {
 		if !strings.Contains(s, `_c7cred="$(cat `+credentialPath+`)"`) {
 			t.Errorf("Anthropic-lane (kind=%d) must STILL read the in-pod credential file:\n%s", kind, s)
 		}
-		if strings.Contains(s, "ANTHROPIC_VERTEX_BASE_URL") || strings.Contains(s, "NO_PROXY") {
-			t.Errorf("Anthropic-lane (kind=%d) must not carry Vertex/auth-proxy env:\n%s", kind, s)
+		// The Anthropic lane must NOT carry the Vertex base URL, nor clear the proxy env — it keeps the
+		// pod's HTTP_PROXY=Squid (the proxy-clear is the Vertex lane's direct-to-auth-proxy mechanism only).
+		if strings.Contains(s, "ANTHROPIC_VERTEX_BASE_URL") || strings.Contains(s, "HTTP_PROXY=") {
+			t.Errorf("Anthropic-lane (kind=%d) must not carry Vertex/auth-proxy env (incl. the proxy-clear):\n%s", kind, s)
 		}
 	}
 }

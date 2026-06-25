@@ -124,8 +124,8 @@ func TestRun_ReadinessGateBeforeFirstExec(t *testing.T) {
 // TestRun_VertexResolvesAndThreadsAuthProxyEndpoint proves the F2c-2c flip end to end at the Run level:
 // on the Vertex lane, AFTER the readiness waits (incl. the auth-proxy Deployment Available), Run
 // resolves THIS session's auth-proxy ClusterIP (authProxyEndpoint) and threads the resolved base URL
-// into the engine's exec script — `kubectl exec … claude` carries ANTHROPIC_VERTEX_BASE_URL +
-// NO_PROXY pointed at the resolved IP, and NO CLOUDSDK_AUTH_ACCESS_TOKEN / no in-pod credential read.
+// into the engine's exec script — `kubectl exec … claude` carries ANTHROPIC_VERTEX_BASE_URL + an
+// EMPTIED proxy env (engine dials the auth-proxy directly), and NO CLOUDSDK_AUTH_ACCESS_TOKEN / no read.
 // It mirrors TestRun_ReadinessGateBeforeFirstExec: a fake kubectl on PATH records argv and, for the
 // auth-proxy `get svc … clusterIP` read, prints a fixed IP so the resolve succeeds without a cluster.
 func TestRun_VertexResolvesAndThreadsAuthProxyEndpoint(t *testing.T) {
@@ -201,8 +201,7 @@ func TestRun_VertexResolvesAndThreadsAuthProxyEndpoint(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ANTHROPIC_VERTEX_BASE_URL='http://" + proxyIP + ":8080'",
-		"NO_PROXY='" + proxyIP + "'",
-		"no_proxy='" + proxyIP + "'",
+		"HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy=",
 		"CLAUDE_CODE_SKIP_VERTEX_AUTH=1",
 	} {
 		if !strings.Contains(blob, want) {
