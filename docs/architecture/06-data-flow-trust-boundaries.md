@@ -79,7 +79,7 @@ flowchart TB
   GH -->|"C-CODE FetchRepoBundle (base, control-plane)"| ORC
   ORC -->|"C-CODE seed base bundle"| ENGp
   ENGp --> PRX
-  ENGp -->|"C-MODEL Vertex (skip-auth; via NO_PROXY direct hop)"| AUTHPRX
+  ENGp -->|"C-MODEL Vertex (skip-auth; direct hop, proxy env cleared)"| AUTHPRX
   AUTHPRX ==>|"C-MODEL — THE crossing (attaches bearer)"| MODEL
   PRX ==>|"C-MODEL — THE crossing"| MODEL
   ENGp -->|"C-CODE CommitBundle + CommitDigest &rarr; orchestrator signs"| ORC

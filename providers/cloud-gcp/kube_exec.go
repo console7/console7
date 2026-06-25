@@ -700,9 +700,11 @@ const credentialPath = "/run/console7/credential" //nolint:gosec // G101 false p
 //     the kubectl argv (control side), the pod spec, or this adapter's logs — only the prompt (STDIN) and
 //     this fixed command shape cross the wire.
 //  2. Vertex lane: the SANDBOX holds NO Vertex credential. The engine is pointed at this session's
-//     auth-proxy (ANTHROPIC_VERTEX_BASE_URL = lane.authProxyBaseURL) with CLAUDE_CODE_SKIP_VERTEX_AUTH=1
-//     and NO_PROXY pinning the auth-proxy host (so the in-cluster hop bypasses Squid); the auth-proxy
-//     attaches the (control-plane-delivered) bearer on forward. No in-pod credential file is read.
+//     auth-proxy (ANTHROPIC_VERTEX_BASE_URL = lane.authProxyBaseURL) with CLAUDE_CODE_SKIP_VERTEX_AUTH=1,
+//     and the engine's proxy env is EMPTIED so it dials the in-cluster auth-proxy directly (the engine
+//     ignores NO_PROXY and would otherwise CONNECT-tunnel through Squid, which can't reach a bare
+//     ClusterIP); the auth-proxy attaches the (control-plane-delivered) bearer on forward. No in-pod
+//     credential file is read. The NetworkPolicy stays the authoritative egress confinement.
 //
 // The credential is read ONCE into a shell variable as a STANDALONE assignment (not a prefix
 // command-substitution): under `set -e` a standalone failed `$(cat …)` aborts the script, whereas a
@@ -747,10 +749,9 @@ _c7cred="$(cat ` + credPath + `)"
 		// from authProxyEndpoint after the auth-proxy is Available). Fail closed if it is empty or not the
 		// expected http://<ip>:<authProxyPort> shape — the engine must never be pointed at a broken/empty
 		// base URL (it would silently fall back to the default Vertex host via Google ADC → the denied
-		// metadata server). The host is derived for NO_PROXY below.
+		// metadata server). authProxyHostFromBaseURL validates the http://<ip>:<authProxyPort> shape.
 		baseURL := strings.TrimSpace(lane.authProxyBaseURL)
-		host, ok := authProxyHostFromBaseURL(baseURL)
-		if !ok {
+		if _, ok := authProxyHostFromBaseURL(baseURL); !ok {
 			return "", fmt.Errorf("cloudgcp: Vertex lane requires a resolved auth-proxy base URL of the form http://<ip>:%d, got %q (fail closed)", authProxyPort, baseURL)
 		}
 		// R-V1 RESOLVED (the auth-proxy delivers the bearer; F2c-2c flip): the engine sends its Vertex
@@ -759,12 +760,19 @@ _c7cred="$(cat ` + credPath + `)"
 		// NO CLOUDSDK_AUTH_ACCESS_TOKEN here (engine 1.0.44's google-auth-library-nodejs never read it)
 		// and NO in-sandbox bearer at all.
 		//
-		// NO_PROXY/no_proxy pin the auth-proxy HOST so the engine reaches it DIRECTLY: the sandbox's
-		// HTTP_PROXY/HTTPS_PROXY point at Squid (renderSandboxPod), and without NO_PROXY the engine would
-		// CONNECT to the in-cluster auth-proxy THROUGH Squid — which can only reach the FQDN allowlist,
-		// not a bare in-cluster ClusterIP, so the hop would fail. The sandbox→auth-proxy egress itself is
-		// permitted by renderNamespaceAndEgress (the auth-proxy port to the proxy namespace). The values
-		// are the resolved endpoint (an http://<ip>:<port> we built), so single-quoting is shell-safe.
+		// EMPTY the inherited proxy env for the engine PROCESS so it connects DIRECTLY to the in-cluster
+		// auth-proxy (ANTHROPIC_VERTEX_BASE_URL=http://<clusterIP>:8080, by IP — the sandbox has no DNS).
+		// renderSandboxPod sets HTTP_PROXY/HTTPS_PROXY=Squid for the sandbox; we MUST clear them here
+		// because the wrapped engine (claude-code 1.0.44) does NOT honour NO_PROXY — it CONNECT-tunnels
+		// EVERY request through HTTP_PROXY (verified: bare-IP/ip:port/`*`/NODE_USE_ENV_PROXY all still
+		// tunnelled) — so an unset-NO_PROXY OR a set-NO_PROXY both route the in-cluster hop through Squid,
+		// which cannot CONNECT to a bare ClusterIP on a non-SSL port. Emptying the proxy env makes the
+		// engine dial the auth-proxy directly. This does NOT widen reach: the default-deny NetworkPolicy
+		// (renderNamespaceAndEgress) is the AUTHORITATIVE perimeter (GOAL.md tenet 3) and still confines
+		// the sandbox to its own proxy namespace only (Squid 3128 + the auth-proxy 8080); with no DNS and
+		// no proxy, the engine can reach nothing else. Empty assignments are prefix-scoped to the engine
+		// process only (the org-API/subscription lanes keep HTTP_PROXY=Squid). Values are a resolved
+		// endpoint we built, so single-quoting is shell-safe.
 		return "set -eu\n" +
 			vertexUseEnv + "=1 \\\n" +
 			vertexSkipAuthEnv + "=1 \\\n" +
@@ -772,8 +780,9 @@ _c7cred="$(cat ` + credPath + `)"
 			vertexRegionEnv + "='" + lane.vertexRegion + "' \\\n" +
 			modelEnv + "='" + lane.vertexModel + "' \\\n" +
 			vertexBaseURLEnv + "='" + baseURL + "' \\\n" +
-			noProxyEnv + "='" + host + "' \\\n" +
-			noProxyEnvLower + "='" + host + "' \\\n" +
+			// Clear the inherited Squid proxy env so the engine dials the auth-proxy directly (it ignores
+			// NO_PROXY; the NetworkPolicy, not the proxy, is the authoritative confinement — see above).
+			noProxyClearEnv + " \\\n" +
 			`claude -p --permission-mode default`, nil
 	case interfaces.BackendAnthropicAPI, interfaces.BackendUnspecified:
 		// Default Anthropic-API lane: the delivered credential is the ANTHROPIC_API_KEY; the model is
@@ -784,11 +793,11 @@ _c7cred="$(cat ` + credPath + `)"
 	}
 }
 
-// authProxyHostFromBaseURL parses a resolved auth-proxy base URL (the http://<ip>:<authProxyPort>
-// authProxyEndpoint produced) and returns the HOST (the ClusterIP) for the engine's NO_PROXY pin. It
-// fails closed (ok=false) on anything that is not http, that has no host, or whose port is not the
-// auth-proxy port — so engineRunScript never points the engine at, nor exempts from the proxy, an
-// endpoint other than the one this provider rendered. The host (no port) is what NO_PROXY matches.
+// authProxyHostFromBaseURL VALIDATES that a resolved auth-proxy base URL has the exact shape
+// authProxyEndpoint produces (http://<ip>:<authProxyPort>) and returns ok=false otherwise — so
+// engineRunScript fails closed rather than point the engine at an endpoint other than the one this
+// provider rendered. It also returns the host (the ClusterIP); the current caller uses only the
+// validation (the engine reaches the auth-proxy directly with its proxy env cleared — no NO_PROXY).
 func authProxyHostFromBaseURL(baseURL string) (string, bool) {
 	if baseURL == "" {
 		return "", false
@@ -835,10 +844,12 @@ const (
 	// R-9 retired; R-V1 resolved): engine 1.0.44's google-auth-library-nodejs never read that env, so the
 	// bearer is delivered to the auth-proxy out-of-band, not the sandbox.
 	vertexBaseURLEnv = "ANTHROPIC_VERTEX_BASE_URL"
-	// noProxyEnv/noProxyEnvLower exempt the auth-proxy host from the sandbox's HTTP(S)_PROXY (Squid), so
-	// the in-cluster engine→auth-proxy hop is DIRECT (Squid cannot reach a bare in-cluster ClusterIP).
-	noProxyEnv      = "NO_PROXY"
-	noProxyEnvLower = "no_proxy"
+	// noProxyClearEnv EMPTIES the inherited Squid proxy env for the engine PROCESS so it dials the
+	// in-cluster auth-proxy DIRECTLY. NO_PROXY would be the obvious tool, but claude-code 1.0.44 does
+	// NOT honour it (it CONNECT-tunnels every request through HTTP_PROXY regardless), so we clear the
+	// proxy env entirely instead. Safe: the default-deny NetworkPolicy (not the proxy) is the
+	// authoritative perimeter and still confines the sandbox to its own proxy namespace.
+	noProxyClearEnv = "HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy="
 	modelEnv        = "ANTHROPIC_MODEL"
 )
 

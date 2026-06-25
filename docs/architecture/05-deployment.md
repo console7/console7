@@ -75,7 +75,8 @@ flowchart TB
   %% sandbox egress path (the only way out)
   SBP --> PROXY --> FW
   FW ==>|"allowlisted only"| ANT
-  %% Vertex lane: engine reaches the per-session auth-proxy directly (NO_PROXY bypasses Squid);
+  %% Vertex lane: the engine's proxy env is cleared so it reaches the per-session auth-proxy directly
+  %% (the engine ignores NO_PROXY; the NetworkPolicy stays the authoritative confinement);
   %% the auth-proxy attaches the delivered bearer and egresses via NAT to Vertex.
   SBP -->|"Vertex (skip-auth; direct hop)"| AUTHPRX
   KBP -->|"deliver Vertex bearer (to the auth-proxy, NOT the sandbox)"| AUTHPRX

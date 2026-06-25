@@ -93,9 +93,11 @@ credential into a **trusted auth-proxy pod** the sandbox reaches over the networ
   Vertex-minting identity is the control-plane workload SA — least privilege, tenet 4 — and the kill
   switch is revoking that one SA's predict role.) The engine is configured with `CLAUDE_CODE_USE_VERTEX=1`,
   `CLAUDE_CODE_SKIP_VERTEX_AUTH=1`, `ANTHROPIC_VERTEX_BASE_URL=<auth-proxy address>`,
-  `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus `NO_PROXY=<auth-proxy host>` so the in-cluster
-  engine→auth-proxy hop bypasses Squid (Squid cannot reach a bare in-cluster ClusterIP). **No bearer is
-  ever delivered into the sandbox pod; the sandbox holds no GCP credential and stays metadata-free.**
+  `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus the engine's `HTTP_PROXY`/`HTTPS_PROXY` **emptied**
+  so the in-cluster engine→auth-proxy hop is direct (verified F2c-2d: claude-code 1.0.44 IGNORES `NO_PROXY`
+  and CONNECT-tunnels every request through `HTTP_PROXY`, which can't reach a bare ClusterIP; clearing the
+  proxy env makes it dial direct, and the default-deny NetworkPolicy stays the authoritative confinement).
+  **No bearer is ever delivered into the sandbox pod; the sandbox holds no GCP credential and stays metadata-free.**
 - **Egress / tenet 3:** sandbox→auth-proxy is an in-cluster `NetworkPolicy` hop (`renderNamespaceAndEgress`
   opens the auth-proxy port to the proxy namespace; the sandbox reaches it by IP — there is no in-sandbox
   DNS); the auth-proxy's own egress to the pinned Vertex host is the proxy namespace's sanctioned NAT.
@@ -104,8 +106,8 @@ credential into a **trusted auth-proxy pod** the sandbox reaches over the networ
 - **cloud-gcp changes (done):** `engineRunScript` (Vertex lane) — **DROPPED `CLOUDSDK_AUTH_ACCESS_TOKEN`**
   (dead; the **RISKS R-9** gosec suppression was retired with it) and the in-sandbox Vertex credential
   read; set the gateway env above (incl. `ANTHROPIC_VERTEX_BASE_URL` resolved at RunTime via
-  `authProxyEndpoint` + `NO_PROXY`); render the per-session auth-proxy Deployment + Service + NetworkPolicy
-  (modelled on the Squid renderer).
+  `authProxyEndpoint`, and the engine's proxy env cleared — F2c-2d, since the engine ignores `NO_PROXY`);
+  render the per-session auth-proxy Deployment + Service + NetworkPolicy (modelled on the Squid renderer).
 - **The auth-proxy artifact:** a tiny Go reverse proxy (read delivered bearer → set header → forward),
   built as a **distinct signed image** (not fused with the sandbox base image — distinct trust tiers,
   ARCHITECTURE.md §6.4). Token refresh = the control plane re-delivers a fresh bearer (`DeliverInference`)
@@ -130,7 +132,7 @@ credential into a **trusted auth-proxy pod** the sandbox reaches over the networ
   - **Adopt LiteLLM as the gateway:** proves the contract but a large, unaudited dependency next to
     untrusted code (a recent LiteLLM release was compromised). Build the ~tiny proxy instead.
   - **Pre-minted bearer to the engine (the old R-V1 lever):** no consumable path exists; engine ignores it.
-- **Tests:** render test (engine env points at the auth-proxy + skip-auth + `NO_PROXY`, **no**
+- **Tests:** render test (engine env points at the auth-proxy + skip-auth + the proxy env **cleared**, **no**
   `CLOUDSDK_AUTH_ACCESS_TOKEN`, no in-sandbox credential read, no project-overriding vars; auth-proxy
   Deployment/NetworkPolicy present) — DONE; hermetic auth-proxy unit test (reads an injected delivered
   bearer, sets the header, forwards). Live proof is the exit run (F4).
@@ -174,7 +176,7 @@ Pick ONE; **per-seam impersonation is the lighter, faithful local path**, in-clu
 
 ## Durable lessons (bake into RUNBOOK / DESIGN / future work)
 
-1. **The engine consumes Vertex auth via google-auth-library (ADC), never a pre-minted bearer env**, so the supported way to control it is the documented **gateway contract** (`ANTHROPIC_VERTEX_BASE_URL` + `CLAUDE_CODE_SKIP_VERTEX_AUTH=1` → the engine sends no Google credential, the gateway injects it). `CLOUDSDK_AUTH_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN` are NOT read by `google-auth-library-nodejs` (gcloud-only). **The gateway belongs in an own (trusted) per-session pod that is fed a control-plane-DELIVERED bearer** — minted by the control plane's workload SA and delivered into the proxy pod's tmpfs (the proxy holds **no** Workload Identity of its own, so the single Vertex-minting identity stays the control-plane SA — least privilege). It is **NOT a sidecar in the untrusted sandbox pod** (a shared pod leaks the bearer/identity to the engine), and **NOT inside Squid** (it can't add headers in a CONNECT/TLS tunnel without SSL-bump). The point of the design is that no GCP credential ever enters the metadata-free sandbox. The in-cluster engine→auth-proxy hop also needs `NO_PROXY=<auth-proxy host>` so it bypasses Squid (Squid can't reach a bare ClusterIP).
+1. **The engine consumes Vertex auth via google-auth-library (ADC), never a pre-minted bearer env**, so the supported way to control it is the documented **gateway contract** (`ANTHROPIC_VERTEX_BASE_URL` + `CLAUDE_CODE_SKIP_VERTEX_AUTH=1` → the engine sends no Google credential, the gateway injects it). `CLOUDSDK_AUTH_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN` are NOT read by `google-auth-library-nodejs` (gcloud-only). **The gateway belongs in an own (trusted) per-session pod that is fed a control-plane-DELIVERED bearer** — minted by the control plane's workload SA and delivered into the proxy pod's tmpfs (the proxy holds **no** Workload Identity of its own, so the single Vertex-minting identity stays the control-plane SA — least privilege). It is **NOT a sidecar in the untrusted sandbox pod** (a shared pod leaks the bearer/identity to the engine), and **NOT inside Squid** (it can't add headers in a CONNECT/TLS tunnel without SSL-bump). The point of the design is that no GCP credential ever enters the metadata-free sandbox. For the in-cluster engine→auth-proxy hop, **empty the engine's `HTTP_PROXY`/`HTTPS_PROXY`** so it dials the proxy directly: claude-code 1.0.44 **does NOT honour `NO_PROXY`** (it CONNECT-tunnels every request through `HTTP_PROXY`, which can't reach a bare ClusterIP) — clearing the proxy env is the working mechanism, and the default-deny NetworkPolicy stays the authoritative confinement (verified by the F2c-2d local integration test).
 2. **A single local identity cannot hold the production identity split.** The control plane's components (secrets/keybroker/evidence) have deliberately distinct, scoped SAs; collapsing them into one ADC forces either a human holding the lineage CA or fused SAs — both tenet violations. Run with per-seam impersonation locally, or in-cluster.
 3. **Credential delivery must gate pod readiness.** Inject (a bounded `kubectl exec`) cannot precede pod-Ready. The branch gates at **both** points: `Provision` waits pod `Ready` before returning (so delivery doesn't race a cold gVisor scale-from-zero), and `kubeEngineRunner.Run` re-checks pod `Ready` + waits proxy `Available` before the first exec. The duplicate is deliberate defence-in-depth. **No mutex is held across either wait** — an earlier "Provision holds `p.mu`" concern was unfounded (no such lock exists in the provider or the orchestrator).
 4. **GitHub App PR-create needs `contents:read`** in addition to `pull_requests:write` (to read the head/base refs), and a brief **post-push retry** for ref eventual-consistency.

@@ -109,8 +109,9 @@ This artifact is **not yet wired into a session** — that is **F2c**:
 
 - **F2c (wiring):** render the per-session auth-proxy Deployment alongside Squid; **redirect** the minted
   Vertex bearer delivery to this pod (not the sandbox); set the engine env
-  (`CLAUDE_CODE_SKIP_VERTEX_AUTH=1`, `ANTHROPIC_VERTEX_BASE_URL`=this proxy, **`NO_PROXY`** for it so the
-  engine reaches it directly rather than via Squid); add the **sandbox→proxy** and **proxy→Vertex**
+  (`CLAUDE_CODE_SKIP_VERTEX_AUTH=1`, `ANTHROPIC_VERTEX_BASE_URL`=this proxy, and **empty the engine's
+  `HTTP_PROXY`/`HTTPS_PROXY`** so it dials this proxy directly — the engine ignores `NO_PROXY`, and the
+  NetworkPolicy remains the authoritative egress confinement); add the **sandbox→proxy** and **proxy→Vertex**
   NetworkPolicies (the proxy needs its own egress to the Vertex host); lock out `gcpAuthRefresh` in
   `policyHelper`.
 - **F2b (deploy):** ensure the minting (workload) SA holds **only** the least-privilege Vertex predict
