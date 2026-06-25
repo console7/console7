@@ -299,8 +299,95 @@ def svg_sparklines(bundle):
            f'font-family="inherit">' + "\n".join(px) + '</svg>'
 
 
+# ---- panel 0 (lead): energy state — stored PE (rank) vs kinetic KE (≈0 today) --------
+def _pips(x, y, v, colour):  # 3 cells, filled up to integer level v (0..3)
+    return "".join(f'<rect x="{x+i*11:.0f}" y="{y}" width="9" height="9" rx="1.5" '
+                   f'fill="{colour if i < v else "#e6e6e6"}"/>' for i in range(3))
+
+
+def svg_energy(bundle):
+    """The decision view, typed by the energy frame: ONE ranking axis = stored potential
+    energy (carry = mass×height, coupled by reachability); KE (reach toll) is a per-row
+    state glyph, ~0 today; the canary is the pressure gauge. Deliberately 1-D — the only
+    thing you act on per module is how much budget — with the drivers as decomposition,
+    not extra axes (resolves the 'six dimensions on two' overload)."""
+    rows = sorted(bundle.get("ledger", []), key=lambda r: -r.get("carry", 0))
+    if not rows:
+        return ""
+    summ = bundle.get("summary", {})
+    tr = {r["module"]: r for r in bundle.get("track_record", [])}
+    maxc = max((r.get("carry", 0) for r in rows), default=1) or 1
+    rh, y0, BX, BMAX = 40, 56, 162, 268
+    Hs = y0 + len(rows) * rh + 96
+    px = ['<text x="150" y="22" font-size="11" fill="#888" text-anchor="end">module</text>',
+          f'<text x="{BX}" y="22" font-size="11" fill="#888">potential energy = carry '
+          f'(mass × height) →</text>',
+          '<text x="535" y="22" font-size="11" fill="#888">h·m</text>',
+          '<text x="660" y="22" font-size="11" fill="#888">kinetic (reach toll)</text>',
+          '<text x="862" y="22" font-size="11" fill="#888">canary</text>',
+          f'<line x1="{BX}" y1="34" x2="{BX}" y2="{y0+len(rows)*rh:.0f}" stroke="#eee"/>']
+    for i, r in enumerate(rows):
+        yc = y0 + i * rh + rh / 2
+        sub = r.get("sub", "")
+        colour = SUB_COLOUR.get(sub, "#607d8b")
+        blen = r.get("carry", 0) / maxc * BMAX
+        rec = tr.get(r["module"], {})
+        cumN, cumS = rec.get("cum_noise", 0), rec.get("cum_signal", 0)
+        px.append(f'<text x="150" y="{yc+4:.0f}" font-size="12.5" text-anchor="end" '
+                  f'fill="#222">{html.escape(_short(r["module"]))}</text>')
+        px.append(f'<rect x="{BX}" y="{yc-9:.0f}" width="{max(blen,1.5):.1f}" height="18" '
+                  f'rx="2.5" fill="{colour}"><title>{html.escape(r["module"])} — '
+                  f'{html.escape(sub)}; deep S={r.get("S")}, broad C={r.get("C")} '
+                  f'(indeg {r.get("indeg")}), reach {r.get("reach_loc",0):,} LoC'
+                  f'</title></rect>')
+        px.append(f'<text x="{BX+max(blen,1.5)+6:.1f}" y="{yc+4:.0f}" font-size="11.5" '
+                  f'fill="#444" font-weight="600">{r.get("carry",0):.1f}'
+                  f'<tspan fill="#999" font-weight="400"> {html.escape(sub)}</tspan></text>')
+        # decomposition: which factor builds the PE — height (deep) vs mass (broad)
+        px.append(f'<text x="525" y="{yc+4:.0f}" font-size="9.5" fill="#888">h</text>'
+                  + _pips(535, yc - 4, r.get("S", 0), "#5c6bc0"))
+        px.append(f'<text x="575" y="{yc+4:.0f}" font-size="9.5" fill="#888">m</text>'
+                  + _pips(585, yc - 4, r.get("C", 0), "#26a69a"))
+        # kinetic state: rail + dot. at_rest (KE=0) → grey dot parked left
+        moving = cumS > 0 or rec.get("signal_trend") == "rising"
+        rx0, rx1 = 660, 742
+        px.append(f'<line x1="{rx0}" y1="{yc:.0f}" x2="{rx1}" y2="{yc:.0f}" stroke="#e0e0e0"/>')
+        dx = rx1 - 4 if moving else rx0 + 4
+        dc = "#c62828" if moving else "#bdbdbd"
+        px.append(f'<circle cx="{dx}" cy="{yc:.0f}" r="4" fill="{dc}"/>')
+        px.append(f'<text x="{rx1+8}" y="{yc+4:.0f}" font-size="11" '
+                  f'fill="{"#c62828" if moving else "#999"}">'
+                  f'{"moving" if moving else "at rest"}</text>')
+        # canary (noise pressure): amber dot sized by cumulative disclosures, grey if quiet
+        cc = "#ef6c00" if cumN else "#d7dde0"
+        cr = 3 + math.sqrt(cumN)
+        px.append(f'<circle cx="866" cy="{yc:.0f}" r="{cr:.1f}" fill="{cc}" '
+                  f'fill-opacity="0.85"><title>cumulative CVE disclosures (noise): '
+                  f'{cumN}</title></circle>')
+        px.append(f'<text x="884" y="{yc+4:.0f}" font-size="11" '
+                  f'fill="{"#444" if cumN else "#aaa"}">{cumN}</text>')
+    # decoupled band — the filter made visible (no PE pointed at us)
+    fy = y0 + len(rows) * rh + 16
+    decoupled = summ.get("graph_only", 0) + (summ.get("build_reachable", 0)
+                                             - summ.get("directly_imported", 0))
+    px.append(f'<rect x="0" y="{fy}" width="{FW}" height="40" rx="4" fill="#f4f5f6"/>')
+    px.append(f'<text x="14" y="{fy+17:.0f}" font-size="11.5" fill="#777">↓ ~{decoupled} '
+              f'modules decoupled — {summ.get("graph_only",0)} graph-only (R=0) + '
+              f'{summ.get("build_reachable",0)-summ.get("directly_imported",0)} reachable '
+              f'but below the direct-import scoring line: no potential energy pointed at '
+              f'Console7.</text>')
+    px.append(f'<text x="14" y="{fy+33:.0f}" font-size="11.5" fill="#777">The loudest '
+              f'canary, <tspan font-style="italic">x/crypto</tspan> (cumN 19), sits here — '
+              f'pressure without coupling (present, never reached): noise ≠ risk until the '
+              f'latch (reachability) trips.</text>')
+    return f'<svg width="{FW}" height="{Hs}" viewBox="0 0 {FW} {Hs}" font-family="inherit" ' \
+           f'role="img" aria-label="Energy state ladder of dependencies">' \
+           + "\n".join(px) + '</svg>'
+
+
 def render(data):
     body, summ = svg(data)
+    energy = svg_energy(data)
     funnel, _ = svg_funnel(summ)
     sparks = svg_sparklines(data)
     sub = (f'closure {summ.get("modules_in_closure","?")} · '
@@ -308,39 +395,59 @@ def render(data):
            f'direct {summ.get("directly_imported","?")} · '
            f'Tier-1 core direct imports {summ.get("core_direct_imports","?")} '
            f'(tenet: must be 0)')
-    spark_section = (f'<h2>Track records — is exposure trending?</h2>\n'
-                     f'<svg width="{FW}" height="0"></svg>\n{sparks}\n'
-                     f'<p class="note">Per module: grey bars = NEW CVEs disclosed that '
-                     f'quarter (the canary, a property of the package); red = how many '
-                     f'were REACHABLE on our call path (the toil, a property of our usage). '
-                     f'At t0 signal is flat at 0 everywhere — the spike in <code>x/crypto</code> '
-                     f'noise with no signal is the INSULATED archetype, measured.</p>'
+    spark_section = (f'<h2>Kinetic detail — canary (pressure) vs toll (KE), over time</h2>\n'
+                     f'{sparks}\n'
+                     f'<p class="note">The kinetic readout, unrolled in time. Grey bars = '
+                     f'CVEs disclosed that quarter (pressure, a property of the package); '
+                     f'red = how many were REACHABLE on our call path (KE — the toll, a '
+                     f'property of our usage). Honesty note: the red line is solid only at '
+                     f't0 — reachability is measured against a build, and the only build '
+                     f'that exists is today\'s; pre-adoption KE is 0 by construction, not '
+                     f'by ten measurements. <code>x/crypto</code>\'s pressure spike with '
+                     f'flat KE is the INSULATED archetype: a loud canary that never '
+                     f'coupled.</p>'
                      ) if sparks else ''
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Console7 — dependency lifecycle report</title>
+<title>Console7 — dependency risk: potential vs kinetic energy</title>
 <style>
  body{{font:14px -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#222;
    margin:24px;background:#fff;max-width:1040px}}
  h1{{font-size:19px;margin:0 0 2px}} h2{{font-size:15px;margin:30px 0 4px}}
- .sub{{color:#666;font-size:12.5px;margin:0 0 10px}}
+ .sub{{color:#555;font-size:13px;margin:0 0 4px}}
+ .spine{{color:#222;font-size:13px;margin:2px 0 14px;font-weight:600}}
  .note{{color:#777;font-size:12px;margin-top:6px;max-width:900px}}
  rect,circle,polyline{{cursor:default}} g:hover circle{{fill-opacity:0.95}}
 </style></head><body>
-<h1>Dependency lifecycle — strategic report</h1>
+<h1>Dependency risk — potential vs kinetic energy</h1>
+<p class="spine">Risk is <em>stored</em> as potential energy (concentration, coupled by
+reachability) and <em>released</em> as kinetic energy (the reachable-CVE toll). The
+canary (noise) is the pressure gauge; the latch is reachability.</p>
 <p class="sub">{html.escape(sub)}</p>
-<h2>Disposition map — where to spend the hygiene budget</h2>
+<h2>Energy state — what's stored (rank) vs what's moving (≈0 today)</h2>
+{energy}
+<p class="note"><b>Potential energy</b> = <code>carry</code>, ranked: mass (broad =
+fan-out, teal) × height (deep = lock-in, indigo), coupled to us by reachability — this is
+what you <em>pre-position</em> against. <b>Kinetic energy</b> = reachable-CVE toll: every
+module is <em>at rest</em> (0 reachable) today. <b>Canary</b> = cumulative disclosures
+(pressure). The frame isn't conservative — a CVE firing doesn't drain a module's PE (the
+reservoir refills), so you can't lower PE; you can only strengthen the latch (fork-
+readiness, the seam) and the damping (MTTR). Spend tracks PE: the deep spine
+(<code>grpc/protobuf/api/oauth2</code>) first; the swappable services stay low while the
+seam holds (assert <code>core direct imports == 0</code>).</p>
+<h2>Coupling — how much stored energy is even pointed at us</h2>
+{funnel}
+{spark_section}
+<h2>Why the ranking — PE structure (mass × height)</h2>
 <svg width="{W}" height="{H}" viewBox="0 0 {W} {H}" font-family="inherit"
   role="img" aria-label="Substitutability by concentration scatter of dependencies">
 {body}
 </svg>
-<p class="note">Substitutability (depth/lock-in) × concentration (fan-out). Bubble size =
-reachable LoC; colour = disposition. Top-right = non-substitutable × high-fan-out =
-the spine to keep behind the <code>sdk/interfaces</code> seam and fund fork-readiness
-for; bottom-left = inline / VEX. Hover a bubble for its axis breakdown.</p>
-<h2>Reachability — inherited blast radius vs what you actually reach</h2>
-{funnel}
-{spark_section}
+<p class="note">The one genuinely 2-D thing, as a drill-down: height (deep / substitut-
+ability, Y) × mass (broad / fan-out, X), bubble = reachable LoC, colour = disposition.
+Top-right = high PE you cannot exit (fund fork-readiness); bottom-left = inline / VEX.
+This explains <em>why</em> a module ranks where it does above — it is not a second
+decision surface. Hover a bubble for its axis breakdown.</p>
 <p class="note">Generated by <code>scripts/dep-viz.py</code> from
 <code>dep-lifecycle-model.py --json</code> (+ <code>--track</code>) — self-contained,
 zero egress. Strategy / defence-in-depth (tenet 2), not a gate.</p>
