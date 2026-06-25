@@ -2,6 +2,9 @@
 
 > Status: working model (strategy note, not a normative spec). Companion tool:
 > [`scripts/dep-lifecycle-model.py`](../../scripts/dep-lifecycle-model.py).
+> Strategic companion paper:
+> [`dependency-risk-energy-model.md`](./dependency-risk-energy-model.md) reframes these
+> axes as a potential/kinetic energy model (PE · KE · hazard · drift‑cost · containment).
 > Source framing: *"SDLC of the Future — L2 Working Discussion"*, **Part III — The
 > Supply‑Chain Watershed** and **Part V — Measuring Distance from Modern**.
 > Binds to the repo SDLC standard: **CO‑05** (supply‑chain integrity), **CO‑11**
