@@ -310,7 +310,22 @@ func (e *netpolEgressController) Set(ctx context.Context, h interfaces.SandboxHa
 	if err := e.run.kubectlApply(ctx, renderPerSessionProxy(h.ID, conf, squidConfigHash(conf))); err != nil {
 		return fmt.Errorf("cloudgcp: set per-session egress proxy: %w", err)
 	}
-	return e.run.kubectlApply(ctx, renderNamespaceAndEgress(h.ID, allowlist))
+	// On the Vertex lane, render the per-session Vertex auth-proxy INTO the same proxy namespace,
+	// alongside Squid (the credential-attaching gateway the engine reaches Vertex through). The
+	// resolved per-session lane is not available here (it rides on EngineTask at RunTask time — see
+	// Config.VertexModel), so this is gated on the config-derived vertexConfigured() signal:
+	// render-always for a Vertex-configured provider, never for a non-Vertex one. It is INERT this PR
+	// (nothing points the engine at it, no bearer delivered into it), so an idle auth-proxy pod is the
+	// only effect. The pin env (project/region/model) is filled from Config; the per-session facts
+	// F2c-2c threads through will narrow it. Render the auth-proxy BEFORE the sandbox perimeter (same
+	// ordering as Squid) so its Service ClusterIP exists before a later resolve.
+	if e.cfg.vertexConfigured() {
+		lane := vertexLane{model: e.cfg.VertexModel, region: e.cfg.VertexRegion, project: e.cfg.VertexProject}
+		if err := e.run.kubectlApply(ctx, renderVertexAuthProxy(h.ID, e.cfg, lane)); err != nil {
+			return fmt.Errorf("cloudgcp: set per-session Vertex auth-proxy: %w", err)
+		}
+	}
+	return e.run.kubectlApply(ctx, renderNamespaceAndEgress(h.ID, allowlist, e.cfg.vertexConfigured()))
 }
 
 // Clear deletes BOTH the sandbox namespace and its per-session proxy namespace, each of which reaps
@@ -408,6 +423,33 @@ func (k *kubeEngineRunner) seedWorkspace(ctx context.Context, h interfaces.Sandb
 	return nil
 }
 
+// waitRunReady is the readiness GATE before the first `kubectl exec` (B11): the sandbox pod must be
+// Ready and its per-session egress proxy Deployment Available, plus — on the Vertex lane — the
+// per-session Vertex auth-proxy Deployment Available. Without it the managed-settings `test -s`
+// misfires on a scheduled-but-not-started pod ("policy absent"), and the engine's inference egress
+// races a not-yet-listening Squid (or auth-proxy). Each wait fails CLOSED on a timeout. The order
+// (pod, then Squid, then auth-proxy) is asserted by TestRun_ReadinessGateBeforeFirstExec.
+//
+// The Vertex auth-proxy gate is on the config-derived vertexConfigured() signal (the resolved
+// per-session lane is unavailable here; Set rendered the auth-proxy under the SAME gate, so the gate
+// and the render agree). It is INERT this PR — nothing points the engine at the auth-proxy yet
+// (F2c-2c sets ANTHROPIC_VERTEX_BASE_URL via authProxyEndpoint after this gate) — so it only ensures
+// readiness, it does not change the engine env.
+func (k *kubeEngineRunner) waitRunReady(ctx context.Context, h interfaces.SandboxHandle) error {
+	if err := k.run.waitReady(ctx, "pod/"+h.ID, h.ID, "condition=Ready", readyTimeout); err != nil {
+		return fmt.Errorf("cloudgcp: sandbox pod not Ready before run: %w", err)
+	}
+	if err := k.run.waitReady(ctx, "deployment/"+proxyServiceName, proxyNS(h.ID), "condition=Available", readyTimeout); err != nil {
+		return fmt.Errorf("cloudgcp: per-session egress proxy not Available before run: %w", err)
+	}
+	if k.cfg.vertexConfigured() {
+		if err := k.run.waitReady(ctx, "deployment/"+authProxyServiceName, proxyNS(h.ID), "condition=Available", readyTimeout); err != nil {
+			return fmt.Errorf("cloudgcp: per-session Vertex auth-proxy not Available before run: %w", err)
+		}
+	}
+	return nil
+}
+
 // Run verifies the locked managed-settings are present (fail closed otherwise), runs `claude -p`
 // headless under them, and captures the commit the engine produced on the working branch. It NEVER
 // pushes, merges, or widens egress; it returns only the digest/head/summary (cloud.go EngineResult
@@ -422,15 +464,9 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	ctx, cancel := context.WithTimeout(ctx, task.Timeout)
 	defer cancel()
 
-	// 0. Pod-readiness GATE before the first exec (B11): wait for the sandbox pod to be Ready and its
-	// per-session egress proxy Deployment to be Available. Without this the managed-settings `test -s`
-	// below misfires on a scheduled-but-not-started pod ("policy absent"), and the engine's inference
-	// egress races a not-yet-listening Squid. Fail closed on a timeout — never run against an unready pod.
-	if err := k.run.waitReady(ctx, "pod/"+h.ID, h.ID, "condition=Ready", readyTimeout); err != nil {
-		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: sandbox pod not Ready before run: %w", err)
-	}
-	if err := k.run.waitReady(ctx, "deployment/"+proxyServiceName, proxyNS(h.ID), "condition=Available", readyTimeout); err != nil {
-		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: per-session egress proxy not Available before run: %w", err)
+	// 0. Pod-readiness GATE before the first exec (B11). Fail closed on a timeout.
+	if err := k.waitRunReady(ctx, h); err != nil {
+		return interfaces.EngineResult{}, err
 	}
 
 	// 1. Fail closed unless the LOCKED managed-settings are already present in the pod. They are
@@ -1041,6 +1077,25 @@ func proxyNS(id string) string { return id + proxyNamespaceSuffix }
 // inject HTTPS_PROXY.
 const proxyServiceName = "egress-proxy"
 
+// authProxyPort is the listen port the Vertex auth-proxy serves on (its C7_AUTHPROXY_LISTEN
+// default, ":8080"). The sandbox reaches the auth-proxy on this port (F2c-2c will point
+// ANTHROPIC_VERTEX_BASE_URL at it); the auth-proxy's own ingress NetworkPolicy admits only this
+// session's sandbox on this port, mirroring Squid's proxyPort discipline.
+const authProxyPort = 8080
+
+// authProxyServiceName is the per-session Vertex auth-proxy Service/Deployment name (within the
+// session's proxy namespace, alongside Squid, so a constant name is unambiguous). It is DISTINCT
+// from proxyServiceName (Squid) — they are two separate pods in the same namespace.
+const authProxyServiceName = "vertex-auth-proxy"
+
+// authProxyBearerPath is the in-pod file the auth-proxy reads its delivered Vertex bearer from
+// (its C7_AUTHPROXY_BEARER_FILE). It lives under a `medium: Memory` emptyDir mounted into the
+// AUTH-PROXY pod (NOT the sandbox), so the credential is tmpfs-only and dies with the pod. F2c-2b
+// delivers the minted short-lived bearer here; THIS PR only renders the empty mount (inert — no
+// credential is delivered yet). The value is a filesystem PATH, not a credential, so gosec G101
+// is a false positive (the same class as credentialPath / RISKS R-5).
+const authProxyBearerPath = "/run/console7/credential" //nolint:gosec // G101 false positive: a tmpfs path, not a secret value; RISKS R-5
+
 // squidImage is the digest-pinned forward-proxy image (Squid 6.x on Ubuntu 24.04, Canonical-
 // maintained, content-addressed — the bytes can't change under us). It is the same hardened image
 // the sandbox runs behind; an adopter MAY mirror it into their in-tenancy Artifact Registry (the
@@ -1065,6 +1120,29 @@ func (r *kubeRunner) proxyEndpoint(ctx context.Context, proxyNamespace string) (
 		return "", fmt.Errorf("cloudgcp: per-session proxy Service %s/%s has no usable ClusterIP (got %q) — refusing to provision a sandbox with no resolvable egress proxy (fail closed)", proxyNamespace, proxyServiceName, ip)
 	}
 	return fmt.Sprintf("http://%s:%d", ip, proxyPort), nil
+}
+
+// authProxyEndpoint resolves the per-session Vertex auth-proxy Service's ClusterIP and returns the
+// base URL (http://<ip>:8080) the sandbox reaches it by. It mirrors proxyEndpoint (the sandbox has
+// no DNS, so the auth-proxy is reached by IP, never name). FAIL-CLOSED: a missing/headless/
+// unparseable ClusterIP errors rather than yielding a broken base URL.
+//
+// USED-BY-F2c-2c: F2c-2c sets the engine's ANTHROPIC_VERTEX_BASE_URL to this value (the engine then
+// sends its Vertex predict calls here with no Google Authorization; the auth-proxy attaches the
+// bearer). It is added now, with the rest of the topology, so the resolver and the pod it resolves
+// land together; this PR does NOT yet wire it into the engine env (that is the F2c-2c change). It is
+// referenced (kept non-dead) by the lifecycle's readiness-context comment and the render test below.
+func (r *kubeRunner) authProxyEndpoint(ctx context.Context, proxyNamespace string) (string, error) {
+	out, err := r.run(ctx, "kubectl", nil,
+		"get", "svc", authProxyServiceName, "-n", proxyNamespace, "-o", "jsonpath={.spec.clusterIP}")
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(out))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("cloudgcp: per-session Vertex auth-proxy Service %s/%s has no usable ClusterIP (got %q) — refusing to point the engine at an unresolvable auth-proxy (fail closed)", proxyNamespace, authProxyServiceName, ip)
+	}
+	return fmt.Sprintf("http://%s:%d", ip, authProxyPort), nil
 }
 
 // renderSquidConf builds the full per-session squid.conf: the stateless policy-gateway preamble, the
@@ -1271,13 +1349,178 @@ func renderPerSessionProxy(nsID string, squidConf, configHash string) []byte {
 	)
 }
 
+// vertexAuthProxyTemplate is the per-session Vertex auth-proxy manifest: a hardened Deployment
+// (mirroring Squid's hardening — non-root uid 65532, read-only root FS, dropped caps, RuntimeDefault
+// seccomp, no automounted SA token, readiness-gated), a Service on the auth-proxy port, and its OWN
+// ingress NetworkPolicy admitting ONLY this session's sandbox namespace on that port. It is emitted
+// INTO the session's existing proxy namespace (the one renderPerSessionProxy created), alongside
+// Squid — NOT a sandbox sidecar (a sidecar would share the sandbox pod and expose the delivered
+// Vertex bearer to the untrusted engine; sandbox/vertex-auth-proxy/README.md). It carries NO
+// HTTPS_PROXY: the auth-proxy egresses DIRECT to Vertex via the proxy namespace's NAT + DNS (like
+// Squid), pinning its own upstream in code from CLOUD_ML_REGION. The bearer file is a `medium:
+// Memory` emptyDir mounted into THIS pod only; F2c-2b delivers the minted token there (this PR
+// renders the empty mount — inert). Args: 1=proxy namespace, 2=session id (the ingress
+// session-selector value), 3=image, 4=auth-proxy port, 5=env block (indented; carries the bearer
+// file path among the pin env).
+const vertexAuthProxyTemplate = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vertex-auth-proxy
+  namespace: %[1]s
+  labels:
+    app: vertex-auth-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vertex-auth-proxy
+  template:
+    metadata:
+      labels:
+        app: vertex-auth-proxy
+    spec:
+      # No nodeSelector: the gVisor sandbox pool's structural taint keeps this untolerating
+      # Deployment off it, so it schedules on the control pool (which has the sanctioned NAT egress
+      # to the Vertex host) — the same placement as the Squid proxy.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vertex-auth-proxy
+          image: %[3]s
+          ports:
+            - name: authproxy
+              containerPort: %[4]d
+          env:
+%[5]s          # Gate Service Endpoints on the auth-proxy actually listening (no connect-before-listen race).
+          readinessProbe:
+            tcpSocket:
+              port: %[4]d
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # The control-plane-delivered Vertex bearer (F2c-2b) lands here, in tmpfs only. This PR
+            # renders the empty mount (inert): the auth-proxy fails closed (503, forwards nothing) on
+            # an absent/empty bearer file, so an un-delivered proxy never serves unauthenticated.
+            - name: bearer
+              mountPath: /run/console7
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+      volumes:
+        - name: bearer
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vertex-auth-proxy
+  namespace: %[1]s
+spec:
+  selector:
+    app: vertex-auth-proxy
+  ports:
+    - name: authproxy
+      port: %[4]d
+      targetPort: %[4]d
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console7-authproxy-ingress
+  namespace: %[1]s
+spec:
+  podSelector:
+    matchLabels:
+      app: vertex-auth-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              console7.dev/session: %[2]s
+      ports:
+        - protocol: TCP
+          port: %[4]d
+`
+
+// renderVertexAuthProxy renders the per-session Vertex auth-proxy (Deployment + Service + ingress
+// NetworkPolicy) INTO the session's proxy namespace, alongside Squid. nsID is the sandbox's
+// crypto-random handle id (a valid DNS-1123 label, safe unquoted as a name/label value); the proxy
+// lives in proxyNS(nsID). The auth-proxy's request-shape pin (anthropic predict verb) is always
+// enforced in the proxy binary; the project/region/model env here further pin it per session. Every
+// dynamic env VALUE (region/project/model — from the lane facts/config) is json-encoded (jsonScalar)
+// so an untrusted value cannot break out of its YAML field.
+//
+// LANE-GATING / INERTNESS: the resolved inference LANE is not available at provision/Set time (it
+// rides on EngineTask, at RunTask time — see Config.VertexModel), so the lifecycle gates this render
+// on the config-derived vertexConfigured() signal rather than the per-session lane. The pod is INERT
+// this PR regardless: nothing points the engine at it (F2c-2c sets ANTHROPIC_VERTEX_BASE_URL) and no
+// bearer is delivered into it (F2c-2b), so it simply runs and is reachable. The lane parameter
+// carries the per-session routing facts F2c-2c will thread through; here they only fill the pin env.
+func renderVertexAuthProxy(nsID string, cfg Config, lane vertexLane) []byte {
+	// The auth-proxy env contract (sandbox/vertex-auth-proxy/README.md): C7_AUTHPROXY_LISTEN, the
+	// region (CLOUD_ML_REGION), the project/model pins, and the delivered bearer-file path. NO
+	// HTTPS_PROXY — the auth-proxy reaches Vertex directly via the namespace's NAT, pinning its own
+	// upstream from CLOUD_ML_REGION. NO credential is rendered (the bearer is DELIVERED into the
+	// bearer file by F2c-2b, never baked into the pod spec/etcd).
+	var env strings.Builder
+	fmt.Fprintf(&env, "            - name: C7_AUTHPROXY_LISTEN\n              value: %s\n", jsonScalar(fmt.Sprintf(":%d", authProxyPort)))
+	fmt.Fprintf(&env, "            - name: CLOUD_ML_REGION\n              value: %s\n", jsonScalar(lane.region))
+	fmt.Fprintf(&env, "            - name: C7_AUTHPROXY_PROJECT\n              value: %s\n", jsonScalar(lane.project))
+	fmt.Fprintf(&env, "            - name: C7_AUTHPROXY_MODEL\n              value: %s\n", jsonScalar(lane.model))
+	fmt.Fprintf(&env, "            - name: C7_AUTHPROXY_BEARER_FILE\n              value: %s\n", jsonScalar(authProxyBearerPath))
+	return fmt.Appendf(nil, vertexAuthProxyTemplate,
+		proxyNS(nsID),
+		nsID,
+		jsonScalar(cfg.AuthProxyImage),
+		authProxyPort,
+		env.String(),
+	)
+}
+
+// vertexLane carries the per-session Vertex routing facts renderVertexAuthProxy pins the auth-proxy
+// to (the project/region/model env). They are non-secret routing facts, never a credential. They are
+// not yet supplied per-session at provision/Set time (the lane rides on EngineTask at RunTask time);
+// F2c-2c threads the resolved facts through, at which point the empty-default render-always topology
+// becomes lane-and-fact-gated. The Config's VertexModel fills model when present.
+type vertexLane struct {
+	project string
+	region  string
+	model   string
+}
+
 // renderNamespaceAndEgress renders the sandbox Namespace + the default-deny NetworkPolicy + the
-// allowlist ConfigMap. The NetworkPolicy denies ALL ingress (no ingress rules), and its ONLY
-// permitted egress is to the proxy namespace on the proxy port — every other destination,
-// including DNS and the metadata server, is denied by omission. The sandbox does NO DNS of its own
-// (the proxy resolves names and enforces the FQDN allowlist, which is carried to it in the
+// allowlist ConfigMap. The NetworkPolicy denies ALL ingress (no ingress rules); its permitted egress
+// is to the session's proxy namespace — on the Squid proxy port (3128) always, AND on the auth-proxy
+// port (8080) when this provider is configured for the Vertex lane (vertexConfigured). Every other
+// destination, including DNS and the metadata server, is denied by omission. The sandbox does NO DNS
+// of its own (the proxy resolves names and enforces the FQDN allowlist, carried to it in the
 // ConfigMap; a NetworkPolicy is IP-based and cannot match FQDNs anyway).
-func renderNamespaceAndEgress(nsID string, allowlist []string) []byte {
+//
+// vertexLanePermitted opens the auth-proxy port in the sandbox's egress. It is the config-derived
+// vertexConfigured() signal (NOT the per-session lane, which is unavailable here — see
+// Config.VertexModel): a non-Vertex provider permits only 3128, a Vertex provider permits 3128 AND
+// 8080. The auth-proxy port is opened to the SAME proxy namespace (the auth-proxy lives alongside
+// Squid), so this widens the single egress rule's ports, never adds a new destination.
+func renderNamespaceAndEgress(nsID string, allowlist []string, vertexLanePermitted bool) []byte {
 	// Canonicalise the deny-all wire format: json.Marshal of a nil []string is "null", not "[]",
 	// and every deny-all path (widen-refused, narrow-fallback, an empty spec allowlist) passes nil.
 	// The NetworkPolicy is the authoritative perimeter regardless, but this ConfigMap is the
@@ -1288,6 +1531,15 @@ func renderNamespaceAndEgress(nsID string, allowlist []string) []byte {
 		if m, err := json.Marshal(allowlist); err == nil {
 			encoded = m
 		}
+	}
+	// The single egress allow rule's ports: always the Squid proxy port (3128); additionally the
+	// auth-proxy port (8080) when this provider is configured for the Vertex lane. Both ports go to
+	// the SAME proxy namespace (the auth-proxy lives alongside Squid), so this only widens the ports
+	// of the one existing `to:` rule — it adds no new destination, and the test invariant (one
+	// `ports:` block per `- to:` peer) holds.
+	ports := fmt.Sprintf("        - protocol: TCP\n          port: %d\n", proxyPort)
+	if vertexLanePermitted {
+		ports += fmt.Sprintf("        - protocol: TCP\n          port: %d\n", authProxyPort)
 	}
 	return fmt.Appendf(nil, `apiVersion: v1
 kind: Namespace
@@ -1333,11 +1585,9 @@ spec:
               # sandbox's one egress path is its own forward proxy, which enforces the FQDN allowlist.
               console7.dev/proxy-for: %[1]s
       ports:
-        - protocol: TCP
-          port: %[3]d
-`,
+%[3]s`,
 		nsID,
 		jsonScalar(string(encoded)),
-		proxyPort,
+		ports,
 	)
 }
