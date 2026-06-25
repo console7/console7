@@ -102,6 +102,12 @@ variable "gke_master_authorized_cidrs" {
   default     = []
 }
 
+variable "gke_node_locations" {
+  type        = list(string)
+  description = "Optional explicit zones for the regional GKE cluster's nodes (bootstrap + all pools). Empty (default) => GKE uses every zone in var.region. Pin to healthy zones (e.g. [\"us-east4-b\",\"us-east4-c\"]) to keep regional HA while excluding a zone with a transient GCE_STOCKOUT (which would otherwise fail the whole regional create). All entries must be zones within var.region."
+  default     = []
+}
+
 variable "gke_control_plane_ksa" {
   type        = string
   description = "Kubernetes \"<namespace>/<serviceaccount>\" the control plane runs as, bound to the secrets workload SA via Workload Identity. Override if you run the control plane under a non-default KSA (else the WI binding targets a KSA that never exists and is inert)."

@@ -78,6 +78,7 @@ module "gke" {
   control_plane_ksa                      = var.gke_control_plane_ksa
   master_authorized_cidrs                = var.gke_master_authorized_cidrs
   deletion_protection                    = var.gke_deletion_protection
+  node_locations                         = var.gke_node_locations
 }
 
 # Sandbox-image registry (Artifact Registry): the one Docker repository the signed sandbox

@@ -109,6 +109,12 @@ variable "control_node_machine_type" {
   default     = "e2-standard-2"
 }
 
+variable "node_locations" {
+  type        = list(string)
+  description = "Optional explicit zones for the regional cluster's nodes (bootstrap + all pools). Empty (default) => GKE uses every zone in the region. Pin to healthy zones (e.g. [\"us-east4-b\",\"us-east4-c\"]) to keep regional HA while excluding a zone with a transient GCE_STOCKOUT, which would otherwise fail the whole regional create. All entries must be zones within var.region."
+  default     = []
+}
+
 variable "deletion_protection" {
   type        = bool
   description = "Block `terraform destroy` of the cluster. PRODUCTION SHOULD set true; default false so dev/dogfood clusters stay destroyable (matches evidence_retention_locked posture)."
