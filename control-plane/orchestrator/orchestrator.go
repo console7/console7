@@ -153,10 +153,13 @@ func (s *session) abort(cause error, stage string) error {
 	outErr := fmt.Errorf("orchestrator: %s: %w", stage, cause)
 	if derr := s.o.Cloud.DestroySandbox(s.cleanupCtx, s.sandbox); derr != nil {
 		outErr = errors.Join(outErr, fmt.Errorf("orchestrator: destroy-sandbox after %s failed (sandbox may be live): %w", stage, derr))
-		// SAST-DEFERRED VVAH-2026-06-25 #15: on a destroy-failure here, the WORM chain records only
-		// the abort cause (below), not the "sandbox may be live" condition — a forensic blind spot.
-		// Emitting a distinct evidence event is deferred to Phase 2 (evidence hardening); see
-		// docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED, not an open finding.
+		// Record the "sandbox may be live" condition as a DISTINCT WORM event, not just in the returned
+		// error: the session-aborted record below would otherwise read as an orderly close-out while the
+		// sandbox and its injected credentials may still be live — a forensic blind spot. An auditor /
+		// monitor keys on "sandbox-destroy-failed" to escalate. A failed emit is surfaced into outErr.
+		if eerr := s.emit(s.cleanupCtx, "sandbox-destroy-failed", stage+": "+derr.Error()); eerr != nil {
+			outErr = errors.Join(outErr, fmt.Errorf("orchestrator: failed to record sandbox-destroy-failed: %w", eerr))
+		}
 	}
 	// Surface (never swallow) a failure to record the abort — e.g. SignSession refusing to
 	// sign past the session deadline on a session that overran. A dropped close-out record
@@ -512,18 +515,58 @@ func (o *Orchestrator) propose(s *session) error {
 // and file-change summary the engine produced. It carries no secret material or file contents.
 func proposalBody(s *session) string {
 	body := "Proposed by attended author session; lineage " + string(s.subject) + " -> " + s.nhi + "."
+	// headSHA and filesChanged are ENGINE-sourced (the engine is inference-backend-steerable — an
+	// untrusted source for these fields), so render them as inline CODE before they land in the Markdown
+	// PR body a human reviewer reads. A code span suppresses ALL rendering — explicit links/images/
+	// emphasis/HTML AND GitHub's bare-URL/www/email AUTOLINKS — so a file named "http://phish.evil/x" or
+	// "[Approve](https://evil)" shows literally, not as a clickable link.
 	if s.headSHA != "" {
-		body += "\n\nEngine commit: " + s.headSHA
+		body += "\n\nEngine commit: " + mdInlineCode(s.headSHA)
 	}
 	if len(s.filesChanged) > 0 {
-		// SAST-DEFERRED VVAH-2026-06-25 #30: s.filesChanged / s.headSHA come from the engine inside
-		// the sandbox (inference-backend-steerable) and are concatenated into Markdown PR-body text
-		// without escaping — a file named "[x](https://evil)" renders as a live link to a reviewer.
-		// Sanitising engine-sourced fields into the PR body is deferred to Phase 2 (evidence/propose
-		// hardening); see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED, not an open finding.
-		body += "\nFiles changed: " + strings.Join(s.filesChanged, ", ")
+		coded := make([]string, len(s.filesChanged))
+		for i, f := range s.filesChanged {
+			coded[i] = mdInlineCode(f)
+		}
+		body += "\nFiles changed: " + strings.Join(coded, ", ")
 	}
 	return body
+}
+
+// mdInlineCode renders an untrusted, engine-sourced string as a Markdown inline-code span so it cannot
+// render as a link (including GFM bare-URL / www / email AUTOLINKS), image, emphasis, raw HTML, or
+// table cell in a PR body — inline code suppresses all of it. Line/paragraph separators and the
+// bidi-override formatting chars are stripped first (a code span is single-line; this also blocks
+// body-line injection and RTL homoglyph spoofing of the value a reviewer reads). The fence is a run of
+// backticks one longer than the longest backtick run in the content (CommonMark), so the content
+// cannot break out of the span; a space pads the fence when the content abuts a backtick.
+func mdInlineCode(s string) string {
+	// Strip line/paragraph separators (CR, LF, NEL, LS, PS) and bidi overrides (LRO/RLO): a code span
+	// is single-line, so this blocks body-line injection and RTL homoglyph spoofing of the value shown.
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\r', '\n', '\u0085', '\u2028', '\u2029', '\u202d', '\u202e':
+			return -1
+		}
+		return r
+	}, s)
+	longest, cur := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			cur++
+			if cur > longest {
+				longest = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	fence := strings.Repeat("`", longest+1)
+	pad := ""
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		pad = " "
+	}
+	return fence + pad + s + pad + fence
 }
 
 // Run executes one governed task end to end, stamping a signed evidence record at every

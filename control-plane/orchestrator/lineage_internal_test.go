@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,5 +72,32 @@ func TestVerifyRecordPayload_RejectsPersonaNotMatchingNHI(t *testing.T) {
 	}
 	if err := VerifyRecordPayload(ca.Root(), recOK); err != nil {
 		t.Errorf("a matching-persona record should verify: %v", err)
+	}
+}
+
+// TestMdInlineCode pins the PR-body sanitiser: an engine-sourced (untrusted) string is rendered as an
+// inline-code span that cannot break out — so a crafted filename can render no live link (explicit
+// markup OR GFM bare-URL/www/email autolink), and cannot inject an extra body line.
+func TestMdInlineCode(t *testing.T) {
+	// plain content round-trips inside a single-backtick fence.
+	if got := mdInlineCode("normal-dir/file.go"); got != "`normal-dir/file.go`" {
+		t.Errorf("plain: got %q, want %q", got, "`normal-dir/file.go`")
+	}
+	// the inputs the change must neutralise — incl. AUTOLINK triggers (no markup needed on GitHub).
+	for _, in := range []string{
+		"[Approve](https://evil)", "http://phish.evil/rotate", "www.evil.com/x", "ops@evil.com",
+		"a*b_c", "<img src=x>", "row|cell", "x\r\ny z",
+	} {
+		got := mdInlineCode(in)
+		if strings.ContainsAny(got, "\r\n\u0085\u2028\u2029") {
+			t.Errorf("mdInlineCode(%q) = %q retains a line/para separator", in, got)
+		}
+		if !strings.HasPrefix(got, "`") || !strings.HasSuffix(got, "`") {
+			t.Errorf("mdInlineCode(%q) = %q is not wrapped as inline code", in, got)
+		}
+	}
+	// embedded backtick runs force a longer fence so content cannot escape the span.
+	if got := mdInlineCode("a``b"); !strings.HasPrefix(got, "```") || !strings.HasSuffix(got, "```") {
+		t.Errorf("backtick content must use a longer fence, got %q", got)
 	}
 }
