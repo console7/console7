@@ -83,6 +83,11 @@ func (r *kubeRunner) runOut(ctx context.Context, name string, stdin []byte, args
 // Workload-Identity config) but pins KUBECONFIG to the provider's private kubeconfig, dropping
 // any inherited KUBECONFIG so a call can never fall back to the operator's ambient config.
 func (r *kubeRunner) env() []string {
+	// SAST-ACCEPTED VVAH-2026-06-25 #12: this passes the full process environment to every
+	// kubectl/gcloud subprocess (implicit denylist — only KUBECONFIG stripped), so LD_PRELOAD / PATH /
+	// HTTP(S)_PROXY / GOOGLE_APPLICATION_CREDENTIALS survive. Accepted and tracked in docs/RISKS.md
+	// R-15 (exploit needs deploy/CI-config write privilege; command names are literals per R-3). The
+	// explicit-allowlist hardening lands with the concurrent-session phase (Option-B client, R-3). KNOWN/ACCEPTED.
 	base := os.Environ()
 	out := make([]string, 0, len(base)+1)
 	for _, kv := range base {

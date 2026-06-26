@@ -153,6 +153,10 @@ func (s *session) abort(cause error, stage string) error {
 	outErr := fmt.Errorf("orchestrator: %s: %w", stage, cause)
 	if derr := s.o.Cloud.DestroySandbox(s.cleanupCtx, s.sandbox); derr != nil {
 		outErr = errors.Join(outErr, fmt.Errorf("orchestrator: destroy-sandbox after %s failed (sandbox may be live): %w", stage, derr))
+		// SAST-DEFERRED VVAH-2026-06-25 #15: on a destroy-failure here, the WORM chain records only
+		// the abort cause (below), not the "sandbox may be live" condition — a forensic blind spot.
+		// Emitting a distinct evidence event is deferred to Phase 2 (evidence hardening); see
+		// docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED, not an open finding.
 	}
 	// Surface (never swallow) a failure to record the abort — e.g. SignSession refusing to
 	// sign past the session deadline on a session that overran. A dropped close-out record
@@ -512,6 +516,11 @@ func proposalBody(s *session) string {
 		body += "\n\nEngine commit: " + s.headSHA
 	}
 	if len(s.filesChanged) > 0 {
+		// SAST-DEFERRED VVAH-2026-06-25 #30: s.filesChanged / s.headSHA come from the engine inside
+		// the sandbox (inference-backend-steerable) and are concatenated into Markdown PR-body text
+		// without escaping — a file named "[x](https://evil)" renders as a live link to a reviewer.
+		// Sanitising engine-sourced fields into the PR body is deferred to Phase 2 (evidence/propose
+		// hardening); see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED, not an open finding.
 		body += "\nFiles changed: " + strings.Join(s.filesChanged, ", ")
 	}
 	return body
@@ -723,6 +732,11 @@ func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.Sess
 // the proof attributable: it ties the signature to the exact lineage columns an auditor
 // reads off the record, not merely to "the NHI signed some event".
 func payloadTBS(subject interfaces.Subject, session interfaces.SessionID, persona interfaces.Persona, nhi, event, detail string) []byte {
+	// SAST-DEFERRED VVAH-2026-06-25 #31: the TBS omits the record SEQUENCE / prior-chain-hash, so two
+	// same-session records with identical (event, detail) produce identical signed bytes — a
+	// workload-SA holder could replay a signed record at another position undetected by per-record
+	// verification. Binding the sequence into the signature is deferred to Phase 2 (evidence
+	// hardening, with #16); see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED, not an open finding.
 	var b bytes.Buffer
 	for _, s := range []string{evidenceDomain, string(subject), string(session), string(persona), nhi, event, detail} {
 		var u8 [8]byte

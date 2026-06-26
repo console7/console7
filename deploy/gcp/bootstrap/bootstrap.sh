@@ -256,6 +256,10 @@ grant_project_role "$APPLY_SA_EMAIL" "roles/iam.serviceAccountAdmin"
 #   - creating the custom least-privilege Secret Manager roles -> iam.roleAdmin
 #   - the project-level IAM bindings for the workload SA -> resourcemanager.projectIamAdmin
 grant_project_role "$APPLY_SA_EMAIL" "roles/serviceusage.serviceUsageAdmin"
+# SAST-ACCEPTED VVAH-2026-06-25 #2: roles/iam.roleAdmin + roles/resourcemanager.projectIamAdmin
+# together are effective project-owner (the APPLY identity can self-grant any role). Accepted and
+# tracked in docs/RISKS.md R-14 (one-time human-actuated bootstrap behind WIF + branch protection;
+# the tenet-5 per-resource least-privilege split is the revisit trigger). KNOWN/ACCEPTED.
 grant_project_role "$APPLY_SA_EMAIL" "roles/iam.roleAdmin"
 grant_project_role "$APPLY_SA_EMAIL" "roles/resourcemanager.projectIamAdmin"
 # State read/write is scoped to the state bucket only, not project-wide storage admin.

@@ -91,6 +91,10 @@ spec:
             - name: reaper
               # Google Cloud SDK image (bundles kubectl + bash + GNU date) from the trusted gcr.io
               # registry. Reference default — production SHOULD pin by DIGEST (supply-chain policy).
+              # SAST-DEFERRED VVAH-2026-06-25 #13: this is a MUTABLE tag, not an @sha256 digest; the
+              # reaper SA can delete any namespace, so a tag-overwrite would be high-impact (precondition:
+              # compromising Google's own GCR — very high). Digest-pinning + an admission/digest check is
+              # deferred to deploy hardening; see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED.
               image: gcr.io/google.com/cloudsdktool/cloud-sdk:529.0.0
               securityContext:
                 allowPrivilegeEscalation: false
