@@ -98,6 +98,16 @@ func (e *MemEvidence) Stream(ctx context.Context, ref interfaces.RecordRef) erro
 	return nil
 }
 
+// NextSequence returns the chain position the next Append will assign (Append uses len(records)).
+func (e *MemEvidence) NextSequence(ctx context.Context) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return uint64(len(e.records)), nil
+}
+
 // Len returns the number of committed records. Test-only inspection hook.
 func (e *MemEvidence) Len() int {
 	e.mu.Lock()

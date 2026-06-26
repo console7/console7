@@ -104,7 +104,7 @@ func TestComposition_SigningLineageWORM_OverEvidenceGCSStore(t *testing.T) {
 		if rec.Type != want {
 			t.Errorf("record %d type = %q, want %q", i, rec.Type, want)
 		}
-		if err := orchestrator.VerifyRecordPayload(ca.Root(), rec); err != nil {
+		if err := orchestrator.VerifyRecordPayload(ca.Root(), uint64(i), rec); err != nil {
 			t.Errorf("record %d (%s) lineage does not verify: %v", i, rec.Type, err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestComposition_SigningLineageWORM_OverEvidenceGCSStore(t *testing.T) {
 		t.Fatal("missing record 0 for tamper check")
 	}
 	rec.Subject = "mallory"
-	if err := orchestrator.VerifyRecordPayload(ca.Root(), rec); err == nil {
+	if err := orchestrator.VerifyRecordPayload(ca.Root(), 0, rec); err == nil {
 		t.Error("a tampered record Subject should fail lineage verification")
 	}
 }

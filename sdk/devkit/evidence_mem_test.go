@@ -78,3 +78,23 @@ func TestMemEvidence_Stream_KnownRefOKUnknownFailsClosed(t *testing.T) {
 		t.Error("expected streaming a ref with a mismatched hash to fail closed")
 	}
 }
+
+func TestMemEvidence_NextSequence_PredictsAppendedPosition(t *testing.T) {
+	e := NewMemEvidence()
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		want, err := e.NextSequence(ctx)
+		if err != nil {
+			t.Fatalf("NextSequence: %v", err)
+		}
+		ref, err := e.Append(ctx, interfaces.EvidenceRecord{
+			SessionID: "s", Subject: "alice", Persona: interfaces.PersonaAuthor, Type: "e", Payload: []byte("p"),
+		})
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if ref.Sequence != want {
+			t.Errorf("NextSequence predicted %d but Append assigned %d", want, ref.Sequence)
+		}
+	}
+}

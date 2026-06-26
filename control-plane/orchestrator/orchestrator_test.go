@@ -192,7 +192,7 @@ func TestSpike_SessionLifecycle(t *testing.T) {
 		if rec.Subject != "alice" {
 			t.Errorf("record %d subject = %q, want alice", i, rec.Subject)
 		}
-		if err := orchestrator.VerifyRecordPayload(b.caRoot, rec); err != nil {
+		if err := orchestrator.VerifyRecordPayload(b.caRoot, uint64(i), rec); err != nil {
 			t.Errorf("record %d (%s) lineage signature does not verify: %v", i, rec.Type, err)
 		}
 	}
@@ -361,13 +361,13 @@ func TestVerifyRecordPayload_RejectsTamperedAttribution(t *testing.T) {
 		t.Fatal("no evidence record to tamper")
 	}
 	// Sanity: the untampered record verifies.
-	if err := orchestrator.VerifyRecordPayload(b.caRoot, rec); err != nil {
+	if err := orchestrator.VerifyRecordPayload(b.caRoot, 0, rec); err != nil {
 		t.Fatalf("untampered record should verify: %v", err)
 	}
 	// Tamper the attribution column (the signature itself is unchanged and valid in
 	// isolation) — verification must reject it.
 	rec.Subject = "mallory"
-	if err := orchestrator.VerifyRecordPayload(b.caRoot, rec); err == nil {
+	if err := orchestrator.VerifyRecordPayload(b.caRoot, 0, rec); err == nil {
 		t.Error("expected verification to reject a record whose Subject column was altered")
 	}
 }
