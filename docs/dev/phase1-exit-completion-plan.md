@@ -1,5 +1,13 @@
 # Phase-1 EXIT completion plan — the 7 live-run findings → the full (Vertex) exit
 
+> **UPDATE 2026-06-26 — Phase 1 declared EXITED (conditional); Phase 2 now active.** F0/F1/F3-Option-A
+> all landed on `main` (the 7 findings are resolved; per-seam SA impersonation is wired). Phase 1 is
+> **declared exited on the org-API lane** and the project has moved into Phase 2. This plan now tracks
+> only the **deferred exit-completion sprint** — the two remaining clauses, gated on the external
+> Claude-quota blocker: **F2/F4 the full Vertex governed-task run**, and **F4/B13 the non-author
+> RUNBOOK walkthrough**. Pick these up when quota lands; mark exit-completion CLOSED after. See
+> `docs/ROADMAP.md` (Phase 1 "Exit DECLARED — conditional" + the 2026-06-26 decision-log entries).
+
 **Status (2026-06-25).** The Phase-1 EXIT was proven **live, end-to-end, through the orchestrator** on
 the **org-API (Anthropic) lane**: one `c7 -tags c7_live` pass on `console7-poc1` produced a genuine
 engine commit → **KMS-rooted NHI signature** → control-plane push → **real PR**
