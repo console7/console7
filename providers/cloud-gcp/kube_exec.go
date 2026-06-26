@@ -307,7 +307,7 @@ func (e *netpolEgressController) Set(ctx context.Context, h interfaces.SandboxHa
 		// A malformed entry must never collapse into an over-broad or vacuously-empty perimeter.
 		return fmt.Errorf("cloudgcp: render per-session proxy config (fail closed): %w", err)
 	}
-	if err := e.run.kubectlApply(ctx, renderPerSessionProxy(h.ID, conf, squidConfigHash(conf))); err != nil {
+	if err := e.run.kubectlApply(ctx, renderPerSessionProxy(h.ID, conf, squidConfigHash(conf), e.cfg.vertexConfigured())); err != nil {
 		return fmt.Errorf("cloudgcp: set per-session egress proxy: %w", err)
 	}
 	// On the Vertex lane, render the per-session Vertex auth-proxy INTO the same proxy namespace,
@@ -558,8 +558,11 @@ func (k *kubeEngineRunner) Run(ctx context.Context, h interfaces.SandboxHandle, 
 	// it builds on) for the CONTROL-PLANE-side push + PR. stdout-only (execInOut) so the binary bundle
 	// is not corrupted by git's stderr progress. The push credential and SCM egress stay OUT of the
 	// sandbox: this only READS the branch the engine already produced (cloud.go EngineResult.CommitBundle).
+	// The "--" terminator forces git to treat task.Branch as a revision/ref, never an option: without
+	// it a branch like "--all" would make `git bundle create -` bundle EVERY ref instead of just the
+	// working branch (git option injection). task.Branch is orchestrator-set, but defence-in-depth.
 	commitBundle, err := k.execInOut(ctx, h, nil,
-		"git", "-c", "safe.directory="+k.cfg.Workdir, "-C", k.cfg.Workdir, "bundle", "create", "-", task.Branch)
+		"git", "-c", "safe.directory="+k.cfg.Workdir, "-C", k.cfg.Workdir, "bundle", "create", "-", "--", task.Branch)
 	if err != nil {
 		return interfaces.EngineResult{}, fmt.Errorf("cloudgcp: extract commit bundle for control-plane push: %w", err)
 	}
@@ -1452,15 +1455,25 @@ spec:
             matchLabels:
               console7.dev/session: %[2]s
       ports:
-        - protocol: TCP
-          port: %[6]d
-`
+%[7]s`
 
 // renderPerSessionProxy renders the per-session forward proxy for one sandbox. nsID is the sandbox's
 // crypto-random handle id (a valid DNS-1123 label, safe unquoted as a name/label value); the proxy
 // lives in nsID+"-proxy". squidConf is the rendered config (embedded as an indented block scalar);
 // configHash rolls the pod on a narrow.
-func renderPerSessionProxy(nsID string, squidConf, configHash string) []byte {
+func renderPerSessionProxy(nsID string, squidConf, configHash string, vertexLanePermitted bool) []byte {
+	// The proxy-namespace ingress (podSelector:{} — it covers EVERY proxy pod: Squid AND, on the
+	// Vertex lane, the auth-proxy) admits this session's sandbox on the Squid port (3128) always, and
+	// additionally on the auth-proxy port (8080) when the Vertex lane is configured. The auth-proxy
+	// port MUST ride THIS rule rather than a separate auth-proxy-scoped ingress policy: under GKE
+	// Dataplane V2 a second ingress policy that also selects a pod already covered by this
+	// podSelector:{} policy does NOT union with it the way standard K8s semantics promise (verified
+	// live — 3128 reaches the auth-proxy pod through this rule, a separate-policy 8080 was silently
+	// dropped). Mirrors the sandbox egress rule, which already carries both ports in one block.
+	ingressPorts := fmt.Sprintf("        - protocol: TCP\n          port: %d\n", proxyPort)
+	if vertexLanePermitted {
+		ingressPorts += fmt.Sprintf("        - protocol: TCP\n          port: %d\n", authProxyPort)
+	}
 	return fmt.Appendf(nil, perSessionProxyTemplate,
 		proxyNS(nsID),
 		nsID,
@@ -1468,6 +1481,7 @@ func renderPerSessionProxy(nsID string, squidConf, configHash string) []byte {
 		configHash,
 		squidImage,
 		proxyPort,
+		ingressPorts,
 	)
 }
 
