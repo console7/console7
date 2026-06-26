@@ -702,3 +702,40 @@ func TestRun_StreamsEachEvidenceRecord(t *testing.T) {
 		t.Errorf("expected every appended record (%d) to be streamed, got %d streams", sink.Len(), sink.streams)
 	}
 }
+
+// TestRun_AbortRecordsSandboxDestroyFailed proves a teardown failure during abort is recorded as a
+// DISTINCT WORM event ("sandbox-destroy-failed"), not only in the returned error — so an auditor sees
+// the "sandbox may be live" condition rather than a record that reads like an orderly close-out.
+func TestRun_AbortRecordsSandboxDestroyFailed(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	ca := signing.NewDevCA()
+	idpPub, idpPriv, _ := ed25519.GenerateKey(nil)
+	b := broker.New(
+		devkit.NewDevIdentity(idpPub, nil), devkit.NewMemSecrets(reg), devkit.NewMemSCM(15*time.Minute),
+		devkit.NewPolicyInference(devkit.SeamPolicy{SubscriptionEndpoint: subscriptionURL, OrgAPIEndpoint: orgAPIURL, SubscriptionEnabled: true}),
+		signing.NewNHIBinder(ca),
+	)
+	repo := interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"}
+	cloud := failingDestroyCloud{devkit.NewMemCloud(reg)}
+	sink := devkit.NewMemEvidence()
+	// Allowlist excludes orgAPIURL, so an unattended run aborts at egress-check AFTER provision —
+	// driving abort() with a sandbox to (fail to) destroy.
+	orch := orchestrator.New(b, cloud, sink, devkit.NewFixedPolicySoR(repo), []string{"https://only.internal"}, 30*time.Minute)
+
+	if _, err := orch.Run(context.Background(), orchestrator.LaunchRequest{
+		Authn:     devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID: "s1", Persona: interfaces.PersonaAuthor, Repo: repo, Branch: "feature/x",
+	}); err == nil {
+		t.Fatal("expected an error")
+	}
+	found := false
+	for i := 0; i < sink.Len(); i++ {
+		if rec, _, ok := sink.At(i); ok && rec.Type == "sandbox-destroy-failed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("abort with a failing DestroySandbox must record a 'sandbox-destroy-failed' WORM event")
+	}
+}
