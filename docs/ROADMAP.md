@@ -60,9 +60,46 @@ enforced at the boundary, output attested, lineage intact, evidence immutable �
 deployable by an adopter in their own GCP project with their own Vertex backend and
 their own subscription, **maintainer-uninvolved**.
 
+### ✅ Exit DECLARED — 2026-06-26 (conditional)
+
+Phase 1 is **declared exited** on the **org-API (Anthropic-direct) inference lane**, proven live,
+end-to-end, through the orchestrator (2026-06-25): one governed task → genuine engine commit →
+**KMS-rooted NHI signature** → control-plane push → **real PR** (console7/exit-poc#1) → **WORM
+chain VERIFIED (12 records)**. All 7 live-run findings are resolved on `main` (readiness gate,
+`contents:read`, PR-create retry, `global`-region, DLP dotfile exclude), and the **identity split is
+in place** (per-seam SA impersonation — Option A — with the in-cluster Option-B residual recorded).
+Sandbox + auth-proxy images are signed/released.
+
+**Carried CONDITION — deferred to a later sprint (does NOT block the phase transition):** two exit
+clauses remain open and are tracked as Phase-1 exit-completion work, gated on an **external blocker
+(Google denied Claude quota on the project)**, so they are deferred rather than held against the
+transition:
+
+1. **Vertex-backend clause.** The per-session auth-proxy Vertex lane is *built, CI-green, and
+   plumbing-proven* (engine → auth-proxy → delivered bearer → Vertex → genuine API responses), but no
+   full governed task has completed *through Vertex* — blocked on the Claude-quota denial. Per the
+   2026-06-26 model-lane decision (below), model-usage validation runs org-API-direct first and the
+   Vertex completion is the deferred sprint item. Tracked in `docs/dev/phase1-exit-completion-plan.md`
+   (F2/F4).
+2. **Maintainer-uninvolved walkthrough (B13).** The proven run was maintainer-as-operator; a genuine
+   non-author following only `docs/RUNBOOK.md` is the remaining proof. Tracked in the same plan (F4/B13).
+
+Plan-deferred (explicitly not required to demonstrate the exit): the Web-CLI UI and the Option-B
+in-cluster control-plane/keybroker that closes the identity residual — both land naturally with
+Phase-2/3 in-cluster work.
+
+> **Stance:** this is a *conditional* exit, not a silent pass. The two open clauses are real and named
+> here (a deviation is a regression, not a trade-off — CLAUDE.md). The transition into Phase 2 is
+> permitted because the remaining work is gated on an external quota blocker and the org-API lane
+> independently proves every in-tenancy control of record.
+
 ---
 
 ## Phase 2 — Operate lane + evidence hardening
+
+> **Active phase (entered 2026-06-26).** Phase 1 is conditionally exited (above); the Vertex-backend
+> exit-completion and the non-author walkthrough are carried as a deferred sprint item, worked
+> alongside Phase 2 when the Claude quota lands — not a Phase-2 prerequisite.
 
 **Goal:** make production observability safe to switch on.
 
@@ -199,6 +236,25 @@ correct fix is owned by a later phase — tracked here so they are not silently 
 ## Roadmap decisions (log)
 
 Dated, durable decisions so we don't re-litigate or trip over them later. Newest first.
+
+### 2026-06-26 — Phase 1 declared EXITED (conditional); Phase 2 is now the active phase
+
+- **Decision.** Declare Phase 1 **exited on the org-API lane** (proven live end-to-end; all 7 live-run
+  findings resolved; identity split Option A in place) and **move into Phase 2 now**. The two open exit
+  clauses — the **Vertex-backend** governed-task completion and the **maintainer-uninvolved non-author
+  walkthrough (B13)** — are **deferred to a later sprint**, not held against the transition. See the
+  Phase-1 "Exit DECLARED — conditional" block above and `docs/dev/phase1-exit-completion-plan.md` (F2/F4).
+- **Why deferred, not blocking.** The Vertex completion is gated on an **external blocker** (Google
+  denied Claude quota on the project), so it cannot be force-closed by us now; the org-API lane already
+  proves every in-tenancy control of record (policy-bound sandbox, default-deny egress, KMS-rooted
+  lineage, immutable WORM). Holding the whole phase on an external quota grant would stall Phase-2 work
+  that does not depend on it.
+- **Condition / unpark trigger.** When Claude-quota lands on a usable project, run the deferred sprint:
+  the full Vertex governed-task exit run (auth-proxy lane, sandbox metadata-free) + the non-author
+  RUNBOOK walkthrough — then mark Phase 1 exit-completion CLOSED. This rides the model-lane decision
+  below (org-API-direct first, then Vertex/subscription).
+- **Stance.** Conditional, not silent — the open clauses are named in the ROADMAP and the plan, per
+  CLAUDE.md ("a deviation is a regression, not a trade-off").
 
 ### 2026-06-26 — Vertex × Anthropic-model testing is parked; test on org-API first, subscription ASAP
 
