@@ -318,6 +318,11 @@ func wireSpine(repo interfaces.RepoRef, user string) (*orchestrator.Orchestrator
 	// RESIDUAL (Phase-1): no OIDC IdP provider yet — authn is a dev assertion under a process-local key,
 	// so this run does NOT prove external SSO->NHI binding (banner-flagged). The rest of the lineage
 	// (NHI -> signed commit, KMS-rooted) IS real.
+	//
+	// SAST-DEFERRED VVAH-2026-06-25 #9: because the assertion is signed and verified under the SAME
+	// process-local key, the `--user` subject is self-attested (circular authn) — any subject string
+	// is accepted and written into the WORM chain. Real subject binding requires a verified OIDC token
+	// and lands with the real IdP (Phase 3); see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED.
 	idpPub, idpPriv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("idp keygen: %w", err)

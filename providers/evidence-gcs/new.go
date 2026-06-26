@@ -60,6 +60,13 @@ func (s *Store) preflight(ctx context.Context) error {
 	if n == 0 {
 		return nil
 	}
+	// SAST-DEFERRED VVAH-2026-06-25 #16: preflight verifies the tail slot EXISTS, not that its hash
+	// chains from its predecessor. Since chainHash uses no secret, a workload-SA holder who reads the
+	// real tail can craft a valid forward record at the next slot and fork the chain. A tail
+	// chain-integrity recompute here (and sequence-bound signatures, #31) is deferred to Phase 2
+	// (evidence hardening); production retention-LOCK is the boundary control. See docs/ROADMAP.md
+	// "SAST carry-forward". KNOWN/ACCEPTED, not an open finding. (The stray-object count inflation
+	// half of this finding IS fixed — Count() now filters to record-shaped keys.)
 	_, ok, err := s.At(ctx, n-1)
 	if err != nil {
 		return fmt.Errorf("evidencegcs: startup tail read failed at sequence %d: %w", n-1, err)

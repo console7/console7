@@ -65,14 +65,18 @@ func (s LaunchSpec) toRequest(authn interfaces.AuthnToken) (orchestrator.LaunchR
 		return orchestrator.LaunchRequest{}, err
 	}
 	return orchestrator.LaunchRequest{
-		Authn:           authn,
-		SessionID:       interfaces.SessionID(id),
-		Persona:         persona,
-		Repo:            repo,
-		Branch:          branch,
-		Prompt:          s.Prompt,
+		Authn:     authn,
+		SessionID: interfaces.SessionID(id),
+		Persona:   persona,
+		Repo:      repo,
+		Branch:    branch,
+		Prompt:    s.Prompt,
+		// SAST-DEFERRED VVAH-2026-06-25 #10: `--attended` is client-asserted (no TTY check, no OIDC
+		// claim, no server challenge), so an unattended CI/cron run can self-declare attendance and
+		// route onto a subscription token. Deriving attendance from a verified runtime/OIDC signal is
+		// deferred to Phase 3 (real IdP); see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED.
 		Attended:        s.Attended,
-		UseSubscription: s.Attended && s.UseSubscription, // subscription is attended-only (tenet 2)
+		UseSubscription: s.Attended && s.UseSubscription, // subscription is attended-only (GOAL.md tenet 2)
 	}, nil
 }
 

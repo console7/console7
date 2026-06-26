@@ -161,6 +161,12 @@ func (p *Provider) validateWorkingCredentialRequest(ctx context.Context, req int
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// SAST-DEFERRED VVAH-2026-06-25 #1: this validates lineage PRESENCE (subject+session non-empty),
+	// NOT subject→repo AUTHORIZATION — any authenticated subject can scope a credential to any repo
+	// the GitHub App is installed on. The user-to-repo authorization gate belongs at the Phase-3
+	// tier×stratum→session-profile resolver (an AuthorizationChecker port consulted before the mint);
+	// today's FixedPolicySoR is the dev stand-in. See docs/ROADMAP.md "SAST carry-forward".
+	// KNOWN/ACCEPTED, not an open finding.
 	// The credential MUST be bound to the per-session identity for lineage; refuse to mint an
 	// unattributable one (DESIGN.md §2.3).
 	if req.Subject == "" || req.SessionID == "" {

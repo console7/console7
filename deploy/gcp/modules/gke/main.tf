@@ -42,6 +42,12 @@ resource "google_project_service" "container" {
 # verbs nodes need (write logs/metrics; image-pull is granted repo-scoped in modules/artifact-
 # registry, not here); pod-level authorization comes from Workload Identity, not this SA, so
 # concealing it (GKE_METADATA) costs the sandbox nothing legitimate.
+# SAST-DEFERRED VVAH-2026-06-25 #26: this single node SA backs BOTH the control-plane and the gVisor
+# sandbox node pools, so any future IAM grant added here silently widens the sandbox's blast radius
+# (and a post-gVisor-escape node token equals the control-plane node token). Splitting out a
+# dedicated, minimal sandbox-node SA is deferred to Phase 2/3 deploy hardening; see docs/ROADMAP.md
+# "SAST carry-forward". KNOWN/ACCEPTED, not an open finding. (Current grants are write-only
+# logging/monitoring/metadata; GKE_METADATA conceals the token from pods.)
 resource "google_service_account" "nodes" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-gke-nodes"

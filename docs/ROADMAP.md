@@ -181,7 +181,12 @@ quoted-ref gaps, the tripwire parser bugs, the scm-github HTTPS parity, the git-
 terminator, the evidence-gcs read/count bounds, the hook stdin caps, the managed-settings
 Read-deny, the inference-credential revocation TOCTOU, the KMS-HSM production gate, the testkit
 rig-skip, the DCO bot-exemption/log-injection). The remainder are **design-level** items whose
-correct fix is owned by a later phase — tracked here so they are not silently dropped:
+correct fix is owned by a later phase — tracked here so they are not silently dropped.
+
+> Each deferred/accepted finding also carries an **inline marker at its code site** so a
+> re-scan sees the acknowledgement in situ — grep `SAST-DEFERRED` / `SAST-ACCEPTED` (tagged
+> `VVAH-2026-06-25 #N`). `SAST-DEFERRED` → this carry-forward; `SAST-ACCEPTED` → a `docs/RISKS.md`
+> entry (#2 → R-14, #12 → R-15).
 
 | Finding | Item | Closes in / by |
 |---|---|---|
