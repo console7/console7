@@ -30,3 +30,12 @@ func TestRun_HookExitCodes(t *testing.T) {
 		})
 	}
 }
+
+func TestRun_OversizedInputDenied(t *testing.T) {
+	// A payload larger than maxHookInput must be denied (fail closed) before any parse — an
+	// unbounded read on attacker-influenced stdin would be an OOM vector.
+	big := strings.NewReader(strings.Repeat("a", maxHookInput+1))
+	if got := run(big, io.Discard); got != 2 {
+		t.Errorf("oversized input: run() = %d, want 2 (deny)", got)
+	}
+}

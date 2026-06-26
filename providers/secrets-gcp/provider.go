@@ -487,10 +487,24 @@ func (p *Provider) InjectInferenceCredential(ctx context.Context, in interfaces.
 	if !expiry.After(now) || expiry.After(now.Add(lifetime+time.Minute)) {
 		return errors.New("secretsgcp: minted inference token has an implausible expiry — missing, past, or longer-lived than requested (fail closed)")
 	}
-	// Deliver only into the verified owning session's AUTH-PROXY (NOT the sandbox), re-checking ownership
-	// ATOMICALLY with delivery. The inference credential goes to the auth-proxy gateway the engine reaches
-	// Vertex through, so the sandbox stays credential-free.
-	if !inj.DeliverInferenceIfOwned(in.Sandbox, in.Subject, in.SessionID, token) {
+	// Deliver only into the verified owning session's AUTH-PROXY (NOT the sandbox), re-checking BOTH
+	// the revocation tombstone and ownership ATOMICALLY with delivery — under p.mu, the same lock
+	// RevokeSubject sets the tombstone under (mirrors InjectSubscriptionToken). The fast-fail
+	// isRevoked check above ran BEFORE the multi-second remote MintAccessToken; without this re-check
+	// a RevokeSubject committing during that window would still let a fresh ≤1h bearer land in an
+	// officially offboarded subject's (not-yet-torn-down) session. The inference credential goes to
+	// the auth-proxy gateway the engine reaches Vertex through, so the sandbox stays credential-free.
+	p.mu.Lock()
+	revoked := p.revoked[in.Subject]
+	delivered := false
+	if !revoked {
+		delivered = inj.DeliverInferenceIfOwned(in.Sandbox, in.Subject, in.SessionID, token)
+	}
+	p.mu.Unlock()
+	if revoked {
+		return errors.New("secretsgcp: subject revoked during injection")
+	}
+	if !delivered {
 		return errors.New("secretsgcp: sandbox no longer belongs to the subject's session")
 	}
 	return nil

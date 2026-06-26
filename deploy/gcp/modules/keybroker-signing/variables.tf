@@ -28,3 +28,9 @@ variable "kms_protection_level" {
     error_message = "kms_protection_level must be SOFTWARE or HSM."
   }
 }
+
+variable "require_hsm" {
+  type        = bool
+  default     = false
+  description = "When true (a production deploy), the signing key MUST be HSM-backed — a plan-time precondition fails otherwise, so a production deploy cannot silently anchor lineage in a SOFTWARE key. Default false for dogfood/PoC (mirrors the evidence_retention_locked / destroy_protection prod-hardening knobs)."
+}

@@ -92,8 +92,10 @@ func TestRender_LockdownFieldsOnEveryPersona(t *testing.T) {
 		}
 		// Neither persona may rewrite its own locked guards (defence-in-depth echo of the read-only
 		// mount). The rule is anchored at the filesystem root ("//" prefix on the absolute path).
-		if !slices.Contains(p.Permissions.Deny, "Write(/"+ManagedSettingsPath+")") {
-			t.Errorf("%s: deny set does not protect the managed-settings path", prof.Persona)
+		for _, op := range []string{"Read", "Edit", "Write"} {
+			if !slices.Contains(p.Permissions.Deny, op+"(/"+ManagedSettingsPath+")") {
+				t.Errorf("%s: deny set does not %s-protect the managed-settings path", prof.Persona, op)
+			}
 		}
 	}
 }

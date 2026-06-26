@@ -47,6 +47,12 @@ variable "keybroker_kms_protection_level" {
   }
 }
 
+variable "keybroker_require_hsm" {
+  type        = bool
+  default     = false
+  description = "Production gate for the lineage signing root: when true, the deploy FAILS at plan time unless keybroker_kms_protection_level = \"HSM\", so a production deploy cannot silently anchor every human->NHI->action signature in a software-exportable key. Set true in production alongside evidence_retention_locked and destroy_protection; default false keeps the lower-cost SOFTWARE posture for dogfood/PoC."
+}
+
 variable "sandbox_node_tag" {
   type        = string
   description = "Network tag the sandbox node pool (modules/gke, deferred) carries. The default-deny egress + metadata-deny firewall rules target this tag, so ONLY sandbox-tagged workloads are walled; the control-plane / egress-proxy nodes carry a different tag and keep their sanctioned NAT egress."

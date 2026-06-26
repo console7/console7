@@ -184,17 +184,32 @@ func TestStore_AtRejectsMismatchedSequence(t *testing.T) {
 	}
 }
 
-func TestPreflight_RejectsMissingTail(t *testing.T) {
+func TestPreflight_IgnoresStrayObject(t *testing.T) {
 	fake := NewInMemoryObjectIO()
 	s := NewWithObjectIO(fake, "records")
 	ctx := context.Background()
-	// Inflate the count with a stray object under the prefix that is NOT a real tail record, so
-	// Len==1 but At(0) is not found. preflight must fail closed, not treat the store as usable.
+	// A stray object under the prefix that is NOT record-shaped must not inflate the count (finding:
+	// one storage.objects.create stray would otherwise point preflight at an unwritten slot and DoS
+	// every startup). With the record-key filter, the count excludes it and preflight succeeds.
 	if err := fake.PutIfAbsent(ctx, "records/stray", []byte("x")); err != nil {
 		t.Fatalf("seed stray: %v", err)
 	}
+	if err := s.preflight(ctx); err != nil {
+		t.Fatalf("preflight must ignore a non-record stray object, got: %v", err)
+	}
+}
+
+func TestPreflight_RejectsGappedTail(t *testing.T) {
+	fake := NewInMemoryObjectIO()
+	s := NewWithObjectIO(fake, "records")
+	ctx := context.Background()
+	// A record-shaped object at slot 1 with no slot 0 is a genuine gap (a privileged delete /
+	// tampered backing): the count is 1 but the tail At(0) is absent. preflight must fail closed.
+	if err := fake.PutIfAbsent(ctx, s.objectName(1), []byte("{}")); err != nil {
+		t.Fatalf("seed slot 1: %v", err)
+	}
 	if err := s.preflight(ctx); err == nil {
-		t.Fatal("expected preflight to reject a non-empty store whose tail slot is missing")
+		t.Fatal("expected preflight to reject a gapped store (count=1 but tail slot absent)")
 	}
 }
 

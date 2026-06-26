@@ -26,10 +26,18 @@ func main() {
 // scripts under root (empty = the absolute locked paths). root is a test seam; production passes "".
 // Reading from stdin (the control plane pipes the profile in) keeps no attacker-influenced file
 // path in play. A render that fails closed (unknown persona) is surfaced, not written.
+// maxProfileInput bounds the SessionProfile JSON read. The profile comes from the Tier-1 control
+// plane over stdin, but the threat model (T3) treats a co-resident process substituting a forged
+// profile as in scope; an unbounded read would be an OOM vector. A real profile is a few KB.
+const maxProfileInput = 1 << 20 // 1 MiB
+
 func run(stdin io.Reader, root string) error {
-	data, err := io.ReadAll(stdin)
+	data, err := io.ReadAll(io.LimitReader(stdin, maxProfileInput+1))
 	if err != nil {
 		return fmt.Errorf("read session profile: %w", err)
+	}
+	if int64(len(data)) > maxProfileInput {
+		return fmt.Errorf("session profile exceeds %d bytes (fail closed)", maxProfileInput)
 	}
 
 	var profile interfaces.SessionProfile

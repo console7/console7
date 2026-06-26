@@ -36,11 +36,14 @@ block() { printf 'BLOCKED by Console7 SDLC guard (%s): %s\n' "$1" "$2" >&2; exit
 # Whole-command checks — the pipe itself is the vector.
 # ---------------------------------------------------------------------------
 
-# Remote script piped into a shell. Requires a real URL/IP so prose does not
-# false-positive; tolerates sudo/env wrappers and an absolute path to the shell
-# (e.g. `| /bin/sh`, `| env bash`, `| sudo sh`).
-if printf '%s' "$cmd" | grep -Eq '(curl|wget)\b[^|]*(https?://|ftp://|[0-9]{1,3}(\.[0-9]{1,3}){3})[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(env[[:space:]]+)?([^[:space:]|]*/)?(ba|z|da|c|fi|tc|k|a)?sh\b'; then
-  block "CO-5/CO-8" "piping a remote script into a shell is prohibited. Download it, review it, pin it, then run it."
+# Remote script piped into an interpreter. Requires a real URL/IP so prose does
+# not false-positive; tolerates sudo/env wrappers and an absolute path to the
+# interpreter (e.g. `| /bin/sh`, `| env bash`, `| sudo sh`, `| python3`). The
+# interpreter alternation covers Bourne-family shells AND the general-purpose
+# runtimes present in a dev sandbox (python/node/perl/ruby/php) — `curl … | python3`
+# is the same remote-code-execution vector as `curl … | sh`.
+if printf '%s' "$cmd" | grep -Eq '(curl|wget)\b[^|]*(https?://|ftp://|[0-9]{1,3}(\.[0-9]{1,3}){3})[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(env[[:space:]]+)?([^[:space:]|]*/)?((ba|z|da|c|fi|tc|k|a)?sh|python[0-9]?|pypy[0-9]?|node(js)?|perl|ruby|php)\b'; then
+  block "CO-5/CO-8" "piping a remote script into an interpreter is prohibited. Download it, review it, pin it, then run it."
 fi
 
 # ---------------------------------------------------------------------------
@@ -49,7 +52,10 @@ fi
 # another (e.g. `sfw --help; npm install evil`).
 # ---------------------------------------------------------------------------
 
-segments="$(printf '%s' "$cmd" | sed -E 's/(\&\&|\|\||;|\&|\n)/\n/g')"
+# Split on a single `|` too (not just `||`): bash runs both pipeline stages, so
+# `sfw npm install ok | npm install evil` must NOT pass on the sfw-prefixed stage
+# alone. Mirrors the tripwire lexer, which already treats `|` as a segment break.
+segments="$(printf '%s' "$cmd" | sed -E 's/(\&\&|\|\||\||;|\&|\n)/\n/g')"
 while IFS= read -r seg; do
   [ -z "$seg" ] && continue
 
@@ -87,13 +93,17 @@ EOF
 # ---------------------------------------------------------------------------
 
 if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]])git[[:space:]]+push\b'; then
+  # Match the ref against a QUOTE-STRIPPED copy: bash strips the quotes before git
+  # sees the arg, so `git push origin 'main'` / "main" must be caught the same as
+  # the bare form (otherwise the quote char sits where the guard expects a space/:).
+  push_ref="$(printf '%s' "$cmd" | tr -d "\"'")"
   # No direct push to main — matches `main` or `refs/heads/main` as a ref token,
   # including `HEAD:main`, `HEAD:refs/heads/main`, `:main`, `:refs/heads/main`.
-  if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]:])(refs/heads/)?main([[:space:]]|$)'; then
+  if printf '%s' "$push_ref" | grep -Eq '(^|[[:space:]:])(refs/heads/)?main([[:space:]]|$)'; then
     block "CO-4.1/4.4" "no direct push to main — open a feature branch and a PR (CLAUDE.md: 'Never commit to main directly')."
   fi
   # No force-push that touches main.
-  if printf '%s' "$cmd" | grep -Eq '(--force\b|--force-with-lease\b|[[:space:]]-f\b)' && printf '%s' "$cmd" | grep -Eq '(refs/heads/)?main\b'; then
+  if printf '%s' "$cmd" | grep -Eq '(--force\b|--force-with-lease\b|[[:space:]]-f\b)' && printf '%s' "$push_ref" | grep -Eq '(refs/heads/)?main\b'; then
     block "CO-4.1" "force-push to main is prohibited (protected, linear history)."
   fi
 fi

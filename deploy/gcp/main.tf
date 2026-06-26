@@ -130,4 +130,5 @@ module "keybroker_signing" {
   region               = var.region
   name_prefix          = var.name_prefix
   kms_protection_level = var.keybroker_kms_protection_level
+  require_hsm          = var.keybroker_require_hsm
 }

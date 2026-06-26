@@ -111,8 +111,15 @@ func commonDeny() []string {
 		"Read(/" + HooksDir + "/**)",
 		"Edit(/" + HooksDir + "/**)",
 		"Write(/" + HooksDir + "/**)",
+		// Deny Read as well as Edit/Write on the compiled policy: a non-root agent can otherwise read
+		// the locked managed-settings.json (0444) and enumerate the exact deny rules / tripwire path.
+		// Symmetric with HooksDir above (in-band defence-in-depth; the boundary controls are IAM +
+		// egress, and every value here is a public OSS constant today — so this closes a recon gap, not
+		// a secret leak, and matters most once operator-customised rules are rendered here).
+		"Read(/" + ManagedSettingsPath + ")",
 		"Edit(/" + ManagedSettingsPath + ")",
 		"Write(/" + ManagedSettingsPath + ")",
+		"Read(//etc/claude-code/**)",
 		"Edit(//etc/claude-code/**)",
 		"Write(//etc/claude-code/**)",
 	}

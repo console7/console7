@@ -1,9 +1,11 @@
 package scmgithub
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
@@ -22,6 +24,12 @@ func New(cfg Config) (*Provider, error) {
 	// Fail fast on a Config.Permissions outside the least-privilege allowlist (key or level),
 	// rather than surfacing it only on the first mint.
 	if _, err := toInstallationPermissions(cfg.Permissions); err != nil {
+		return nil, err
+	}
+	// Resolve + validate the SCM host BEFORE wiring the transport, so a cleartext or
+	// credential-bearing BaseURL fails closed and never reaches the App-JWT transport.
+	host, err := expectedHostFromBaseURL(cfg.BaseURL)
+	if err != nil {
 		return nil, err
 	}
 
@@ -49,11 +57,7 @@ func New(cfg Config) (*Provider, error) {
 	// Use the configured (validated) granted-permission ceiling for minting.
 	p.perms = cfg.Permissions
 	// Scope the provider to the SCM host it actually talks to, so a RepoRef for a different host
-	// fails closed rather than minting a homonym on this endpoint.
-	host, err := expectedHostFromBaseURL(cfg.BaseURL)
-	if err != nil {
-		return nil, err
-	}
+	// fails closed rather than minting a homonym on this endpoint (host resolved+validated above).
 	p.expectedHost = host
 	return p, nil
 }
@@ -66,7 +70,18 @@ func expectedHostFromBaseURL(baseURL string) (string, error) {
 	}
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("scmgithub: Config.BaseURL %q is not a valid URL with a host", baseURL)
+		// Do not echo the raw value: a malformed URL may still carry userinfo a caller logs.
+		return "", errors.New("scmgithub: Config.BaseURL is not a valid URL with a host")
+	}
+	// Fail closed on cleartext: ghinstallation POSTs the App JWT to this base and receives the
+	// installation token back, so an http:// base would expose both on the wire. Enforce https to
+	// match the inference providers (inference-anthropic/-vertex reject non-https identically), and
+	// reject embedded userinfo so a credential cannot ride in the base URL.
+	if u.User != nil {
+		return "", errors.New("scmgithub: Config.BaseURL must not embed userinfo credentials")
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return "", fmt.Errorf("scmgithub: Config.BaseURL %q must use https", u.Redacted())
 	}
 	return u.Host, nil
 }

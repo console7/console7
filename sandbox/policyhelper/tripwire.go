@@ -75,7 +75,7 @@ func segmentMutates(toks []string) (bool, string) {
 		return true, cmd
 	}
 	// Tool subcommand, found PAST the tool's global flags (so `kubectl --context x delete` is caught).
-	if sub, ok := firstNonFlag(args); ok && mutatingSubcommands[cmd+" "+sub] {
+	if sub, ok := firstNonFlag(cmd, args); ok && mutatingSubcommands[cmd+" "+sub] {
 		return true, cmd + " " + sub
 	}
 	// find is read-only EXCEPT with -delete / -exec / -execdir.
@@ -136,14 +136,10 @@ func (l *lexer) unquoted(runes []rune, i int) int {
 	case '<':
 		l.flushTok() // input redirect: a token boundary, not mutating
 	case '>':
-		advance, isRedirect, literal := scanGT(runes, i)
-		if literal {
-			l.add(r) // "->" arrow, not a redirect
-		} else {
-			l.redirect = l.redirect || isRedirect
-			i += advance
-			l.flushTok()
-		}
+		advance, isRedirect := scanGT(runes, i)
+		l.redirect = l.redirect || isRedirect
+		i += advance
+		l.flushTok()
 	default:
 		l.add(r)
 	}
@@ -174,19 +170,18 @@ func shellScan(command string) (segments [][]string, redirect bool) {
 	return l.segments, l.redirect
 }
 
-// scanGT classifies a '>' at index i: a "->" arrow (literal, kept in the token), or a file-write
-// redirect — unless it is a fd-dup (>&). advance is the extra runes the redirect token consumed
-// (for ">>"); the caller adds it to i.
-func scanGT(runes []rune, i int) (advance int, isRedirect, literal bool) {
-	if i > 0 && runes[i-1] == '-' {
-		return 0, false, true
-	}
+// scanGT classifies a '>' at index i: a file-write redirect — unless it is a fd-dup (>&). advance is
+// the extra runes the redirect token consumed (for ">>"); the caller adds it to i. NOTE: bash has no
+// "->" arrow token; '>' is ALWAYS a metacharacter regardless of the preceding rune, so `word->file`
+// is the word `word-` plus a redirect to `file`. We therefore do NOT special-case a leading '-'
+// (doing so let `cmd->file` write to a file while reading as non-mutating).
+func scanGT(runes []rune, i int) (advance int, isRedirect bool) {
 	j := i + 1
 	if j < len(runes) && runes[j] == '>' {
 		j++
 	}
 	isRedirect = j >= len(runes) || runes[j] != '&' // a write redirect, not a >& fd-dup
-	return j - 1 - i, isRedirect, false
+	return j - 1 - i, isRedirect
 }
 
 // stripPrefix drops leading inline `VAR=val` assignments and command wrappers (sudo/xargs/env/...)
@@ -205,10 +200,14 @@ func stripPrefix(toks []string) []string {
 			return toks
 		}
 		toks = toks[1:]
-		// skip the wrapper's options/assignments/values until the next bare command word.
+		// skip the wrapper's options/assignments/values until the next bare command word. Use the
+		// value-flag table FOR THIS WRAPPER: the same flag differs in arity across wrappers (`-n` takes
+		// a value for `nice` but is boolean for `sudo`), so a context-free table would swallow the real
+		// command (`sudo -n rm x` -> `[x]`, read as non-mutating).
+		vf := wrapperValueFlags[w]
 		for len(toks) > 0 && isWrapperArg(toks[0]) {
 			// a value-taking flag like `-u` / `--user` consumes the NEXT token too.
-			if valueFlags[toks[0]] && len(toks) >= 2 {
+			if vf[toks[0]] && len(toks) >= 2 {
 				toks = toks[2:]
 				continue
 			}
@@ -221,19 +220,42 @@ func stripPrefix(toks []string) []string {
 // firstNonFlag returns the first token that is not a flag/flag-value/assignment — a tool's
 // subcommand sits there even past global flags (e.g. `kubectl --context x delete` -> "delete").
 // Value-taking flags consume their following value so it is not mistaken for the subcommand.
-func firstNonFlag(args []string) (string, bool) {
+//
+// Two layers guard against a flag VALUE being returned as the subcommand: known global value-flags
+// (subcommandValueFlags) consume their next token, and as a backstop any non-flag token that does
+// not look like a subcommand word (a path/URL/number — e.g. the `/repo` of `git --git-dir /repo
+// push`) is skipped rather than returned. A real subcommand is always a bare word (push/delete/...).
+func firstNonFlag(cmd string, args []string) (string, bool) {
+	vf := subcommandValueFlags[cmd]
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if valueFlags[a] {
-			i++ // skip the flag's value
+		if vf[a] {
+			i++ // consume the flag's value so it is not read as the subcommand
 			continue
 		}
 		if strings.HasPrefix(a, "-") || isAssignment(a) {
 			continue
 		}
+		if !looksLikeSubcommand(a) {
+			continue // a path/URL value of an unrecognised global flag, not a subcommand
+		}
 		return a, true
 	}
 	return "", false
+}
+
+// looksLikeSubcommand reports whether a token has the shape of a tool subcommand: a bare word
+// starting with a letter and containing no '/' or ':' (which mark paths/URLs, i.e. flag values).
+func looksLikeSubcommand(t string) bool {
+	if t == "" {
+		return false
+	}
+	c := t[0]
+	isLetter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	if !isLetter {
+		return false
+	}
+	return !strings.ContainsAny(t, "/:")
 }
 
 func isAssignment(t string) bool {
@@ -283,11 +305,39 @@ var wrappers = map[string]bool{
 	"stdbuf": true, "setsid": true,
 }
 
-// valueFlags are wrapper/tool flags that consume the following token as their value.
-var valueFlags = map[string]bool{
-	"-u": true, "--user": true, "-n": true, "--nice": true, "-I": true, "-i": true,
-	"--signal": true, "-s": true, "-C": true, "--context": true, "--namespace": true, "-H": true,
-	"-chdir": true, "--prefix": true,
+// wrapperValueFlags maps a command wrapper to the flags that consume the FOLLOWING token as a value.
+// It is PER-WRAPPER because the same flag differs in arity across wrappers — `-n` takes a value for
+// `nice` (niceness) but is boolean for `sudo` (non-interactive) and `env`. A context-free table
+// treated `-n`/`-i`/`-s`/`-H` as value-taking for every wrapper and so swallowed the real command
+// (`sudo -n rm x`, `env -i rm x` read as `[x]`, non-mutating). Wrappers absent here
+// (nohup/setsid/command/builtin/exec/time-as-/usr/bin/time) have no value-taking flags we model;
+// their flags are treated as boolean (skip one token only), which over-flags rather than under-flags.
+var wrapperValueFlags = map[string]map[string]bool{
+	"sudo":    {"-u": true, "--user": true, "-g": true, "--group": true, "-h": true, "--host": true, "-p": true, "--prompt": true, "-R": true, "--chroot": true, "-C": true, "--close-from": true, "-T": true, "--command-timeout": true, "-U": true, "--other-user": true, "-r": true, "--role": true, "-t": true, "--type": true},
+	"doas":    {"-u": true, "-C": true},
+	"env":     {"-u": true, "--unset": true, "-C": true, "--chdir": true, "-S": true, "--split-string": true},
+	"nice":    {"-n": true, "--adjustment": true},
+	"ionice":  {"-c": true, "--class": true, "-n": true, "--classdata": true, "-p": true, "--pid": true},
+	"timeout": {"-s": true, "--signal": true, "-k": true, "--kill-after": true},
+	"xargs":   {"-I": true, "-i": true, "--replace": true, "-n": true, "--max-args": true, "-P": true, "--max-procs": true, "-s": true, "--max-chars": true, "-L": true, "-d": true, "--delimiter": true, "-E": true, "-a": true, "--arg-file": true},
+	"stdbuf":  {"-i": true, "--input": true, "-o": true, "--output": true, "-e": true, "--error": true},
+}
+
+// subcommandValueFlags maps a subcommand-bearing tool to its GLOBAL flags that consume the following
+// token as a value, so a value is not mistaken for the subcommand (`git --git-dir /repo push` must
+// resolve to subcommand `push`, not `/repo`). PER-TOOL because the same flag differs in arity across
+// tools — `--user` takes a value for kubectl but is BOOLEAN for systemctl, so a global table would
+// swallow systemctl's real subcommand (`systemctl --user start` -> miss `start`). The
+// looksLikeSubcommand backstop catches the long tail of unmodeled value-flags whose value is a
+// path/URL/number; this table is only needed for flags whose value can be a bare word.
+var subcommandValueFlags = map[string]map[string]bool{
+	"kubectl":   {"-n": true, "--namespace": true, "--context": true, "--cluster": true, "--user": true, "--server": true, "--kubeconfig": true, "--as": true, "-s": true},
+	"helm":      {"-n": true, "--namespace": true, "--kube-context": true, "--kubeconfig": true},
+	"git":       {"-C": true, "--git-dir": true, "--work-tree": true, "--exec-path": true},
+	"docker":    {"-H": true, "--host": true, "--context": true, "--config": true, "--log-level": true},
+	"podman":    {"-H": true, "--host": true, "--context": true},
+	"gsutil":    {"-o": true},
+	"systemctl": {"-H": true, "--host": true, "-M": true, "--machine": true},
 }
 
 // mutatingVerbs are single-word commands that mutate at command position.

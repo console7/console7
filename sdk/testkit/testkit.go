@@ -58,6 +58,13 @@ type Contract struct {
 // the contract's interface, so a caller can skip rather than fail.
 var ErrProviderAbsent = errors.New("testkit: provider not supplied for this contract")
 
+// ErrRigRequired is returned by a contract check that cannot be FULLY exercised without an optional
+// rig (e.g. the SecretsProvider injection contracts need ProviderUnderTest.SecretsRig to drive the
+// attended/beneficiary/ownership gate against a real owned sandbox). Run records such a contract as
+// Skipped — NOT a pass — so an absent rig never yields a spurious certification, and RunContract
+// returns it so the caller can skip rather than treat it as a verified pass.
+var ErrRigRequired = errors.New("testkit: rig required to fully exercise this contract (supply ProviderUnderTest.SecretsRig)")
+
 // check pairs a Contract with the assertion that upholds it and a predicate that reports
 // whether the relevant provider was supplied. The assertion uses ONLY interface methods,
 // so it holds for any conforming implementation, not just the dev/in-memory ones.
@@ -362,7 +369,9 @@ func checkSecretsInjectSubscriptionToken(ctx context.Context, p ProviderUnderTes
 	// gate. With a rig, exercise the gate against a REAL owned sandbox so the
 	// refusals are attributable to it, and confirm the valid case succeeds.
 	if p.SecretsRig == nil {
-		return nil
+		// No rig: the unknown-handle refusals above prove nothing about the attended/beneficiary/
+		// ownership gate, so do NOT report a pass. Signal a skip (Run records it as Skipped).
+		return ErrRigRequired
 	}
 	return checkSecretsInjectWithRig(ctx, p)
 }
@@ -423,7 +432,9 @@ func checkSecretsInjectOrgCredential(ctx context.Context, p ProviderUnderTest) e
 	// Without a rig the above only proves "some error"; with a rig, exercise delivery against REAL
 	// owned/cross-session sandboxes and confirm the owned case succeeds.
 	if p.SecretsRig == nil {
-		return nil
+		// No rig: the unknown-handle refusals above prove nothing about the attended/beneficiary/
+		// ownership gate, so do NOT report a pass. Signal a skip (Run records it as Skipped).
+		return ErrRigRequired
 	}
 	const owner = interfaces.Subject("conf-org-owner")
 	const session = interfaces.SessionID("conf-org-inject")
@@ -461,7 +472,9 @@ func checkSecretsInjectInferenceCredential(ctx context.Context, p ProviderUnderT
 		return errors.New("injected an inference credential into a non-owned sandbox")
 	}
 	if p.SecretsRig == nil {
-		return nil
+		// No rig: the unknown-handle refusals above prove nothing about the attended/beneficiary/
+		// ownership gate, so do NOT report a pass. Signal a skip (Run records it as Skipped).
+		return ErrRigRequired
 	}
 	const owner = interfaces.Subject("conf-inf-owner")
 	const session = interfaces.SessionID("conf-inf-inject")
@@ -769,8 +782,9 @@ func Contracts() []Contract {
 }
 
 // RunContract runs the single registered contract for iface.method against put. It
-// returns ErrProviderAbsent if no implementation was supplied for that interface (so the
-// caller can skip), a descriptive error if the contract is violated, or nil if it holds.
+// returns ErrProviderAbsent if no implementation was supplied for that interface, ErrRigRequired if
+// an optional rig needed to fully exercise the contract was absent (both mean "skip, not pass"), a
+// descriptive error if the contract is violated, or nil if it holds.
 func RunContract(ctx context.Context, put ProviderUnderTest, iface, method string) error {
 	for _, c := range registry() {
 		if c.contract.Interface == iface && c.contract.Method == method {
@@ -792,16 +806,25 @@ func Run(put ProviderUnderTest) Result {
 		if !c.present(put) {
 			continue
 		}
+		err := c.run(ctx, put)
+		if errors.Is(err, ErrRigRequired) {
+			// Not fully exercised (an optional rig was absent): a SKIP, deliberately NOT added to
+			// Checked, so an absent rig can never read as a verified pass.
+			res.Skipped = append(res.Skipped, c.contract)
+			continue
+		}
 		res.Checked = append(res.Checked, c.contract)
-		if err := c.run(ctx, put); err != nil {
+		if err != nil {
 			res.Failed = append(res.Failed, c.contract)
 		}
 	}
 	return res
 }
 
-// Result is the outcome of a conformance Run: the contracts checked and which failed.
+// Result is the outcome of a conformance Run: the contracts checked, which failed, and which were
+// skipped because an optional rig needed to fully exercise them was absent (a skip is NOT a pass).
 type Result struct {
 	Checked []Contract
 	Failed  []Contract
+	Skipped []Contract
 }

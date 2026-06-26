@@ -689,3 +689,44 @@ func TestInject_AADBindingRejectsSwappedSecret(t *testing.T) {
 		t.Error("a swapped secret was delivered — AAD owner-binding not enforced")
 	}
 }
+
+// hookMinter wraps InMemoryAccessTokenMinter to fire onMint INSIDE MintAccessToken (before it
+// returns), so a single-threaded test can land a RevokeSubject during the remote-mint window the
+// inference-injection TOCTOU lives in — mirroring hookStore for the subscription path.
+type hookMinter struct {
+	*InMemoryAccessTokenMinter
+	onMint func()
+}
+
+func (h *hookMinter) MintAccessToken(ctx context.Context, scopes []string, lifetime time.Duration) ([]byte, time.Time, error) {
+	if h.onMint != nil {
+		h.onMint()
+	}
+	return h.InMemoryAccessTokenMinter.MintAccessToken(ctx, scopes, lifetime)
+}
+
+// TestInjectInferenceCredential_AtomicRevocationDuringMint proves the inference path re-checks the
+// revocation tombstone ATOMICALLY with delivery: a RevokeSubject that commits DURING the remote mint
+// (after the fast-fail check) must cause the delivery to be refused, so no bearer reaches an
+// offboarded subject's session. Without the under-p.mu re-check this leaked a fresh token.
+func TestInjectInferenceCredential_AtomicRevocationDuringMint(t *testing.T) {
+	p, _, _, reg := newTestProvider()
+	ctx := context.Background()
+	owned := reg.Provision("alice", "s1")
+	deadline := fixedNow.Add(30 * time.Minute)
+
+	base := NewInMemoryAccessTokenMinter()
+	base.now = func() time.Time { return fixedNow }
+	hm := &hookMinter{InMemoryAccessTokenMinter: base, onMint: func() { _ = p.RevokeSubject(ctx, "alice") }}
+	p.SetAccessTokenMinter(hm)
+
+	err := p.InjectInferenceCredential(ctx, interfaces.InferenceCredentialInjection{
+		Subject: "alice", SessionID: "s1", Sandbox: owned, SessionDeadline: deadline,
+	})
+	if err == nil || !strings.Contains(err.Error(), "revoked during injection") {
+		t.Fatalf("expected refusal due to revocation during the mint window, got: %v", err)
+	}
+	if got, ok := reg.InferenceInjected(owned); ok {
+		t.Errorf("inference credential delivered to a subject revoked during injection: got=%q", got)
+	}
+}
