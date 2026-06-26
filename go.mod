@@ -19,7 +19,7 @@ module github.com/console7/console7
 go 1.25.11
 
 require (
-	cloud.google.com/go/iam v1.7.0
+	cloud.google.com/go/iam v1.11.0
 	cloud.google.com/go/kms v1.31.0
 	cloud.google.com/go/secretmanager v1.20.0
 	cloud.google.com/go/storage v1.62.3
