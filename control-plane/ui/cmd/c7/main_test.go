@@ -33,7 +33,7 @@ func TestWireDevSpine_DrivesAFullSession(t *testing.T) {
 	for _, want := range []string{
 		"PROPOSED commit ",
 		"PR: https://github.com/acme/widgets/pull/",
-		"evidence chain VERIFIED",
+		"evidence chain + lineage VERIFIED",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("session output missing %q\n---\n%s", want, got)

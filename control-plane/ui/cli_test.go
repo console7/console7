@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,8 @@ import (
 	"github.com/console7/console7/control-plane/orchestrator"
 	"github.com/console7/console7/sdk/interfaces"
 )
+
+type lineageFn = func(caRoot crypto.PublicKey, seq uint64, rec interfaces.EvidenceRecord) error
 
 type fakeRunner struct {
 	sum orchestrator.Summary
@@ -23,11 +26,21 @@ func (f *fakeRunner) Run(_ context.Context, req orchestrator.LaunchRequest) (orc
 
 type okVerifier struct{}
 
-func (okVerifier) VerifyChain() error { return nil }
+func (okVerifier) VerifyChain() error            { return nil }
+func (okVerifier) VerifyLineage(lineageFn) error { return nil }
 
 type badVerifier struct{}
 
-func (badVerifier) VerifyChain() error { return errors.New("hash mismatch at record 3") }
+func (badVerifier) VerifyChain() error            { return errors.New("hash mismatch at record 3") }
+func (badVerifier) VerifyLineage(lineageFn) error { return nil }
+
+// badLineageVerifier passes the hash chain but fails per-record lineage verification.
+type badLineageVerifier struct{}
+
+func (badLineageVerifier) VerifyChain() error { return nil }
+func (badLineageVerifier) VerifyLineage(lineageFn) error {
+	return errors.New("record 2 lineage signature invalid")
+}
 
 func TestLaunchSpec_toRequest(t *testing.T) {
 	// owner/name defaults the host; persona defaults to author; subscription is attended-gated.
@@ -91,7 +104,7 @@ func TestLaunch_RendersProposalAndVerifiedEvidence(t *testing.T) {
 		"inference resolved -> https://api.anthropic.com",
 		"PROPOSED commit abc1234 (1 file) signed by NHI nhi/s1/author",
 		"PR: https://github.com/acme/widgets/pull/7",
-		"evidence chain VERIFIED (7 records)",
+		"evidence chain + lineage VERIFIED (7 records)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q\n---\n%s", want, got)
@@ -133,5 +146,19 @@ func TestLaunch_NoChangeAndTamperAndError(t *testing.T) {
 	err4 := Launch(context.Background(), &fakeRunner{}, "t", LaunchSpec{SessionID: "s", Repo: "a/b", Prompt: "p"}, nil, &out4) // missing branch
 	if err4 == nil || !strings.Contains(out4.String(), "branch is required") {
 		t.Errorf("validation error not surfaced: err=%v out=%q", err4, out4.String())
+	}
+}
+
+// TestLaunch_LineageInvalidVerdict: a chain that hash-verifies but whose per-record lineage signature
+// fails must render LINEAGE INVALID, never a clean VERIFIED verdict.
+func TestLaunch_LineageInvalidVerdict(t *testing.T) {
+	r := &fakeRunner{sum: orchestrator.Summary{Records: 4, HeadSHA: "abcdef0", FilesChanged: []string{"x"}}}
+	var out strings.Builder
+	_ = Launch(context.Background(), r, "t", LaunchSpec{SessionID: "s", Repo: "a/b", Branch: "x", Prompt: "p"}, badLineageVerifier{}, &out)
+	if !strings.Contains(out.String(), "evidence LINEAGE INVALID") {
+		t.Errorf("expected LINEAGE INVALID verdict, got: %s", out.String())
+	}
+	if strings.Contains(out.String(), "VERIFIED") {
+		t.Errorf("must not report VERIFIED when lineage fails, got: %s", out.String())
 	}
 }

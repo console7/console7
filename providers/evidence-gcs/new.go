@@ -1,11 +1,14 @@
 package evidencegcs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
+
+	"github.com/console7/console7/control-plane/evidence"
 )
 
 // New constructs the production Store, dialing GCS. Credentials resolve from Application Default
@@ -60,14 +63,7 @@ func (s *Store) preflight(ctx context.Context) error {
 	if n == 0 {
 		return nil
 	}
-	// SAST-DEFERRED VVAH-2026-06-25 #16: preflight verifies the tail slot EXISTS, not that its hash
-	// chains from its predecessor. Since chainHash uses no secret, a workload-SA holder who reads the
-	// real tail can craft a valid forward record at the next slot and fork the chain. A tail
-	// chain-integrity recompute here (and sequence-bound signatures, #31) is deferred to Phase 2
-	// (evidence hardening); production retention-LOCK is the boundary control. See docs/ROADMAP.md
-	// "SAST carry-forward". KNOWN/ACCEPTED, not an open finding. (The stray-object count inflation
-	// half of this finding IS fixed — Count() now filters to record-shaped keys.)
-	_, ok, err := s.At(ctx, n-1)
+	tail, ok, err := s.At(ctx, n-1)
 	if err != nil {
 		return fmt.Errorf("evidencegcs: startup tail read failed at sequence %d: %w", n-1, err)
 	}
@@ -76,6 +72,27 @@ func (s *Store) preflight(ctx context.Context) error {
 		// stray non-record object under the prefix inflating the count. Fail closed rather than let
 		// evidence.New's best-effort hydration publish a sink that looks empty and collides at 0.
 		return fmt.Errorf("evidencegcs: store reports %d records but the tail at sequence %d is missing — refusing to start on a gapped/tampered backing", n, n-1)
+	}
+	// Tail corruption check (fail-fast defence-in-depth): recompute the tail's chain hash from its
+	// predecessor and its own committed content; a mismatch means the backing was corrupted or clumsily
+	// tampered, caught at startup before the Sink hydrates. The full chainHash inputs round-trip through
+	// the GCS codec (the same recompute VerifyChain relies on). NOTE: this is NOT the #16 closer — a
+	// COMPETENT forger recomputes this secret-less hash too; the authoritative tamper-RESISTANCE control
+	// is per-record lineage verification (evidence.Sink.VerifyLineage, run in the verify path), whose
+	// position-bound NHI signatures cannot be re-minted.
+	var prior []byte
+	if n >= 2 {
+		prev, okp, perr := s.At(ctx, n-2)
+		if perr != nil {
+			return fmt.Errorf("evidencegcs: startup predecessor read failed at sequence %d: %w", n-2, perr)
+		}
+		if !okp {
+			return fmt.Errorf("evidencegcs: the tail's predecessor at sequence %d is missing — refusing to start on a gapped backing", n-2)
+		}
+		prior = prev.Ref.Hash
+	}
+	if want := evidence.ChainHash(prior, tail.Ref.Sequence, tail.Ref.AppendedAt, tail.Record); !bytes.Equal(want, tail.Ref.Hash) {
+		return fmt.Errorf("evidencegcs: tail at sequence %d does not chain from its predecessor — refusing to start on a corrupt/tampered backing", n-1)
 	}
 	return nil
 }

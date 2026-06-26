@@ -7,6 +7,7 @@ package ui
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"fmt"
 	"io"
@@ -24,10 +25,18 @@ type Runner interface {
 }
 
 // EvidenceVerifier verifies the session's WORM evidence chain for the review verdict. The
-// control-plane evidence Sink satisfies it (VerifyChain). Optional: a nil verifier renders the
-// record count without a verified/invalid verdict.
+// control-plane evidence Sink satisfies it. Optional: a nil verifier renders the record count
+// without a verified/invalid verdict.
 type EvidenceVerifier interface {
+	// VerifyChain checks the hash-chain integrity (sink-authoritative ordering + the tamper-evidence
+	// link between records).
 	VerifyChain() error
+	// VerifyLineage verifies EVERY record's per-record lineage signature: it calls perRecord with the
+	// sink's trust root, the record's AUTHORITATIVE chain sequence, and the record. The orchestrator's
+	// VerifyRecordPayload satisfies perRecord. This is what catches a forged/replayed record whose
+	// (secret-less) chain hash is recomputable but whose position-bound NHI signature cannot be
+	// re-minted — i.e. it makes the chain tamper-RESISTANT, not merely tamper-evident.
+	VerifyLineage(perRecord func(caRoot crypto.PublicKey, seq uint64, rec interfaces.EvidenceRecord) error) error
 }
 
 // LaunchSpec is the CLI's flag-derived description of one session to launch — the thin, validated
@@ -177,7 +186,14 @@ func renderSummary(e *errWriter, id interfaces.SessionID, sum orchestrator.Summa
 		e.printf("session %s: evidence chain INVALID: %v\n", id, err)
 		return
 	}
-	e.printf("session %s: evidence chain VERIFIED (%d records)\n", id, sum.Records)
+	// Beyond hash-chain integrity, verify every record's per-record lineage signature (human → NHI →
+	// action at its real chain position). This is the check a forged/replayed record fails — the
+	// chain hash alone is recomputable without a secret.
+	if err := ev.VerifyLineage(orchestrator.VerifyRecordPayload); err != nil {
+		e.printf("session %s: evidence LINEAGE INVALID: %v\n", id, err)
+		return
+	}
+	e.printf("session %s: evidence chain + lineage VERIFIED (%d records)\n", id, sum.Records)
 }
 
 func shortSHA(sha string) string {
