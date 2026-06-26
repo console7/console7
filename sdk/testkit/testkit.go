@@ -713,6 +713,24 @@ func checkEvidenceAppend(ctx context.Context, p ProviderUnderTest) error {
 	if bytes.Equal(first.Hash, second.Hash) {
 		return errors.New("records are not distinctly hash-chained")
 	}
+	// NextSequence MUST predict the position the next Append assigns — the orchestrator binds it into
+	// the per-record lineage signature before appending, so a wrong prediction breaks attribution.
+	// (This pins the sink-level LIVENESS property; the INTEGRITY half — a mis-positioned signature
+	// failing verification — is control-plane-private and proven in the orchestrator tests.)
+	nextBefore, err := p.Evidence.NextSequence(ctx)
+	if err != nil {
+		return fmt.Errorf("NextSequence failed: %w", err)
+	}
+	third, err := p.Evidence.Append(ctx, interfaces.EvidenceRecord{
+		SessionID: "conf-session", Subject: confSubject, Persona: interfaces.PersonaAuthor,
+		Type: "conf-3", ObservedAt: late, Payload: []byte("c"),
+	})
+	if err != nil {
+		return fmt.Errorf("third append failed: %w", err)
+	}
+	if third.Sequence != nextBefore {
+		return fmt.Errorf("NextSequence (%d) did not predict the next assigned Sequence (%d)", nextBefore, third.Sequence)
+	}
 	return nil
 }
 

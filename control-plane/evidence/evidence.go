@@ -319,6 +319,17 @@ func (s *Sink) SinkID() string {
 	return s.sinkID
 }
 
+// NextSequence returns the chain position the next Append will assign (Append uses s.count under the
+// same lock), so the orchestrator can bind it into the per-record signature before appending.
+func (s *Sink) NextSequence(ctx context.Context) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count, nil
+}
+
 // Len returns the number of committed records. Test/inspection hook, signature-compatible
 // with devkit.MemEvidence so call sites swap without change.
 //

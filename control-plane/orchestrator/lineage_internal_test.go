@@ -45,7 +45,7 @@ func TestVerifyRecordPayload_RejectsPersonaNotMatchingNHI(t *testing.T) {
 
 	// Forge: the author session signs an evidence TBS that CLAIMS persona "operate".
 	const nhi = "nhi/s1/author"
-	tbs := payloadTBS("alice", "s1", interfaces.PersonaOperate, nhi, "commit-signed", "x")
+	tbs := payloadTBS(0, "alice", "s1", interfaces.PersonaOperate, nhi, "commit-signed", "x")
 	sig, err := b.SignSession(ctx, "s1", tbs)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
@@ -58,19 +58,19 @@ func TestVerifyRecordPayload_RejectsPersonaNotMatchingNHI(t *testing.T) {
 		SessionID: "s1", Subject: "alice", Persona: interfaces.PersonaOperate,
 		Type: "commit-signed", Payload: payload,
 	}
-	if err := VerifyRecordPayload(ca.Root(), rec); err == nil {
+	if err := VerifyRecordPayload(ca.Root(), 0, rec); err == nil {
 		t.Error("verified an evidence record whose persona does not match its certified NHI")
 	}
 
 	// Sanity: an author record with the matching persona still verifies.
-	tbsOK := payloadTBS("alice", "s1", interfaces.PersonaAuthor, nhi, "commit-signed", "x")
+	tbsOK := payloadTBS(0, "alice", "s1", interfaces.PersonaAuthor, nhi, "commit-signed", "x")
 	sigOK, _ := b.SignSession(ctx, "s1", tbsOK)
 	payloadOK, _ := json.Marshal(stampedPayload{Event: "commit-signed", Detail: "x", Sig: sigOK})
 	recOK := interfaces.EvidenceRecord{
 		SessionID: "s1", Subject: "alice", Persona: interfaces.PersonaAuthor,
 		Type: "commit-signed", Payload: payloadOK,
 	}
-	if err := VerifyRecordPayload(ca.Root(), recOK); err != nil {
+	if err := VerifyRecordPayload(ca.Root(), 0, recOK); err != nil {
 		t.Errorf("a matching-persona record should verify: %v", err)
 	}
 }
@@ -99,5 +99,94 @@ func TestMdInlineCode(t *testing.T) {
 	// embedded backtick runs force a longer fence so content cannot escape the span.
 	if got := mdInlineCode("a``b"); !strings.HasPrefix(got, "```") || !strings.HasSuffix(got, "```") {
 		t.Errorf("backtick content must use a longer fence, got %q", got)
+	}
+}
+
+// TestVerifyRecordPayload_RejectsReplayAtDifferentSequence proves the per-record signature now binds
+// the CHAIN POSITION (#31): a legitimately signed record verifies at its own sequence but FAILS when
+// replayed whole onto a different slot — so a workload-SA/GCS-write holder cannot move a signed record
+// to another position even by recomputing the chain hash.
+func TestVerifyRecordPayload_RejectsReplayAtDifferentSequence(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	ca := signing.NewDevCA()
+	idpPub, idpPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	b := broker.New(devkit.NewDevIdentity(idpPub, nil), devkit.NewMemSecrets(reg),
+		devkit.NewMemSCM(15*time.Minute), devkit.NewPolicyInference(devkit.SeamPolicy{}),
+		signing.NewNHIBinder(ca))
+	ctx := context.Background()
+	if _, err := b.MintSessionIdentity(ctx, broker.SessionRequest{
+		Authn:           devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID:       "s1",
+		Persona:         interfaces.PersonaAuthor,
+		Repo:            interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:          "feature/x",
+		TTL:             time.Hour,
+		SessionDeadline: time.Now().Add(30 * time.Minute),
+	}); err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	const nhi = "nhi/s1/author"
+	const seq = uint64(3)
+	tbs := payloadTBS(seq, "alice", "s1", interfaces.PersonaAuthor, nhi, "tool-call", "ls")
+	sig, err := b.SignSession(ctx, "s1", tbs)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	payload, err := json.Marshal(stampedPayload{Event: "tool-call", Detail: "ls", Sig: sig})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := interfaces.EvidenceRecord{
+		SessionID: "s1", Subject: "alice", Persona: interfaces.PersonaAuthor, Type: "tool-call", Payload: payload,
+	}
+	if err := VerifyRecordPayload(ca.Root(), seq, rec); err != nil {
+		t.Fatalf("record must verify at its own sequence: %v", err)
+	}
+	if err := VerifyRecordPayload(ca.Root(), seq+1, rec); err == nil {
+		t.Error("a record replayed at a DIFFERENT sequence must fail per-record verification")
+	}
+}
+
+// misSeqSink lies about NextSequence so appendSigned signs for a slot the record will NOT land in.
+type misSeqSink struct{ *devkit.MemEvidence }
+
+func (m misSeqSink) NextSequence(ctx context.Context) (uint64, error) {
+	n, err := m.MemEvidence.NextSequence(ctx)
+	return n + 7, err
+}
+
+// TestAppendSigned_RejectsMisPositionedSequence proves the fail-closed backstop: if the predicted
+// sequence does not equal the slot Append assigns, appendSigned errors rather than durably committing
+// a record whose lineage signature is bound to the wrong position.
+func TestAppendSigned_RejectsMisPositionedSequence(t *testing.T) {
+	reg := devkit.NewSandboxRegistry()
+	ca := signing.NewDevCA()
+	idpPub, idpPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	b := broker.New(devkit.NewDevIdentity(idpPub, nil), devkit.NewMemSecrets(reg),
+		devkit.NewMemSCM(15*time.Minute), devkit.NewPolicyInference(devkit.SeamPolicy{}),
+		signing.NewNHIBinder(ca))
+	ctx := context.Background()
+	if _, err := b.MintSessionIdentity(ctx, broker.SessionRequest{
+		Authn:           devkit.IssueDevAssertion(idpPriv, "alice", time.Now().Add(time.Hour)),
+		SessionID:       "s1",
+		Persona:         interfaces.PersonaAuthor,
+		Repo:            interfaces.RepoRef{Host: "github.com", Owner: "acme", Name: "app"},
+		Branch:          "feature/x",
+		TTL:             time.Hour,
+		SessionDeadline: time.Now().Add(30 * time.Minute),
+	}); err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	o := &Orchestrator{Broker: b, Evidence: misSeqSink{devkit.NewMemEvidence()}}
+	err = o.appendSigned(ctx, "s1", "alice", interfaces.PersonaAuthor, "nhi/s1/author", "tool-call", "ls")
+	if err == nil || !strings.Contains(err.Error(), "raced") {
+		t.Errorf("expected a fail-closed sequence-mismatch error, got: %v", err)
 	}
 }

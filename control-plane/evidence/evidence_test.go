@@ -582,3 +582,24 @@ func TestVerify_ConcurrentWithAppend(t *testing.T) {
 		}
 	}
 }
+
+// TestNextSequence_PredictsAppendedPosition proves NextSequence returns the slot the next Append
+// assigns — the property the orchestrator relies on to bind the chain position into the per-record
+// signature before appending.
+func TestNextSequence_PredictsAppendedPosition(t *testing.T) {
+	s, _ := newTestSink(t, 0)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		want, err := s.NextSequence(ctx)
+		if err != nil {
+			t.Fatalf("NextSequence: %v", err)
+		}
+		ref, err := s.Append(ctx, rec("e", time.Unix(int64(i), 0).UTC(), "p"))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if ref.Sequence != want {
+			t.Errorf("NextSequence predicted %d but Append assigned %d", want, ref.Sequence)
+		}
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/console7/console7/keybroker/broker"
@@ -46,6 +47,13 @@ type Orchestrator struct {
 	// MaxTTL is the hard session/sandbox lifetime stamped into the profile and the
 	// sandbox spec; the session and every minted credential die with it.
 	MaxTTL time.Duration
+
+	// appendMu serializes appendSigned across concurrent sessions sharing this orchestrator's
+	// evidence sink, so the NextSequence read and the matching Append are atomic — a record is
+	// always signed for the exact slot it lands in. The evidence chain is inherently linear, so
+	// serialized appends are not a throughput regression here (cf. the per-method-lock model the
+	// reference cloud-gcp provider documents in RISKS R-7).
+	appendMu sync.Mutex
 }
 
 // New returns an Orchestrator wired to the given seams and lane configuration.
@@ -745,7 +753,20 @@ type stampedPayload struct {
 // stamped as record fields are the SAME values bound into the signature, so a tampered
 // attribution column breaks verification.
 func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.SessionID, subject interfaces.Subject, persona interfaces.Persona, nhi, event, detail string) error {
-	sig, err := o.Broker.SignSession(ctx, session, payloadTBS(subject, session, persona, nhi, event, detail))
+	// Read the chain position this record will land at and BIND it into the signed bytes, so the
+	// signature attests to the record's position (a whole-record replay to another slot then fails
+	// verification). appendMu makes the NextSequence read and the Append atomic across concurrent
+	// sessions, so the predicted sequence is exactly the one Append assigns. (The post-Append
+	// assertion below is a fail-closed backstop: a mismatch — only possible if some other writer
+	// shares the sink — is surfaced loudly, never silently committed as a mis-positioned signature.)
+	o.appendMu.Lock()
+	defer o.appendMu.Unlock()
+
+	seq, err := o.Evidence.NextSequence(ctx)
+	if err != nil {
+		return fmt.Errorf("orchestrator: read next evidence sequence: %w", err)
+	}
+	sig, err := o.Broker.SignSession(ctx, session, payloadTBS(seq, subject, session, persona, nhi, event, detail))
 	if err != nil {
 		return err
 	}
@@ -764,6 +785,9 @@ func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.Sess
 	if err != nil {
 		return err
 	}
+	if ref.Sequence != seq {
+		return fmt.Errorf("orchestrator: evidence sequence raced (signed for %d, committed at %d) — record lineage is mis-positioned", seq, ref.Sequence)
+	}
 	// Mirror the committed record to the adopter's SIEM via the Stream hook. It supplements
 	// (never replaces) the durable WORM append, but a session's evidence is load-bearing, so
 	// a failed mirror fails the stamp closed rather than silently dropping the forward.
@@ -774,15 +798,19 @@ func (o *Orchestrator) appendSigned(ctx context.Context, session interfaces.Sess
 // signature covers. Binding Subject/SessionID/Persona into the signed bytes is what makes
 // the proof attributable: it ties the signature to the exact lineage columns an auditor
 // reads off the record, not merely to "the NHI signed some event".
-func payloadTBS(subject interfaces.Subject, session interfaces.SessionID, persona interfaces.Persona, nhi, event, detail string) []byte {
-	// SAST-DEFERRED VVAH-2026-06-25 #31: the TBS omits the record SEQUENCE / prior-chain-hash, so two
-	// same-session records with identical (event, detail) produce identical signed bytes — a
-	// workload-SA holder could replay a signed record at another position undetected by per-record
-	// verification. Binding the sequence into the signature is deferred to Phase 2 (evidence
-	// hardening, with #16); see docs/ROADMAP.md "SAST carry-forward". KNOWN/ACCEPTED, not an open finding.
+func payloadTBS(seq uint64, subject interfaces.Subject, session interfaces.SessionID, persona interfaces.Persona, nhi, event, detail string) []byte {
 	var b bytes.Buffer
+	// Bind the CHAIN SEQUENCE first: the per-record signature attests to the record's position, so
+	// two same-(event,detail) records no longer share signed bytes and a whole-record replay to a
+	// different chain slot fails verification (the verifier recomputes from the record's AUTHORITATIVE
+	// sequence, never a payload value). Framed as a length prefix (=8) + 8-byte big-endian value,
+	// matching the length-prefixed framing of the string fields below.
+	var u8 [8]byte
+	binary.BigEndian.PutUint64(u8[:], 8)
+	b.Write(u8[:])
+	binary.BigEndian.PutUint64(u8[:], seq)
+	b.Write(u8[:])
 	for _, s := range []string{evidenceDomain, string(subject), string(session), string(persona), nhi, event, detail} {
-		var u8 [8]byte
 		binary.BigEndian.PutUint64(u8[:], uint64(len(s)))
 		b.Write(u8[:])
 		b.WriteString(s)
@@ -793,12 +821,13 @@ func payloadTBS(subject interfaces.Subject, session interfaces.SessionID, person
 // VerifyRecordPayload checks the per-record lineage signature an orchestrator stamped into an
 // evidence record's payload. Under the trusted CA root, the embedded signature must verify
 // over the lineage tuple RECOMPUTED FROM THE RECORD'S OWN columns (Subject, SessionID,
-// Persona, event), and the certificate-bound Subject/SessionID inside the signature must
-// equal those columns. So a record whose attribution column was altered — or onto which a
-// genuine signature from another record/session was replayed — fails. It lets an auditor
-// prove every recorded event traces to the stamped human → NHI, not merely that the chain is
-// unbroken.
-func VerifyRecordPayload(caRoot crypto.PublicKey, rec interfaces.EvidenceRecord) error {
+// Persona, event) AND its AUTHORITATIVE chain position `seq` (the RecordRef.Sequence the auditor
+// reads off the chain, NOT a value in the payload), and the certificate-bound Subject/SessionID
+// inside the signature must equal those columns. So a record whose attribution column was altered —
+// or which was replayed whole onto a DIFFERENT chain slot, or onto which a genuine signature from
+// another record/session was replayed — fails. It lets an auditor prove every recorded event traces
+// to the stamped human → NHI at its real position, not merely that the chain is unbroken.
+func VerifyRecordPayload(caRoot crypto.PublicKey, seq uint64, rec interfaces.EvidenceRecord) error {
 	var sp stampedPayload
 	if err := json.Unmarshal(rec.Payload, &sp); err != nil {
 		return fmt.Errorf("orchestrator: undecodable evidence payload: %w", err)
@@ -806,9 +835,10 @@ func VerifyRecordPayload(caRoot crypto.PublicKey, rec interfaces.EvidenceRecord)
 	if sp.Event != rec.Type {
 		return errors.New("orchestrator: evidence payload event does not match record type")
 	}
-	// The signature must cover THIS record's stamped lineage; recomputing the TBS from the
-	// record's own columns binds the proof to the attribution an auditor reads.
-	tbs := payloadTBS(rec.Subject, rec.SessionID, rec.Persona, sp.Sig.NHI, sp.Event, sp.Detail)
+	// The signature must cover THIS record's stamped lineage at THIS chain position; recomputing the
+	// TBS from the record's own columns + its authoritative sequence binds the proof to both the
+	// attribution an auditor reads and the slot the record actually occupies.
+	tbs := payloadTBS(seq, rec.Subject, rec.SessionID, rec.Persona, sp.Sig.NHI, sp.Event, sp.Detail)
 	if err := signing.Verify(caRoot, tbs, sp.Sig); err != nil {
 		return err
 	}

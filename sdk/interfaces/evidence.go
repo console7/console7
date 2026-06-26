@@ -56,6 +56,20 @@ type EvidenceSink interface {
 	// database.
 	Append(ctx context.Context, rec EvidenceRecord) (RecordRef, error)
 
+	// NextSequence returns the chain position the NEXT Append will assign (the current record
+	// count). The orchestrator binds this into the per-record lineage signature BEFORE appending,
+	// so the signature attests to the record's chain position — a whole-record replay to a
+	// different slot then fails per-record verification even when the chain hash is recomputable.
+	//
+	// SECURITY: the verifier MUST recompute the signed bytes from the record's AUTHORITATIVE
+	// position (the RecordRef.Sequence it reads off the chain), NEVER from a value carried in the
+	// record payload. The returned value is exact only if the CALLER serializes the read and the
+	// matching Append (the orchestrator holds a mutex across them); the sink does not guarantee
+	// atomicity across the two calls. Even so a position mismatch is fail-closed: the verifier
+	// rejects a mis-positioned signature rather than silently accepting it, and the orchestrator
+	// asserts the committed Sequence equals the signed one.
+	NextSequence(ctx context.Context) (uint64, error)
+
 	// Stream forwards a record to the adopter's SIEM.
 	//
 	// SECURITY: streaming is to the ADOPTER's SIEM only; the implementation MUST NOT
