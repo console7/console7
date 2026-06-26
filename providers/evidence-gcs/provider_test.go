@@ -253,3 +253,44 @@ func TestNewWithObjectIO_DefaultsPrefixAndCloseNoops(t *testing.T) {
 		t.Fatalf("Close on a fake-backed Store should be a no-op, got %v", err)
 	}
 }
+
+// TestPreflight_RecomputesTailChain proves the startup tail corruption check: a real chained backing
+// preflights (validating the recompute matches round-tripped data), and a tail whose stored hash no
+// longer chains from its predecessor is rejected fail-closed.
+func TestPreflight_RecomputesTailChain(t *testing.T) {
+	obj := NewInMemoryObjectIO()
+	store := NewWithObjectIO(obj, "records")
+	ca := signing.NewDevCA()
+	signer, err := signing.NewSinkSigner(ca, "t")
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	sink := evidence.New(store, signer, ca.Root(), 0)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if _, err := sink.Append(ctx, interfaces.EvidenceRecord{
+			SessionID: "s", Subject: "a", Persona: interfaces.PersonaAuthor, Type: "e", Payload: []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	// A valid, real chain preflights — the recompute matches round-tripped AppendedAt/content.
+	if err := NewWithObjectIO(obj, "records").preflight(ctx); err != nil {
+		t.Fatalf("valid chain must preflight: %v", err)
+	}
+	// Tamper the tail's stored hash so it no longer chains; the recompute must reject it.
+	tail, ok, err := store.At(ctx, 1)
+	if err != nil || !ok {
+		t.Fatalf("read tail: err=%v ok=%v", err, ok)
+	}
+	tail.Ref.Hash = append([]byte(nil), tail.Ref.Hash...)
+	tail.Ref.Hash[0] ^= 0xFF
+	bad, err := marshalEntry(tail)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	obj.objects[store.objectName(1)] = bad
+	if err := NewWithObjectIO(obj, "records").preflight(ctx); err == nil {
+		t.Error("a tampered tail (hash no longer chains) must fail preflight")
+	}
+}

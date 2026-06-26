@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"errors"
 	"testing"
@@ -601,5 +602,81 @@ func TestNextSequence_PredictsAppendedPosition(t *testing.T) {
 		if ref.Sequence != want {
 			t.Errorf("NextSequence predicted %d but Append assigned %d", want, ref.Sequence)
 		}
+	}
+}
+
+func TestVerifyLineage_WalksAllRecordsAndSurfacesError(t *testing.T) {
+	s, root := newTestSink(t, 0)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := s.Append(ctx, rec("e", time.Unix(int64(i), 0).UTC(), "p")); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	// Walks every record, supplying the sink's OWN caRoot and each record's authoritative sequence.
+	var seen []uint64
+	if err := s.VerifyLineage(func(caRoot crypto.PublicKey, seq uint64, _ interfaces.EvidenceRecord) error {
+		if !caRoot.(ed25519.PublicKey).Equal(root) {
+			t.Error("VerifyLineage must supply the sink's own caRoot")
+		}
+		seen = append(seen, seq)
+		return nil
+	}); err != nil {
+		t.Fatalf("VerifyLineage: %v", err)
+	}
+	if len(seen) != 3 || seen[0] != 0 || seen[2] != 2 {
+		t.Errorf("VerifyLineage walked %v, want [0 1 2]", seen)
+	}
+	// A per-record failure is surfaced (fail closed).
+	if err := s.VerifyLineage(func(_ crypto.PublicKey, seq uint64, _ interfaces.EvidenceRecord) error {
+		if seq == 1 {
+			return errors.New("induced lineage failure")
+		}
+		return nil
+	}); err == nil {
+		t.Error("VerifyLineage must surface a per-record verify failure")
+	}
+}
+
+func TestChainHash_MatchesAppend(t *testing.T) {
+	s, _ := newTestSink(t, 0)
+	ctx := context.Background()
+	ref, err := s.Append(ctx, rec("e", time.Unix(5, 0).UTC(), "x"))
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	got, _, ok := s.At(0)
+	if !ok {
+		t.Fatal("missing record 0")
+	}
+	if want := ChainHash(nil, ref.Sequence, ref.AppendedAt, got); string(want) != string(ref.Hash) {
+		t.Error("ChainHash does not match the hash Append assigned")
+	}
+}
+
+// faultyStore errors on Len, to prove VerifyLineage fails CLOSED on a backing read fault rather than
+// reporting a clean verdict over zero records.
+type faultyStore struct{}
+
+func (faultyStore) Append(context.Context, Entry) error             { return nil }
+func (faultyStore) Len(context.Context) (uint64, error)             { return 0, errors.New("induced len fault") }
+func (faultyStore) At(context.Context, uint64) (Entry, bool, error) { return Entry{}, false, nil }
+
+func TestVerifyLineage_FailsClosedOnStoreFault(t *testing.T) {
+	ca := signing.NewDevCA()
+	signer, err := signing.NewSinkSigner(ca, "t")
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	s := New(faultyStore{}, signer, ca.Root(), 0)
+	called := false
+	if err := s.VerifyLineage(func(crypto.PublicKey, uint64, interfaces.EvidenceRecord) error {
+		called = true
+		return nil
+	}); err == nil {
+		t.Error("VerifyLineage must fail closed on a store read fault, not return nil over zero records")
+	}
+	if called {
+		t.Error("perRecord must not run when the length read faults")
 	}
 }

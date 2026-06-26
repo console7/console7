@@ -319,6 +319,38 @@ func (s *Sink) SinkID() string {
 	return s.sinkID
 }
 
+// VerifyLineage verifies EVERY record's per-record lineage signature, walking the chain and calling
+// perRecord with the sink's OWN trust root (caRoot), each record's AUTHORITATIVE chain sequence, and
+// the record. The orchestrator's VerifyRecordPayload satisfies perRecord. Supplying caRoot here keeps
+// the caller (the CLI) free of the trust anchor and avoids an import cycle (the per-record payload
+// format lives in the orchestrator, which imports this package). This is the check that makes the
+// chain tamper-RESISTANT: a forged/replayed record's chain hash is recomputable without a secret, but
+// its position-bound NHI signature cannot be re-minted, so it fails here.
+func (s *Sink) VerifyLineage(perRecord func(caRoot crypto.PublicKey, seq uint64, rec interfaces.EvidenceRecord) error) error {
+	// Read the STORE directly (mirroring VerifyChain), NOT the Len/At inspection hooks which collapse a
+	// backing fault to 0/absent — that would let a transient read fault report "lineage VERIFIED" over
+	// zero records (fail OPEN), the exact failure mode this check exists to close. Surface every read
+	// fault and a gap; walk every record so the verdict covers the whole chain.
+	ctx := context.Background()
+	n, err := s.store.Len(ctx)
+	if err != nil {
+		return fmt.Errorf("evidence: lineage length read failed: %w", err)
+	}
+	for i := uint64(0); i < n; i++ {
+		entry, ok, err := s.store.At(ctx, i)
+		if err != nil {
+			return fmt.Errorf("evidence: lineage read failed at sequence %d: %w", i, err)
+		}
+		if !ok {
+			return fmt.Errorf("evidence: lineage gap at sequence %d", i)
+		}
+		if err := perRecord(s.caRoot, entry.Ref.Sequence, entry.Record); err != nil {
+			return fmt.Errorf("evidence: record at sequence %d lineage verify failed: %w", entry.Ref.Sequence, err)
+		}
+	}
+	return nil
+}
+
 // NextSequence returns the chain position the next Append will assign (Append uses s.count under the
 // same lock), so the orchestrator can bind it into the per-record signature before appending.
 func (s *Sink) NextSequence(ctx context.Context) (uint64, error) {
@@ -369,6 +401,15 @@ func (s *Sink) Checkpoints() []Checkpoint {
 		out[i] = cloneCheckpoint(c)
 	}
 	return out
+}
+
+// ChainHash exposes the tamper-evidence link so a durable Store can validate at startup that its
+// tail record's stored hash chains from its predecessor (a corruption / clumsy-tamper check). It is
+// byte-identical to the hash Append computes. NOTE: this is NOT tamper-RESISTANCE — a competent
+// forger recomputes this secret-less hash too; the authoritative control is per-record lineage
+// verification (Sink.VerifyLineage), whose position-bound NHI signatures cannot be re-minted.
+func ChainHash(prior []byte, seq uint64, appendedAt time.Time, rec interfaces.EvidenceRecord) []byte {
+	return chainHash(prior, seq, appendedAt, rec)
 }
 
 // chainHash computes the tamper-evidence link over the prior hash and this record's committed
